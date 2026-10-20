@@ -1,0 +1,382 @@
+---
+title: "Project: Todo App, Part 2"
+summary: "Finish the todo app: add filters and Clear completed, save todos in localStorage with validation, and cover the reducer, storage and main flows with tests."
+order: 20
+takeaways:
+  - Keep the full list in state and compute the visible list while rendering, instead of storing it as extra state.
+  - UI state that nothing else needs, such as the current filter, stays in a plain useState inside the component that uses it.
+  - Read saved data with an initializer function, validate it before trusting it, and wrap storage calls in try/catch so a broken value never crashes the app.
+  - Tests that find elements by role and label click and type like a user, so they keep passing when you restructure the code.
+  - A test that cannot fail proves nothing, so break the code on purpose once and watch the right test go red.
+videos:
+  - title: "Persist State to localStorage in React (Complete Tutorial)"
+    channel: "Cosden Solutions"
+    duration: "19:00"
+    url: https://www.youtube.com/watch?v=RDAFJ5ToMmQ
+docs:
+  - title: "MDN: Web Storage API"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API
+  - title: "react.dev — useReducer"
+    url: https://react.dev/reference/react/useReducer
+  - title: "Testing Library — React Testing Library"
+    url: https://testing-library.com/docs/react-testing-library/intro/
+---
+
+In Part 1 you built the reducer and the core of the app: adding, toggling, deleting and editing. Now you make it feel finished. You add filters, you make the todos survive a reload, and you write the tests that let you change the code later without fear. Continue in the same project; this part assumes the files from Part 1 (`types.ts`, `todoReducer.ts`, `TodoForm`, `TodoItem`, `TodoList` and the Vitest setup).
+
+## Where you are
+
+Part 1 ends with these requirements done: add, toggle with the "items left" count, edit in place, and delete. Part 2 covers the rest:
+
+- [ ] Filter by All, Active and Completed, with the current filter marked
+- [ ] "Clear completed" removes finished todos, and the button only shows when there are some
+- [ ] Todos are saved in `localStorage`, and broken saved data never crashes the app
+- [ ] The reducer, the storage code and the main user flows have tests
+
+## Stage 4: Filters and Clear completed
+
+Add three filter buttons (All, Active, Completed) and a "Clear completed" button. Decide where the current filter lives: it is UI state that nothing outside `App` needs, so it is a plain `useState`, not part of the reducer. Compute the list to show while rendering, and keep passing the **full** list to the "items left" calculation. Mark the active filter with `aria-pressed`, put the buttons in a `role="group"` with a label, and show "Clear completed" only when at least one todo is done.
+
+<Solution>
+
+```tsx
+// src/Filters.tsx
+import type { Filter } from "./types";
+
+const FILTERS: { value: Filter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "active", label: "Active" },
+  { value: "completed", label: "Completed" },
+];
+
+type Props = { filter: Filter; onChange: (filter: Filter) => void };
+
+export function Filters({ filter, onChange }: Props) {
+  return (
+    <div role="group" aria-label="Filter todos">
+      {FILTERS.map(({ value, label }) => (
+        <button key={value} aria-pressed={filter === value} onClick={() => onChange(value)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+```
+
+```tsx
+// src/App.tsx
+import { useReducer, useState } from "react";
+import { Filters } from "./Filters";
+import { TodoForm } from "./TodoForm";
+import { TodoList } from "./TodoList";
+import { todoReducer } from "./todoReducer";
+import type { Filter } from "./types";
+
+export default function App() {
+  const [todos, dispatch] = useReducer(todoReducer, []);
+  const [filter, setFilter] = useState<Filter>("all");
+
+  const visible = todos.filter((t) =>
+    filter === "active" ? !t.done : filter === "completed" ? t.done : true,
+  );
+  const remaining = todos.filter((t) => !t.done).length;
+  const hasCompleted = todos.some((t) => t.done);
+
+  return (
+    <main>
+      <h1>Todos</h1>
+      <TodoForm onAdd={(text) => dispatch({ type: "add", id: crypto.randomUUID(), text })} />
+      <TodoList
+        todos={visible}
+        onToggle={(id) => dispatch({ type: "toggle", id })}
+        onEdit={(id, text) => dispatch({ type: "edit", id, text })}
+        onDelete={(id) => dispatch({ type: "delete", id })}
+      />
+      <footer>
+        <p>
+          {remaining} {remaining === 1 ? "item" : "items"} left
+        </p>
+        <Filters filter={filter} onChange={setFilter} />
+        {hasCompleted && (
+          <button onClick={() => dispatch({ type: "clearCompleted" })}>Clear completed</button>
+        )}
+      </footer>
+    </main>
+  );
+}
+```
+
+`visible` and `remaining` are both derived from `todos` on every render. Storing them in state would mean updating three things on every change, and forgetting one is a classic bug. With the "Active" filter and an empty result, the list shows "Nothing here.", which is the empty state from Stage 2.
+
+</Solution>
+
+## Stage 5: Save to localStorage
+
+Make the todos survive a reload, following lesson 4 of browser JavaScript (Browser storage) and lesson 8. Create `src/storage.ts` with `loadTodos()` and `saveTodos(todos)`. Two rules: saved data is **untrusted** (it can be edited by hand, truncated, or written by an older version of the app), so `loadTodos` must validate it and fall back to an empty list; and storage can throw (private mode, full quota), so wrap both calls in `try/catch`. In `App`, read the saved data once with `useReducer`'s third argument, and save with an effect whenever `todos` changes.
+
+<Solution>
+
+```ts
+// src/storage.ts
+import type { Todo } from "./types";
+
+const KEY = "todos-v1";
+
+function isTodo(value: unknown): value is Todo {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return typeof v.id === "string" && typeof v.text === "string" && typeof v.done === "boolean";
+}
+
+// Saved data is untrusted: it can be edited by hand or come from an older version.
+export function loadTodos(): Todo[] {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter(isTodo) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveTodos(todos: Todo[]) {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(todos));
+  } catch {
+    // storage full or blocked: the app keeps working without saving
+  }
+}
+```
+
+```tsx
+// src/App.tsx - the changed lines
+import { useEffect, useReducer, useState } from "react";
+import { loadTodos, saveTodos } from "./storage";
+
+const [todos, dispatch] = useReducer(todoReducer, undefined, loadTodos);
+
+useEffect(() => saveTodos(todos), [todos]);
+```
+
+`useReducer(todoReducer, undefined, loadTodos)` calls `loadTodos` once, on the first render. Writing `useReducer(todoReducer, loadTodos())` would read storage on every render. The versioned key `todos-v1` lets you change the saved shape later without clashing with old data. The effect is a good use of `useEffect`: it synchronizes with an outside system (lesson 6). When we put `{broken` into the saved value and reloaded, the app started with an empty list and no console errors, and the first save replaced the broken value with `[]`.
+
+</Solution>
+
+## Stage 6: Tests
+
+Write the tests, using lesson 18. Cover three layers:
+
+1. **Reducer** (pure, no React): add trims the text, blank text is ignored, toggle does not mutate the old array, editing to empty text deletes, clear completed keeps the unfinished ones.
+2. **Storage**: a round trip works, broken JSON gives an empty list, and entries that are not valid todos are dropped.
+3. **App flows** (render the real `App` and use it like a user): add and clear the input, no empty todos, toggle and count, edit with Enter and cancel with Escape, delete, filter, clear completed, and todos still there after unmounting and rendering again.
+
+Use `getByRole` and `getByLabelText`, not test ids. After each test, break the code on purpose (for example make `clearCompleted` return `todos`) and check that a test goes red.
+
+<Solution>
+
+```ts
+// src/todoReducer.test.ts
+import { describe, expect, test } from "vitest";
+import { todoReducer } from "./todoReducer";
+import type { Todo } from "./types";
+
+const base: Todo[] = [
+  { id: "1", text: "Buy milk", done: false },
+  { id: "2", text: "Walk dog", done: true },
+];
+
+describe("todoReducer", () => {
+  test("adds a trimmed todo", () => {
+    const next = todoReducer(base, { type: "add", id: "3", text: "  Read  " });
+    expect(next).toHaveLength(3);
+    expect(next[2]).toEqual({ id: "3", text: "Read", done: false });
+  });
+
+  test("ignores an empty todo", () => {
+    expect(todoReducer(base, { type: "add", id: "3", text: "   " })).toBe(base);
+  });
+
+  test("toggles one todo without touching the original array", () => {
+    const next = todoReducer(base, { type: "toggle", id: "1" });
+    expect(next[0].done).toBe(true);
+    expect(base[0].done).toBe(false);
+  });
+
+  test("editing to empty text deletes the todo", () => {
+    const next = todoReducer(base, { type: "edit", id: "1", text: "" });
+    expect(next.map((t) => t.id)).toEqual(["2"]);
+  });
+
+  test("clears completed todos", () => {
+    const next = todoReducer(base, { type: "clearCompleted" });
+    expect(next.map((t) => t.id)).toEqual(["1"]);
+  });
+});
+```
+
+```ts
+// src/storage.test.ts
+import { expect, test } from "vitest";
+import { loadTodos, saveTodos } from "./storage";
+
+test("round-trips todos", () => {
+  const todos = [{ id: "1", text: "A", done: false }];
+  saveTodos(todos);
+  expect(loadTodos()).toEqual(todos);
+});
+
+test("returns an empty list for broken JSON", () => {
+  localStorage.setItem("todos-v1", "{not json");
+  expect(loadTodos()).toEqual([]);
+});
+
+test("drops entries that are not valid todos", () => {
+  localStorage.setItem(
+    "todos-v1",
+    JSON.stringify([{ id: "1", text: "ok", done: false }, { id: 2, text: "bad id" }, "junk"]),
+  );
+  expect(loadTodos()).toEqual([{ id: "1", text: "ok", done: false }]);
+});
+```
+
+```tsx
+// src/App.test.tsx
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, test } from "vitest";
+import App from "./App";
+
+async function addTodo(user: ReturnType<typeof userEvent.setup>, text: string) {
+  await user.type(screen.getByLabelText("New todo"), text);
+  await user.click(screen.getByRole("button", { name: "Add" }));
+}
+
+describe("App", () => {
+  test("adds a todo and clears the input", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await addTodo(user, "Buy milk");
+
+    expect(screen.getByText("Buy milk")).toBeInTheDocument();
+    expect(screen.getByLabelText("New todo")).toHaveValue("");
+    expect(screen.getByText("1 item left")).toBeInTheDocument();
+  });
+
+  test("does not add an empty todo", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Add" }));
+
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+    expect(screen.getByText("Nothing here.")).toBeInTheDocument();
+  });
+
+  test("toggles a todo and updates the count", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await addTodo(user, "Buy milk");
+    await addTodo(user, "Walk dog");
+
+    await user.click(screen.getByRole("checkbox", { name: "Buy milk" }));
+
+    expect(screen.getByRole("checkbox", { name: "Buy milk" })).toBeChecked();
+    expect(screen.getByText("1 item left")).toBeInTheDocument();
+  });
+
+  test("edits a todo with Enter and cancels with Escape", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await addTodo(user, "Buy milk");
+
+    await user.click(screen.getByRole("button", { name: 'Edit "Buy milk"' }));
+    await user.clear(screen.getByLabelText("Edit todo"));
+    await user.type(screen.getByLabelText("Edit todo"), "Buy oat milk{Enter}");
+    expect(screen.getByText("Buy oat milk")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: 'Edit "Buy oat milk"' }));
+    await user.type(screen.getByLabelText("Edit todo"), " please{Escape}");
+    expect(screen.getByText("Buy oat milk")).toBeInTheDocument();
+    expect(screen.queryByText(/please/)).not.toBeInTheDocument();
+  });
+
+  test("deletes a todo", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await addTodo(user, "Buy milk");
+
+    await user.click(screen.getByRole("button", { name: 'Delete "Buy milk"' }));
+
+    expect(screen.queryByText("Buy milk")).not.toBeInTheDocument();
+  });
+
+  test("filters todos", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await addTodo(user, "Buy milk");
+    await addTodo(user, "Walk dog");
+    await user.click(screen.getByRole("checkbox", { name: "Walk dog" }));
+
+    await user.click(screen.getByRole("button", { name: "Active" }));
+    const list = screen.getByRole("list");
+    expect(within(list).getByText("Buy milk")).toBeInTheDocument();
+    expect(within(list).queryByText("Walk dog")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Completed" }));
+    expect(within(screen.getByRole("list")).getByText("Walk dog")).toBeInTheDocument();
+    expect(screen.queryByText("Buy milk")).not.toBeInTheDocument();
+  });
+
+  test("clears completed todos", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await addTodo(user, "Buy milk");
+    await user.click(screen.getByRole("checkbox", { name: "Buy milk" }));
+
+    await user.click(screen.getByRole("button", { name: "Clear completed" }));
+
+    expect(screen.queryByText("Buy milk")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clear completed" })).not.toBeInTheDocument();
+  });
+
+  test("remembers todos after a reload", async () => {
+    const user = userEvent.setup();
+    const first = render(<App />);
+    await addTodo(user, "Buy milk");
+    first.unmount();
+
+    render(<App />);
+
+    expect(screen.getByText("Buy milk")).toBeInTheDocument();
+  });
+});
+```
+
+Run `npx vitest run`: 16 tests pass here (5 reducer, 3 storage, 8 app). The `test-setup.ts` file clears `localStorage` before each test, so saved data from one test never leaks into the next. As a check that the tests can fail, making `clearCompleted` return `todos` unchanged turned 2 tests red (the reducer test and the app test), and restoring it turned all 16 green again.
+
+</Solution>
+
+## Stretch goals and checking your work
+
+Once everything works, try one or more of these:
+
+- **Toggle all:** a checkbox that marks every todo done, or undoes them all when all are done (a new reducer action plus a test).
+- **Filter in the URL:** keep the filter in `location.hash` (`#/active`), so it survives a reload and can be shared. Lesson 14's React Router is the heavier option.
+- **Undo delete:** keep the last deleted todo in the state and show an "Undo" button for a few seconds.
+- **Drag to reorder:** use the HTML drag and drop events or a library such as `dnd-kit`, and save the new order.
+- **Tailwind and shadcn/ui:** restyle the app with lesson 13, and check that the tests still pass without any changes. They should, because they query by role and label.
+- **Sync across tabs:** listen for the `storage` event, which other tabs fire, and update the list (a small `useSyncExternalStore` exercise).
+
+Before calling it done, check every requirement above by hand, including with the keyboard only (Tab, Enter, Space, Escape), then run:
+
+```bash
+npx tsc -b
+npm run lint
+npx vitest run
+npm run build
+```
+
+All four should finish without errors. Push the project to a GitHub repository with a short README and a screenshot. It is your first React portfolio piece, and in a later module you will add a CI workflow that runs the tests on every pull request.

@@ -1,0 +1,397 @@
+---
+title: React with TypeScript
+summary: Type props, children, state, events, refs and reusable components so the compiler catches mistakes before the browser does.
+order: 5
+takeaways:
+  - Props are a contract, so describe them with a `type` (or `interface`) and TypeScript will flag missing, extra and wrongly typed props at every use.
+  - Type optional props with `?`, fixed choices with string unions like `"primary" | "secondary"`, and callbacks with function types that list their parameter types.
+  - The `children` prop is typed `ReactNode`, and you can reuse built-in element props with `ComponentProps<"button">` instead of retyping `onClick`, `disabled` and the rest.
+  - The `useState` hook usually infers its type, but give it a generic when the starting value is empty, such as `useState<User | null>(null)` or `useState<string[]>([])`.
+  - Inline event handlers are typed for you; a handler written as a separate function needs an event type such as `ChangeEvent<HTMLInputElement>`.
+  - Refs start as `null`, so type them `useRef<HTMLInputElement>(null)` and use `ref.current?.focus()`; generic components like `List<T>` keep one type consistent across their props.
+videos:
+  - title: "TypeScript & React - Tips, Tricks, and Best Practices"
+    channel: "Jolly Coding"
+    duration: "18:08"
+    url: https://www.youtube.com/watch?v=H8QhMz3CYso
+  - title: "TypeScript in React - Full Tutorial"
+    channel: "freeCodeCamp.org"
+    duration: "51:40"
+    url: https://www.youtube.com/watch?v=aJP1AbZSqz8
+docs:
+  - title: "react.dev — Using TypeScript"
+    url: https://react.dev/learn/typescript
+  - title: "TypeScript Handbook — JSX"
+    url: https://www.typescriptlang.org/docs/handbook/jsx.html
+  - title: "TypeScript Handbook — Generics"
+    url: https://www.typescriptlang.org/docs/handbook/2/generics.html
+  - title: "React TypeScript Cheatsheets"
+    url: https://react-typescript-cheatsheet.netlify.app/
+---
+
+Almost every React job today uses TypeScript, and the Vite template you set up in lesson 1 already has it switched on. You've been writing small types since lesson 2; this lesson makes it systematic. The payoff is large: forgetting a prop, mistyping a string option or reading something that might be `null` becomes a red squiggle in your editor instead of a bug in the browser. It was written for React 19 and TypeScript 6, in the `strict` mode the Vite template enables.
+
+You already know types, unions and generics from the TypeScript module. Here you apply them to components.
+
+## Typing props
+
+A component's props are one object, so you describe that object with a `type`:
+
+```tsx
+export type User = {
+  id: number;
+  name: string;
+  email: string;
+  role: "admin" | "editor" | "viewer";
+  avatarUrl?: string; // optional
+};
+
+type UserCardProps = {
+  user: User;
+  highlight?: boolean;
+  onSelect: (id: number) => void;
+  children?: React.ReactNode;
+};
+
+export function UserCard({ user, highlight = false, onSelect, children }: UserCardProps) {
+  return (
+    <article className={highlight ? "card highlight" : "card"}>
+      <h3>{user.name}</h3>
+      <p>Role: {user.role}</p>
+      <button type="button" onClick={() => onSelect(user.id)}>
+        Select
+      </button>
+      {children}
+    </article>
+  );
+}
+```
+
+The pieces:
+
+- **Required vs optional.** `user` must be passed; `highlight?` may be left out. Destructuring defaults (`highlight = false`) pair naturally with optional props.
+- **Unions for fixed choices.** `role` can only be one of three strings. Prefer this to `string` whenever the values are a known set.
+- **Function props.** `(id: number) => void` says "a function taking a number and returning nothing". That is the type of callback props like `onSelect`, from the last lesson's inverse data flow.
+- **`children`.** `ReactNode` means anything React can render: text, numbers, elements, arrays, `null`.
+
+Now TypeScript guards every place the component is used:
+
+```tsx
+<UserCard user={user} />
+// Property 'onSelect' is missing in type '{ user: User; }' but required in type 'UserCardProps'.
+
+<UserCard user={user} onSelect={() => {}} highlight="yes" />
+// Type 'string' is not assignable to type 'boolean | undefined'.
+
+<UserCard user={{ ...user, role: "owner" }} onSelect={() => {}} />
+// Type '"owner"' is not assignable to type '"admin" | "editor" | "viewer"'.
+```
+
+<Callout type="note" title="type or interface?">
+For props either works; `type` handles unions, `interface` supports `extends`. Pick one per project (this module uses `type`).
+</Callout>
+
+### Return types and React.FC
+
+You don't annotate what a component returns; TypeScript infers it. Older tutorials write `const Card: React.FC<Props>`, but plain functions with typed parameters are simpler and are what the React docs use.
+
+### Reusing built-in element props
+
+If your `Button` wraps a `<button>`, you don't want to retype `onClick`, `disabled`, `type` and a hundred more. Extend the built-in props:
+
+```tsx
+import type { ComponentProps } from "react";
+
+type ButtonProps = ComponentProps<"button"> & {
+  variant?: "primary" | "secondary";
+};
+
+export function Button({ variant = "primary", className, ...rest }: ButtonProps) {
+  return <button className={`btn btn-${variant} ${className ?? ""}`.trim()} {...rest} />;
+}
+
+<Button variant="secondary" onClick={() => console.log("hi")} disabled>
+  Save
+</Button>;
+```
+
+`ComponentProps<"button">` is every prop a native button accepts, and `&` adds your own. The `...rest` collects the remaining props and forwards them to the real `<button>`. With a union on `variant`, `<Button variant="danger">` is an error: `Type '"danger"' is not assignable to type '"primary" | "secondary" | undefined'`.
+
+## Typing state
+
+Often you write nothing, because `useState` infers the type from the initial value:
+
+```tsx
+const [count, setCount] = useState(0);        // number
+const [name, setName] = useState("");         // string
+setCount("five");                              // error: string is not a number
+```
+
+When the initial value doesn't show the real type, add a **generic** in angle brackets:
+
+```tsx
+const [user, setUser] = useState<User | null>(null); // nothing loaded yet
+const [tags, setTags] = useState<string[]>([]);       // empty array
+```
+
+Without them TypeScript infers `null` and `never[]`, and you get errors like `Argument of type '"a"' is not assignable to parameter of type 'never'` on `items.push("a")`.
+
+A `User | null` state forces you to handle the empty case, which is exactly the bug you want caught:
+
+```tsx
+user.name;   // error: 'user' is possibly 'null'
+user?.name;  // ✓ optional chaining
+user && user.name; // ✓ narrowing
+```
+
+## Typing events
+
+Handlers written inline are typed for you, because TypeScript knows which element they are on:
+
+```tsx
+<input value={text} onChange={(event) => setText(event.target.value)} />
+// event is ChangeEvent<HTMLInputElement>, so event.target.value is a string
+```
+
+If you move the handler into its own function, TypeScript can no longer see where it will be used, so type the parameter. Without it you get `Parameter 'event' implicitly has an 'any' type`.
+
+```tsx
+import { useState } from "react";
+import type { ChangeEvent, FormEvent } from "react";
+
+type FormValues = { name: string; email: string; plan: "free" | "pro" };
+
+export function SignupForm({ onSubmit }: { onSubmit: (values: FormValues) => void }) {
+  const [values, setValues] = useState<FormValues>({ name: "", email: "", plan: "free" });
+
+  function handleChange(event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
+    const { name, value } = event.target;
+    setValues({ ...values, [name]: value });
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onSubmit(values);
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input name="name" value={values.name} onChange={handleChange} />
+      <input name="email" type="email" value={values.email} onChange={handleChange} />
+      <select name="plan" value={values.plan} onChange={handleChange}>
+        <option value="free">Free</option>
+        <option value="pro">Pro</option>
+      </select>
+      <button type="submit">Sign up</button>
+    </form>
+  );
+}
+```
+
+The pattern is `EventName<ElementType>`: `ChangeEvent<HTMLInputElement>`, `FormEvent<HTMLFormElement>`, `MouseEvent<HTMLButtonElement>`, `KeyboardEvent<HTMLInputElement>`. Your editor tells you the right type if you hover over an inline handler's `event`. Note that `[name]: value` in `handleChange` is a shortcut that TypeScript can't fully check (a mistyped input name would slip through), which is one reason lesson 11 moves to a form library.
+
+## Typing refs
+
+A **ref** is a way to hold a reference to a DOM element (lesson 7 covers `useRef` properly). The part to know now is the typing: the ref is `null` until React attaches the element, so TypeScript makes you handle that.
+
+```tsx
+import { useRef } from "react";
+
+export function FocusInput() {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  return (
+    <>
+      <input ref={inputRef} placeholder="Click the button" />
+      <button type="button" onClick={() => inputRef.current?.focus()}>
+        Focus
+      </button>
+    </>
+  );
+}
+```
+
+The generic names the element type (`HTMLInputElement` for `<input>`, `HTMLDivElement` for `<div>`). Calling `inputRef.current.focus()` without the `?.` is an error: `'ref.current' is possibly 'null'`. Don't silence it with `!` unless you are sure the element exists.
+
+## Generic components
+
+Some components work with any type of data, like a list that renders whatever items you give it. A **generic component** has a type parameter, and TypeScript infers it from the props you pass:
+
+```tsx
+import type { ReactNode } from "react";
+
+type ListProps<T> = {
+  items: T[];
+  getKey: (item: T) => string | number;
+  renderItem: (item: T) => ReactNode;
+};
+
+export function List<T>({ items, getKey, renderItem }: ListProps<T>) {
+  return (
+    <ul>
+      {items.map((item) => (
+        <li key={getKey(item)}>{renderItem(item)}</li>
+      ))}
+    </ul>
+  );
+}
+
+<List items={users} getKey={(u) => u.id} renderItem={(u) => <b>{u.name}</b>} />;
+```
+
+You didn't write `List<User>`: TypeScript saw `items` is `User[]`, so `T` is `User`, and both callbacks get a typed `u`. In `.tsx` files you may also write the generic as `<T,>` or `<T extends object>` for arrow functions, but the `function` form above avoids the issue.
+
+## Deriving types
+
+Don't copy fields between types. The utility types from the TypeScript module build one from another: `Pick<User, "id" | "name">` for a summary card, `Omit<User, "id">` for a "create user" form, and `Partial<User>` for an edit patch. `as const` on an options array lets you derive the union (`(typeof sizes)[number]`), so the list and the type can't drift apart.
+
+## Common mistakes
+
+- **Using `any`** to silence an error. It turns the checks off for everything touching that value. Use `unknown` and narrow it, or fix the type.
+- **Lying with `as`.** `user as User` tells the compiler to trust you; if the data is actually different, the error moves to runtime.
+- **Overusing `!`** (the non-null assertion) on refs and lookups instead of handling `null`.
+- **Forgetting that types vanish at runtime.** TypeScript can't check data from an API, so validate it (Zod, in later lessons).
+
+<Exercise title="Type the Badge">
+Add types to this component. `label` is required text, `color` is optional and can be `"green"`, `"red"` or `"gray"` (default `"gray"`), and `count` is an optional number shown in brackets when present.
+
+```tsx
+export function Badge({ label, color = "gray", count }) {
+  return (
+    <span className={`badge badge-${color}`}>
+      {label}
+      {count !== undefined && ` (${count})`}
+    </span>
+  );
+}
+```
+
+<Solution>
+```tsx
+type BadgeProps = {
+  label: string;
+  color?: "green" | "red" | "gray";
+  count?: number;
+};
+
+export function Badge({ label, color = "gray", count }: BadgeProps) {
+  return (
+    <span className={`badge badge-${color}`}>
+      {label}
+      {count !== undefined && ` (${count})`}
+    </span>
+  );
+}
+```
+
+`<Badge label="New" color="green" count={3} />` renders `New (3)`, while `<Badge label="x" color="blue" />` is a compile error. The check `count !== undefined` (not just `count &&`) matters, because `0` is a valid count.
+</Solution>
+</Exercise>
+
+<Exercise title="Which lines fail?">
+Using the `UserCard` and `Button` types from this lesson, say which of these four lines are type errors and why.
+
+```tsx
+const user: User = { id: 1, name: "A", email: "a@b.c", role: "admin" };
+
+<UserCard user={user} onSelect={(id) => console.log(id)} />;         // 1
+<UserCard user={user} onSelect={() => {}} highlight={1} />;          // 2
+<Button variant="primary" onClick={() => {}} disabled={false}>x</Button>; // 3
+<UserCard user={{ ...user, role: "owner" }} onSelect={() => {}} />;  // 4
+```
+
+<Solution>
+Lines 2 and 4 fail. Line 2 passes a number to `highlight`, which is `boolean | undefined`. Line 4 passes `"owner"`, which is not in the role union. Line 1 is fine (the callback's `id` is inferred as `number`), and line 3 is fine because `ComponentProps<"button">` already includes `onClick` and `disabled`.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the three errors">
+This component has three TypeScript errors. Fix them without using `any` or `!`.
+
+```tsx
+export function Profile() {
+  const [user, setUser] = useState(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function handleChange(event) {
+    console.log(event.target.value);
+  }
+
+  return (
+    <div>
+      <button onClick={() => {
+        setUser({ id: 1, name: "Asha", email: "a@b.c", role: "admin" });
+        inputRef.current.focus();
+      }}>go</button>
+      <input ref={inputRef} onChange={handleChange} />
+      <p>{user.name}</p>
+    </div>
+  );
+}
+```
+
+<Solution>
+```tsx
+import { useRef, useState } from "react";
+import type { ChangeEvent } from "react";
+
+export function Profile() {
+  const [user, setUser] = useState<User | null>(null);   // 1. state generic
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function handleChange(event: ChangeEvent<HTMLInputElement>) { // 2. event type
+    console.log(event.target.value);
+  }
+
+  return (
+    <div>
+      <button type="button" onClick={() => {
+        setUser({ id: 1, name: "Asha", email: "a@b.c", role: "admin" });
+        inputRef.current?.focus();                        // 3. ref can be null
+      }}>go</button>
+      <input ref={inputRef} onChange={handleChange} />
+      <p>{user?.name}</p>
+    </div>
+  );
+}
+```
+
+`useState(null)` only allows `null`, so give it `User | null`. The separate handler needs its event typed. The ref and the state both start empty, so use `?.` on both.
+</Solution>
+</Exercise>
+
+<Exercise title="Generic Select">
+Write a `Select<T>` component where `options` is an array of `{ label: string; value: T }`, `value` is the selected `T`, and `onChange` receives the chosen `T`. Make `T` limited to `string | number`. Using it with `options` of strings should reject a numeric `value`.
+
+<Solution>
+```tsx
+type Option<T> = { label: string; value: T };
+
+type SelectProps<T> = {
+  options: Option<T>[];
+  value: T;
+  onChange: (value: T) => void;
+};
+
+export function Select<T extends string | number>({ options, value, onChange }: SelectProps<T>) {
+  return (
+    <select
+      value={String(value)}
+      onChange={(event) => {
+        const chosen = options.find((o) => String(o.value) === event.target.value);
+        if (chosen) onChange(chosen.value);
+      }}
+    >
+      {options.map((o) => (
+        <option key={String(o.value)} value={String(o.value)}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+```
+
+An `event.target.value` from the DOM is always a string, so the component looks up the matching option to hand back the original `T`. With `options={[{ label: "S", value: "s" }]}` and `value={3}`, TypeScript reports `Type 'number' is not assignable to type '"s"'`. Used with `useState<"s" | "m" | "l">`, passing `onChange={setSize}` just works.
+</Solution>
+</Exercise>

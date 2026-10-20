@@ -1,0 +1,103 @@
+---
+title: "Web Foundations Quiz"
+summary: "Check that you can explain how a page reaches the browser and use the terminal, Git and npm with confidence."
+order: 99
+quiz:
+  - question: "Which part of a URL is never sent to the server?"
+    options:
+      - "The fragment (the part after `#`)"
+      - "The query string"
+      - "The path"
+      - "The port"
+    answer: 0
+    explanation: "The fragment is used only by the browser to jump to a position in the page. Path, query and host all travel in the request."
+  - question: "What does DNS do?"
+    options:
+      - "Translates a domain name into an IP address"
+      - "Renders HTML into pixels"
+      - "Encrypts the connection"
+      - "Stores cookies for a site"
+    answer: 0
+    explanation: "DNS is the internet's phone book. Encryption comes from TLS, and rendering is done by the browser."
+  - question: "A user is logged in but tries to open an admin page they are not allowed to see. Which status code fits best?"
+    options:
+      - "`404 Not Found`"
+      - "`500 Internal Server Error`"
+      - "`403 Forbidden`"
+      - "`401 Unauthorized`"
+    answer: 2
+    explanation: "`403` means the server knows who you are and refuses. `401` means it does not know who you are and you should authenticate."
+  - question: "Which HTTP method is idempotent but NOT safe?"
+    options:
+      - "`GET`"
+      - "`PATCH`"
+      - "`POST`"
+      - "`PUT`"
+    answer: 3
+    explanation: "`PUT` changes server state (not safe), but sending it twice leaves the same result as sending it once (idempotent). `GET` is both safe and idempotent; `POST` is neither."
+  - question: "What does HTTP being stateless mean?"
+    options:
+      - "Servers never store any data"
+      - "Each request is independent, so the server only knows who you are if you send identifying data such as a cookie"
+      - "Requests can only be sent once"
+      - "Responses are never cached"
+    answer: 1
+    explanation: "Statelessness is about the protocol: every request stands alone. Cookies and tokens are how identity is carried between requests."
+  - question: "Which script attribute downloads in parallel with HTML parsing and runs after parsing finishes, in document order?"
+    options:
+      - "`preload`"
+      - "`blocking`"
+      - "`async`"
+      - "`defer`"
+    answer: 3
+    explanation: "`defer` keeps order and waits for the HTML. `async` runs as soon as the file arrives, in any order."
+  - question: "What is the correct order of the browser rendering pipeline?"
+    options:
+      - "Parse HTML, composite, layout, paint"
+      - "Layout, parse HTML, paint, build the render tree"
+      - "Paint, layout, parse HTML, composite"
+      - "Parse HTML and CSS, build the render tree, layout, paint, composite"
+    answer: 3
+    explanation: "The browser parses HTML into the DOM and CSS into the CSSOM, combines them into a render tree, computes layout, paints, and composites layers."
+  - question: "You edited three files but only want two of them in the next commit. What do you do?"
+    options:
+      - "`git commit -a`"
+      - "`git push`"
+      - "`git add` the two files, then `git commit`"
+      - "`git stash pop`"
+    answer: 2
+    explanation: "`git add` puts files in the staging area, and `git commit` records only what is staged."
+  - question: "You committed an API key to a public repository, then deleted it in a new commit. Is the key safe now?"
+    options:
+      - "Yes, the latest commit no longer contains it"
+      - "No, it is still in the history, so you should treat it as leaked and rotate it"
+      - "Only if the repository is private"
+      - "Yes, as long as the branch is deleted"
+    answer: 1
+    explanation: "Git keeps history. Anyone can read old commits, so the only safe response is to revoke the key and create a new one."
+  - question: "What is the purpose of `package-lock.json`?"
+    options:
+      - "It lists the scripts you can run"
+      - "It records the exact versions that were installed so everyone gets identical dependencies"
+      - "It hides secrets from Git"
+      - "It stores compiled code"
+    answer: 1
+    explanation: "The lockfile pins exact versions. Commit it, and use `npm ci` in CI for exact, reproducible installs."
+---
+
+You have finished the Web Foundations module. This is a checkpoint, not an exam: the goal is to find any gaps before the JavaScript lessons build on them.
+
+## Ready to move on?
+
+Tick these off in your head. If you hesitate on one, reopen that lesson before moving on.
+
+- [ ] I can explain, step by step, what happens between typing a URL and seeing the page (DNS, TCP/TLS, HTTP request and response, rendering)
+- [ ] I can read an HTTP request and response and say what the method, status code and key headers mean
+- [ ] I can tell 401 from 403, and a safe method from an idempotent one
+- [ ] I can describe the DOM, the CSSOM and the render tree, and why a blocking script slows a page down
+- [ ] I can move around the filesystem and search files from the terminal
+- [ ] I can make commits, create a branch, merge it and resolve a conflict with Git
+- [ ] I can describe the pull request workflow used on GitHub
+- [ ] I can explain what `package.json`, `package-lock.json` and `node_modules` are for, and what belongs in `.gitignore`
+
+When the list feels solid, take the quiz below. It saves your best score in this browser, and you can retake it as often as you like.

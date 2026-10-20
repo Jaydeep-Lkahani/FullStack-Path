@@ -1,0 +1,104 @@
+---
+title: "JavaScript Core Quiz"
+summary: "Check that you can predict how variables, scope, closures, this and prototypes behave."
+order: 99
+quiz:
+  - question: "What does `const user = { name: 'Ada' }; user.name = 'Grace';` do?"
+    options:
+      - "Throws a TypeError because `user` is `const`"
+      - "Does nothing"
+      - "Creates a new object"
+      - "Works, because `const` stops reassigning the variable but not changing the object"
+    answer: 3
+    explanation: "`const` fixes the binding, not the value. You can mutate the object, but `user = {}` would throw."
+  - question: "What does `typeof null` return?"
+    options:
+      - "`\"null\"`"
+      - "`\"number\"`"
+      - "`\"object\"`"
+      - "`\"undefined\"`"
+    answer: 2
+    explanation: "It is a historical bug that cannot be fixed without breaking the web. Check for null with `value === null`."
+  - question: "Which of these values is truthy?"
+    options:
+      - "`[]` (empty array)"
+      - "`NaN`"
+      - "`\"\"` (empty string)"
+      - "`0`"
+    answer: 0
+    explanation: "Falsy values are `false`, `0`, `-0`, `0n`, `\"\"`, `null`, `undefined` and `NaN`. Every object, including an empty array, is truthy."
+  - question: "What does `0 ?? 10` evaluate to?"
+    options:
+      - "`undefined`"
+      - "`10`"
+      - "`0`"
+      - "`null`"
+    answer: 2
+    explanation: "`??` only falls through for `null` and `undefined`. `0 || 10` would give `10`, which is why `??` is better for defaults when `0` is valid."
+  - question: "What does `console.log(a); var a = 5;` print?"
+    options:
+      - "`5`"
+      - "`null`"
+      - "`undefined`"
+      - "A ReferenceError"
+    answer: 2
+    explanation: "`var` declarations are hoisted and initialised to `undefined`. With `let` or `const` you would get a ReferenceError (the temporal dead zone)."
+  - question: "What is a closure?"
+    options:
+      - "A function that runs immediately"
+      - "A function together with the variables from the scope where it was created"
+      - "A way to make an object immutable"
+      - "A function that has no parameters"
+    answer: 1
+    explanation: "A closure keeps a live link to the variables around where the function was defined, even after the outer function has returned."
+  - question: "`for (var i = 0; i < 3; i++) { setTimeout(() => console.log(i), 0); }` prints what?"
+    options:
+      - "`undefined` three times"
+      - "`3 3 3`"
+      - "`0 1 2`"
+      - "`0 0 0`"
+    answer: 1
+    explanation: "`var` is function scoped, so every callback shares one `i`, which is `3` when the timers fire. Using `let` gives each iteration its own binding and prints `0 1 2`."
+  - question: "`const { greet } = person; greet();` throws or prints undefined for `this.name`. Why?"
+    options:
+      - "Arrow functions cannot read properties"
+      - "`const` blocks the call"
+      - "`greet` was copied, so it lost its owner and `this` is no longer `person`"
+      - "`person` was garbage collected"
+    answer: 2
+    explanation: "`this` is decided by how a function is called. Calling `greet()` with no object before the dot loses the binding. Use `person.greet()`, `bind`, or an arrow wrapper."
+  - question: "Where does an arrow function get its `this` from?"
+    options:
+      - "From the scope where the arrow function was written"
+      - "From `call` or `apply`"
+      - "It is always `window`"
+      - "From the object before the dot at call time"
+    answer: 0
+    explanation: "Arrow functions have no own `this`; they use the surrounding one, and `call`, `apply` and `bind` cannot change it."
+  - question: "You read `dog.eats` and `dog` has no `eats` property. What happens?"
+    options:
+      - "It returns `undefined` immediately"
+      - "JavaScript looks up the prototype chain and returns the first match, or `undefined` if none"
+      - "It throws a TypeError"
+      - "It creates the property"
+    answer: 1
+    explanation: "Property reads walk the prototype chain until the key is found or the chain ends at `null`. Writes create an own property on the object itself."
+---
+
+You have finished the JavaScript Core module. Most interview questions about JavaScript come from these three lessons, so it is worth being sure of them.
+
+## Ready to move on?
+
+Tick these off in your head. If you hesitate on one, reopen that lesson before moving on.
+
+- [ ] I can choose between `const`, `let` and `var`, and say what `const` does and does not protect
+- [ ] I can name the primitive types and explain why `typeof null` is `"object"`
+- [ ] I can explain truthy and falsy values and why `===` is safer than `==`
+- [ ] I can say when to use `??` instead of `||`
+- [ ] I can explain scope, hoisting and the temporal dead zone
+- [ ] I can write a closure that keeps private state, and explain why it works
+- [ ] I can explain why a `var` loop with `setTimeout` prints the same number every time and how `let` fixes it
+- [ ] I can tell which object `this` points to for a plain call, a method call, `new`, `bind` and an arrow function
+- [ ] I can describe the prototype chain and how `class` relates to it
+
+When the list feels solid, take the quiz below. It saves your best score in this browser, and you can retake it as often as you like.

@@ -1,0 +1,400 @@
+---
+title: React 19 Actions
+summary: "Handle form submits and other async updates with Actions, and use useTransition, useActionState, useFormStatus, useOptimistic and use() to show pending, error and instant-feedback states without writing the plumbing by hand."
+order: 12
+takeaways:
+  - An Action is an async function that React runs inside a transition, so it tracks the pending state for you and keeps the old screen visible until the new one is ready.
+  - Passing a function to a form's action prop gives you a FormData object, and React resets the uncontrolled fields when the Action finishes.
+  - useTransition and useActionState both give you an isPending flag, but any state update after an await in useTransition needs its own startTransition.
+  - useActionState keeps the result of the last Action as state, so validation errors become plain return values.
+  - useFormStatus lets a child component such as a submit button read the pending state of the form around it, and it only works when it is not in the same component as the form.
+  - useOptimistic shows the expected result immediately while the Action runs, then falls back to the real state when it finishes or fails.
+  - use() reads a promise or a context during render and, unlike other hooks, can be called inside conditions.
+videos:
+  - title: "useActionState Explained! The Ultimate Guide for React 19 & Next.js 15"
+    channel: "OrcDev"
+    duration: "6:27"
+    url: https://www.youtube.com/watch?v=j4B2Nfo0xQs
+  - title: "React 19's useOptimistic: EVERYTHING you NEED to know"
+    channel: "Jack Herrington"
+    duration: "25:23"
+    url: https://www.youtube.com/watch?v=QWVr7uDyBXE
+docs:
+  - title: "react.dev — <form>"
+    url: https://react.dev/reference/react-dom/components/form
+  - title: "react.dev — useTransition"
+    url: https://react.dev/reference/react/useTransition
+  - title: "react.dev — useActionState"
+    url: https://react.dev/reference/react/useActionState
+  - title: "react.dev — useFormStatus"
+    url: https://react.dev/reference/react-dom/hooks/useFormStatus
+  - title: "react.dev — useOptimistic"
+    url: https://react.dev/reference/react/useOptimistic
+  - title: "react.dev — use"
+    url: https://react.dev/reference/react/use
+---
+
+Before React 19, every button that saved something needed the same boilerplate: a `useState` for "loading", another for "error", a `try/catch`, and a `finally` that turned loading off again. The previous lesson showed that for forms, and the Suspense lesson promised `useTransition` and more of `use()`. React 19 turns that boilerplate into built-in features called **Actions**. You will meet them in interviews ("what's new in React 19?"), in every modern codebase, and in the Next.js module, where Server Actions are these same hooks with a server behind them.
+
+Written for React 19 (the sandbox ran 19.3) in the Vite + TypeScript app from lesson 1. Every demo uses a fake API that waits a moment and rejects on purpose.
+
+## What is an Action?
+
+An **Action** is an async function that React runs inside a **transition**: React's way of saying "this update can take a while, so keep the current screen usable until it is finished". Because React sees when your function starts and when its promise settles, it can give you the pending state for free. You can start one from a form (`<form action={fn}>`), from a button (`startTransition(async () => ...)` with `useTransition`), or with `useActionState`, which also keeps the result. Two supporting hooks, `useFormStatus` and `useOptimistic`, finish the picture.
+
+## Form actions
+
+Until now you wrote `<form onSubmit={handler}>` and called `event.preventDefault()`. In React 19 you can pass a function to the form's `action` prop instead:
+
+```tsx
+import { useState } from "react";
+import { saveName } from "../api"; // fake API, waits 0.8 seconds
+
+export function PlainFormAction() {
+  const [saved, setSaved] = useState<string[]>([]);
+
+  async function addNameAction(formData: FormData) {
+    const clean = await saveName(String(formData.get("name")));
+    setSaved((prev) => [...prev, clean]);
+  }
+
+  return (
+    <form action={addNameAction}>
+      <input name="name" defaultValue="" />
+      <button type="submit">Add</button>
+      <p>Saved: {saved.join(", ") || "(none)"}</p>
+    </form>
+  );
+}
+```
+
+Typing ` Asha ` and pressing Add: for 0.8 seconds the text stays in the input, then "Saved: Asha" appears and the input becomes empty. What is different from `onSubmit`:
+
+- You get a `FormData` object, not an event. There is no `preventDefault()`; React handles it.
+- The function can be `async`, and React waits for it.
+- When the Action finishes, React **resets the form**: uncontrolled inputs go back to their `defaultValue`. It resets even if your Action decided the data was invalid, which matters in a minute.
+- Each input still needs a `name`, as in the uncontrolled-input section of the forms lesson. The reset only affects uncontrolled inputs; a field kept in `useState` with `value={...}` keeps its text.
+
+## useTransition for async updates
+
+Not every Action comes from a form. A "Save" button, a delete icon or a tab switch can start one with `useTransition`:
+
+```tsx
+import { useState, useTransition } from "react";
+import { saveName } from "../api"; // rejects with Error("Server said no") for "fail"
+
+export function TransitionDemo() {
+  const [name, setName] = useState("Asha");
+  const [error, setError] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
+
+  function handleSave(next: string) {
+    setError(null);
+    startTransition(async () => {
+      try {
+        const saved = await saveName(next);
+        startTransition(() => setName(saved)); // after an await, wrap again
+      } catch (err) {
+        startTransition(() => setError(err instanceof Error ? err.message : "Unknown error"));
+      }
+    });
+  }
+
+  return (
+    <>
+      <p>Name: {name}</p>
+      <button disabled={isPending} onClick={() => handleSave("Ben")}>
+        {isPending ? "Saving…" : "Save as Ben"}
+      </button>
+      <button disabled={isPending} onClick={() => handleSave("fail")}>Save as "fail"</button>
+      {error && <p role="alert">{error}</p>}
+    </>
+  );
+}
+```
+
+`useTransition()` returns `isPending`, which is `true` from the moment `startTransition` is called until your async function has settled, and `startTransition(action)`, which runs the Action. Clicking "Save as Ben" disables the button and shows "Saving…" for 0.8 seconds while "Name: Asha" stays on screen, then it becomes "Name: Ben". "Save as fail" shows "Server said no" and keeps the old name. You never wrote a `loading` state or a `finally`.
+
+<Callout type="warning" title="State updates after await need their own startTransition">
+JavaScript forgets that your code was inside a transition once it passes an `await`. So `setName(saved)` written directly after `await saveName(next)` is a normal urgent update, not part of the transition. Wrap each state update that comes after an `await` in its own `startTransition(() => ...)`, as above. React expects to remove this rule one day, but today you must write it.
+</Callout>
+
+If an Action throws and you don't catch it, React shows the nearest error boundary (lesson 10), which is why the example stores the message instead. Transitions also don't guarantee order: with two quick clicks the slower request can finish last and win. Work that must run in order belongs in `useActionState`, which queues calls.
+
+## useActionState
+
+Most forms follow one cycle: submit, wait, then show an error or a success. `useActionState` stores the **result of your Action as state**, so that cycle becomes a plain function:
+
+```tsx
+import { useActionState } from "react";
+import { sleep } from "../api"; // await sleep(800) simulates the server
+
+type State = { status: "idle" | "error" | "success"; message: string; email: string };
+const initialState: State = { status: "idle", message: "", email: "" };
+
+async function subscribeAction(_prev: State, formData: FormData): Promise<State> {
+  const email = String(formData.get("email")).trim();
+  await sleep(800);
+  if (!/^\S+@\S+\.\S+$/.test(email)) {
+    return { status: "error", message: "Enter a valid email", email };
+  }
+  return { status: "success", message: `Subscribed ${email}`, email: "" };
+}
+
+export function ActionStateForm() {
+  const [state, formAction, isPending] = useActionState(subscribeAction, initialState);
+
+  return (
+    <form action={formAction}>
+      <input name="email" defaultValue={state.email} />
+      <button type="submit" disabled={isPending}>
+        {isPending ? "Subscribing…" : "Subscribe"}
+      </button>
+      {state.message && <p role={state.status === "error" ? "alert" : "status"}>{state.message}</p>}
+    </form>
+  );
+}
+```
+
+Submitting `nope` disables the button ("Subscribing…") for 0.8 seconds, then shows "Enter a valid email" and leaves `nope` in the field. Submitting `a@b.co` shows "Subscribed a@b.co" and empties the field. How it works:
+
+- `useActionState(action, initialState)` returns **three** values: the current `state`, a `formAction` for `<form action>`, and `isPending`.
+- Your Action receives `(previousState, formData)`. The first argument is easy to forget: `_prev` is unused here, but it must be there.
+- Whatever the Action **returns** becomes the new `state`. Errors you expect, such as validation failures, are return values, not exceptions.
+- Calls are queued and run one at a time, so a fast double click cannot reorder results.
+
+Why `defaultValue={state.email}`? Because of the reset described earlier. Without it, React clears the field after the Action returns, even when the email was invalid, and the user must type everything again. In the sandbox, a form without it showed the error message and an empty input.
+
+Return `{ error: "..." }` when the user can fix the problem (bad email, name already taken), and let the Action throw only for real surprises. A thrown error cancels the queued calls and goes to the nearest error boundary.
+
+## useFormStatus
+
+A submit button often lives in its own component. Passing `isPending` down as a prop gets tedious, so `useFormStatus` lets a child read the status of the **form around it**:
+
+```tsx
+import { useFormStatus } from "react-dom";
+
+// render <SubmitButton /> inside the <form action={formAction}>
+function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <button type="submit" disabled={pending}>
+      {pending ? "Subscribing…" : "Subscribe"}
+    </button>
+  );
+}
+
+```
+
+`pending` is `true` while the form's Action runs, so the button can't be clicked twice. It is imported from `react-dom`, not `react`. The classic mistake is calling the hook in the same component that renders the `<form>`: it reads the **parent** form, a component is not its own parent, and `pending` is always `false` (see the exercise). If the form's component already has `isPending` from `useActionState`, you don't need `useFormStatus` at all.
+
+## useOptimistic
+
+Waiting a second to see your own todo appear feels slow, though the server almost always says yes. An **optimistic update** shows the expected result immediately and corrects itself if the server says no. `useOptimistic` does this without manual undo code:
+
+```tsx
+import { useOptimistic, useState } from "react";
+import { addTodoOnServer } from "../api"; // waits 1s, rejects if the text contains "fail"
+import type { Todo } from "../api";
+
+type ViewTodo = Todo & { pending?: boolean };
+
+export function OptimisticTodos() {
+  const [todos, setTodos] = useState<Todo[]>([{ id: "seed", text: "Learn Actions" }]);
+  const [error, setError] = useState<string | null>(null);
+  const [optimisticTodos, addOptimisticTodo] = useOptimistic<ViewTodo[], string>(
+    todos,
+    (current, text) => [...current, { id: `temp-${text}`, text, pending: true }],
+  );
+
+  async function addTodoAction(formData: FormData) {
+    const text = String(formData.get("text")).trim();
+    setError(null);
+    addOptimisticTodo(text);
+    try {
+      const saved = await addTodoOnServer(text);
+      setTodos((prev) => [...prev, saved]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    }
+  }
+
+  return (
+    <>
+      <form action={addTodoAction}>
+        <input name="text" />
+        <button type="submit">Add</button>
+      </form>
+      {error && <p role="alert">{error}</p>}
+      <ul>
+        {optimisticTodos.map((todo) => (
+          <li key={todo.id}>{todo.text}{todo.pending && " (saving…)"}</li>
+        ))}
+      </ul>
+    </>
+  );
+}
+```
+
+Adding "Write lesson" shows `Write lesson (saving…)` at once, and one second later the row appears without the suffix, now with the real id from the server. Adding "please fail" shows the saving row for one second, then removes it and shows "Could not save the todo". There is no rollback code anywhere:
+
+- `useOptimistic(value, reducer)` returns `[optimisticValue, addOptimistic]`. When no Action is running, `optimisticValue` is exactly `value`, here the real `todos`.
+- While an Action runs, `optimisticValue` is the **reducer's result** (the real list plus a temporary row). The reducer must be pure, like the one in `useReducer`.
+- When the Action ends, the optimistic layer is thrown away and React shows `value` again. If you saved the todo, `todos` now contains it; if you didn't, the temporary row simply vanishes.
+- The setter must be called **inside an Action**, such as a form action or `startTransition`. Outside one, React logs an error and the value flashes back.
+
+Without a reducer, pass the next value directly: `useOptimistic(liked)`. You'll use that in the exercises.
+
+<Callout type="warning" title="Optimistic does not mean saved">
+The temporary row has a fake id, so don't let the user delete or edit it until the Action has finished. The `pending` flag is how the UI knows. Also tell the user when a save fails; a row that silently disappears is confusing.
+</Callout>
+
+## use()
+
+`use` reads a value **during render**, and it accepts two things. First, a promise: `use(promise)` suspends the component until the promise resolves, then returns its value (a rejected promise goes to the nearest error boundary). As the Suspense lesson warned, the promise must not be created during render. Creating it in `useState` or in an event handler is safe:
+
+```tsx
+import { Suspense, use, useState, useTransition } from "react";
+import { fetchUser } from "../api"; // waits 1s; users 1 and 2 are Ben and Chen
+import type { User } from "../api";
+
+function UserCard({ userPromise }: { userPromise: Promise<User> }) {
+  const user = use(userPromise);
+  return <p>User: {user.name}</p>;
+}
+
+export function UseDemo() {
+  const [userPromise, setUserPromise] = useState(() => fetchUser(1));
+  const [isPending, startTransition] = useTransition();
+
+  function loadNext() {
+    startTransition(() => {
+      setUserPromise(fetchUser(2)); // created in an event handler, not during render
+    });
+  }
+
+  return (
+    <>
+      <button onClick={loadNext} disabled={isPending}>Load user 2</button>
+      <Suspense fallback={<p>Loading user…</p>}>
+        <UserCard userPromise={userPromise} />
+      </Suspense>
+    </>
+  );
+}
+```
+
+On load, "Loading user…" shows for a second, then "User: Ben". Clicking "Load user 2" disables the button, but "User: Ben" **stays visible** with no fallback, and a second later it becomes "User: Chen". The new promise suspends, React sees it happened inside a transition, and keeps the old UI on screen while `isPending` is `true`. Without `startTransition`, the fallback would replace the card.
+
+Second, `use(Context)` does the job of `useContext`, with one difference: the rules of hooks don't apply, so you may call it after an `if` or an early `return`. In the sandbox, a component that did `if (!show) return null;` and then `use(ThemeContext)` printed "Theme: dark" inside `<ThemeContext value="dark">`. React 19 lets you use the context itself as the provider, so `.Provider` is no longer needed.
+
+<Callout type="note" title="Which one do I reach for?">
+Form submit that needs errors → `useActionState`. Button click or other async work with a spinner → `useTransition`. Instant feedback before the server answers → `useOptimistic`. A child that needs the form's pending state → `useFormStatus`. Showing data that a parent or a framework already started loading → `use`. For fetching in a Vite app, your first choice is still a library such as TanStack Query (lesson 15), which caches the promises for you.
+</Callout>
+
+<Exercise title="Fix the bug">
+The Send button never changes to "Sending…" while the form submits. Find the bug and fix it.
+
+```tsx
+function MessageForm() {
+  const { pending } = useFormStatus();
+  return (
+    <form action={sendMessageAction}>
+      <button disabled={pending}>{pending ? "Sending…" : "Send"}</button>
+    </form>
+  );
+}
+```
+
+<Solution>
+`useFormStatus` reads the status of a **parent** `<form>`, and `MessageForm` renders the form itself, so `pending` stays `false`. In the sandbox this button stayed on "Send", enabled. Move the hook into a child component, which then switched to "Sending…" and disabled:
+
+```tsx
+function SendButton() {
+  const { pending } = useFormStatus();
+  return <button disabled={pending}>{pending ? "Sending…" : "Send"}</button>;
+}
+
+function MessageForm() {
+  return (
+    <form action={sendMessageAction}>
+      <SendButton />
+    </form>
+  );
+}
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Drop the boilerplate">
+This form keeps `loading` and `error` in `useState` and handles `onSubmit` with `preventDefault`. Rewrite it with `useActionState`, keeping the typed email when the server rejects it. `joinWaitlist(email)` throws `Error("That email is already on the list")`.
+
+<Solution>
+```tsx
+type State = { error: string | null; email: string };
+
+async function joinAction(_prev: State, formData: FormData): Promise<State> {
+  const email = String(formData.get("email")).trim();
+  try {
+    await joinWaitlist(email);
+    return { error: null, email: "" };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "Unknown error", email };
+  }
+}
+
+export function Waitlist() {
+  const [state, formAction, isPending] = useActionState(joinAction, { error: null, email: "" });
+
+  return (
+    <form action={formAction}>
+      <input name="email" defaultValue={state.email} />
+      <button disabled={isPending}>{isPending ? "Joining…" : "Join"}</button>
+      {state.error && <p role="alert">{state.error}</p>}
+    </form>
+  );
+}
+```
+
+In the sandbox, `taken@x.co` showed the error and kept the text; `new@x.co` emptied the field. The `try/catch` now sits inside the Action and returns the error as state, and `isPending` replaces `loading`.
+</Solution>
+</Exercise>
+
+<Exercise title="Optimistic like button">
+Build a `LikeButton` that shows "♥ Liked" the moment it is clicked while a fake request runs. If the request fails, it must go back to "♡ Like" and show the error. Use `useOptimistic` and `useTransition`. The prop is `saveLike(next: boolean): Promise<boolean>`.
+
+<Solution>
+```tsx
+import { useOptimistic, useState, useTransition } from "react";
+
+export function LikeButton({ saveLike }: { saveLike: (next: boolean) => Promise<boolean> }) {
+  const [liked, setLiked] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [optimisticLiked, setOptimisticLiked] = useOptimistic(liked);
+  const [, startTransition] = useTransition();
+  function toggle() {
+    const next = !optimisticLiked;
+    setError(null);
+    startTransition(async () => {
+      setOptimisticLiked(next); // inside the Action, before the await
+      try {
+        const saved = await saveLike(next);
+        startTransition(() => setLiked(saved)); // real state, after the await
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Unknown error");
+      }
+    });
+  }
+
+  return (
+    <div>
+      <button onClick={toggle}>{optimisticLiked ? "♥ Liked" : "♡ Like"}</button>
+      {error && <p role="alert">{error}</p>}
+    </div>
+  );
+}
+```
+
+In the sandbox, a successful `saveLike` switched to "♥ Liked" immediately and stayed. One that always threw showed "♥ Liked" for 0.6 seconds, then returned to "♡ Like" with "Network error" below. The rollback needed no code: `liked` was never updated, so when the Action ended React rendered `liked` again.
+</Solution>
+</Exercise>

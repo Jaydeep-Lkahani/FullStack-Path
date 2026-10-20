@@ -1,0 +1,400 @@
+---
+title: Routing with React Router
+summary: Give a React app several pages with React Router, using routes, nested layouts, URL parameters, search parameters and a protected route.
+order: 14
+takeaways:
+  - A single-page app loads one HTML file, and the router swaps components when the URL changes, without asking the server for a new page.
+  - Link and NavLink change the URL without a reload, while a plain a tag reloads the whole page and throws away React state.
+  - A parent route renders its child through Outlet, and a route with no path is a layout that adds no URL segment.
+  - useParams returns URL segments as strings that may be undefined, and useSearchParams reads and writes the query string.
+  - The path "*" matches anything left over, so it is how you build a "page not found" screen.
+  - A protected route is a layout route that renders Outlet when the user is allowed in and Navigate to the login page when not.
+videos:
+  - title: "React Router v7 (Library) The Ultimate Beginners  Guide - Part 1"
+    channel: "Warehouse Dev"
+    duration: "18:49"
+    url: https://www.youtube.com/watch?v=oMjD5lw5ljQ
+  - title: "React Router v7 (Library) The Ultimate Beginners  Guide - Part 2"
+    channel: "Warehouse Dev"
+    duration: "18:47"
+    url: https://www.youtube.com/watch?v=eP7LRJxwm3Q
+docs:
+  - title: "React Router — Declarative installation"
+    url: https://reactrouter.com/start/declarative/installation
+  - title: "React Router — Declarative routing"
+    url: https://reactrouter.com/start/declarative/routing
+  - title: "React Router — Navigating"
+    url: https://reactrouter.com/start/declarative/navigating
+  - title: "React Router — URL values"
+    url: https://reactrouter.com/start/declarative/url-values
+  - title: "React Router — NavLink"
+    url: https://reactrouter.com/api/components/NavLink
+---
+
+Every real app has more than one screen: a list, a detail page, a login page. Users expect each screen to have its own URL, so they can bookmark it, share it and press the back button. Routing questions come up in interviews ("how does a single-page app navigate without reloading?"), and the next lessons use it: the data-fetching lesson loads data for the page in the URL, and all three projects have several pages.
+
+Written for React Router 8.5, in the Vite + TypeScript app from lesson 1. React Router has three modes: **declarative** (you describe routes in JSX, which is this lesson), **data** and **framework** (routes plus loaders and actions, which overlap with what TanStack Query does next lesson). We use declarative mode, and everything here also works in React Router 7.
+
+## How routing works in a single-page app
+
+With a classic website, every link asks the server for a new HTML file. A **single-page app (SPA)** loads one HTML file and one JavaScript bundle. When the URL changes, a **router** changes the URL itself with the browser's History API (`history.pushState`, which changes the address bar without a request), reads the new URL, and renders the component for it. No page loads, so React state survives.
+
+So a click on `<Link to="/courses">` runs three steps: the router calls `history.pushState`, matches `/courses` against your route list, and React re-renders with the matching component.
+
+A plain `<a href="/courses">` skips all of that: the browser requests a new page, and everything in memory, such as a logged-in user kept in state, is gone. That is the most common routing mistake, so use `Link` for links inside your app and `a` only for other websites.
+
+## Setup
+
+```bash
+npm install react-router
+```
+
+<Callout type="note" title="One package, imports from react-router">
+Old tutorials import from `react-router-dom`. React Router 7 merged it into `react-router`, and version 8 removed `react-router-dom` completely. Import everything from `"react-router"`. Version 8 needs Node 22.22+ and React 19.2.7+, which the Vite app from lesson 1 already has.
+</Callout>
+
+Wrap the app in a `BrowserRouter` once, in `main.tsx`. It gives every component below it access to the current URL:
+
+```tsx
+// src/main.tsx
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { BrowserRouter } from "react-router";
+import App from "./App";
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </StrictMode>,
+);
+```
+
+Our example is a small course catalog. The data is a plain array:
+
+```ts
+// src/courses.ts
+export const courses = [
+  { id: "react-basics", title: "React Basics", level: "beginner" },
+  { id: "node-intro", title: "Node.js Intro", level: "beginner" },
+  { id: "next-deep-dive", title: "Next.js Deep Dive", level: "advanced" },
+] as const;
+
+export function findCourse(id: string | undefined) {
+  return courses.find((course) => course.id === id);
+}
+```
+
+## Routes
+
+`Routes` holds a list of `Route` elements, and each pairs a URL pattern (`path`) with the `element` to show. React Router picks the best match for the current URL:
+
+```tsx
+// src/App.tsx
+import { Link, Route, Routes } from "react-router";
+
+export default function App() {
+  return (
+    <>
+      <nav>
+        <Link to="/">Home</Link> <Link to="/about">About</Link>
+      </nav>
+      <Routes>
+        <Route path="/" element={<h1>Welcome</h1>} />
+        <Route path="/about" element={<h1>About</h1>} />
+      </Routes>
+    </>
+  );
+}
+```
+
+At `/` the page shows "Welcome", and clicking About changes the address bar to `/about` and the heading to "About", with no reload. `Link` renders a real `<a href>` (so middle-click, "open in new tab" and screen readers work) but intercepts the click and calls the router instead.
+
+Order does not matter, because React Router ranks routes by how specific they are.
+
+### A page not found route
+
+The path `*` is a **splat**: it matches whatever is left. Because it is the least specific pattern, it only wins when nothing else matches, which makes it the 404 page:
+
+```tsx
+function NotFound() {
+  const location = useLocation();
+  return <p>Nothing lives at <code>{location.pathname}</code>.</p>;
+}
+
+// inside <Routes>
+<Route path="*" element={<NotFound />} />
+```
+
+Opening `/whatever/x` showed "Nothing lives at /whatever/x." `useLocation` returns the current location object, with `pathname`, `search` (the text after `?`) and `state`, and the component re-renders whenever it changes.
+
+## Nested routes and layouts
+
+Most pages share a header. Instead of repeating it, nest routes. A parent route renders its matched child where you place `<Outlet />`:
+
+`Layout` is a normal component that renders the `nav` and then `<main><Outlet /></main>`. The routes:
+
+```tsx
+// src/App.tsx
+<Routes>
+  <Route element={<Layout />}>
+    <Route index element={<Home />} />
+    <Route path="courses">
+      <Route index element={<CourseList />} />
+      <Route path=":courseId" element={<CourseDetail />} />
+    </Route>
+    <Route path="*" element={<NotFound />} />
+  </Route>
+</Routes>
+```
+
+This tree uses three tricks, and each is a different kind of route:
+
+- A **layout route** has an `element` but no `path`. It adds no URL segment; it only wraps its children, so `Layout` appears on every page.
+- An **index route** (`index` instead of `path`) is the default child. It renders at its parent's URL, so `Home` shows at `/` and `CourseList` at `/courses`.
+- A **prefix route** has a `path` but no `element`. `courses` only adds `/courses` in front of its children, giving `/courses` and `/courses/:courseId`.
+
+Paths are relative to their parent, so write `path="courses"` and not `path="/courses"` inside a nested route. A route with children must render an `Outlet`, otherwise the children never appear.
+
+### NavLink and the active page
+
+`NavLink` is a `Link` that knows whether it matches the current URL. When it does, the `<a>` gets the class `active` (and `aria-current="page"`), so `nav a.active { font-weight: 700 }` styles the current page. With Tailwind, `className` also accepts a function that receives `{ isActive }`.
+
+A `NavLink` matches by **prefix**: `/courses` is active on `/courses` and also on `/courses/react-basics`, which is usually what you want for a section of the site. Add `end` to demand an exact match. In the sandbox, on `/courses/react-basics` the Courses link was `active` without `end` and not active with it. The link to `/` is a special case that is only active at exactly `/`, but `end` is still the clearest way to write it.
+
+## URL parameters
+
+The segment `:courseId` in the path is a **dynamic segment**. It matches anything, and the matched text is available through `useParams`:
+
+```tsx
+// src/pages/CourseDetail.tsx
+export function CourseDetail() {
+  const { courseId } = useParams();
+  const course = findCourse(courseId);
+
+  if (!course) return <h1>No course called "{courseId}"</h1>;
+
+  return (
+    <>
+      <h1>{course.title}</h1>
+      <p>Level: {course.level}</p>
+      <Link to="..">Back to courses</Link>
+    </>
+  );
+}
+```
+
+At `/courses/next-deep-dive` the page showed "Next.js Deep Dive" and "Level: advanced". At `/courses/nope` it showed `No course called "nope"`, because anyone can type any URL, and the page must handle ids that do not exist.
+
+<Callout type="warning" title="Params are strings, and they might be missing">
+`useParams` returns `string | undefined` for every value, even when the URL looks like a number. `/posts/5` gives `"5"`, so `post.id === postId` fails when `post.id` is the number `5`. Convert with `Number(postId)`, and check for `NaN` when it matters. TypeScript also forces you to handle `undefined`, which is why `findCourse` accepts it.
+</Callout>
+
+**Relative links.** Links without a leading slash are resolved against the route they are rendered in. In `CourseList`, which lives at `/courses`, `<Link to={course.id}>` produced the href `/courses/react-basics`. And `to=".."` means "the parent route": from `/courses/next-deep-dive` it went to `/courses`. Pick relative or absolute links and stay consistent.
+
+## Search parameters
+
+Filters, sorting and page numbers belong in the **query string** (`/courses?level=beginner`), because that makes the filtered list shareable and survives a refresh. `useSearchParams` works like `useState`, but the value lives in the URL:
+
+```tsx
+// src/pages/CourseList.tsx
+export function CourseList() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const level = searchParams.get("level");
+
+  const visible = level ? courses.filter((course) => course.level === level) : courses;
+
+  return (
+    <>
+      <button type="button" onClick={() => setSearchParams({})}>All</button>
+      <button type="button" onClick={() => setSearchParams({ level: "beginner" })}>Beginner</button>
+      <ul>{/* one <Link to={course.id}> per visible course */}</ul>
+    </>
+  );
+}
+```
+
+`searchParams` is a standard [`URLSearchParams`](https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams) object, so `get` returns `string | null`. Clicking Beginner changed the address to `/courses?level=beginner` and the list to React Basics and Node.js Intro, and All went back to `/courses`. No `useState` is needed: the URL is the state, and the component re-renders whenever it changes.
+
+A common mistake: `setSearchParams({ level: "beginner" })` **replaces** all parameters, so a `?q=node` search would disappear. To change one, pass a function that gets the previous parameters:
+
+```tsx
+setSearchParams(
+  (previous) => {
+    const next = new URLSearchParams(previous);
+    next.set("level", "beginner");
+    return next;
+  },
+  { replace: true },
+);
+```
+
+With `{ replace: true }` the change replaces the current history entry instead of adding one, which is right for things that change on every keystroke. The back button should not step through each letter.
+
+## Navigating from code
+
+`Link` handles clicks. Sometimes you must navigate from code, such as after a form submits or a login succeeds, and for that there are two tools:
+
+- `useNavigate()` returns a function: call `navigate("/profile")` inside an event handler or effect.
+- `<Navigate to="/login" />` is a component that navigates as soon as it renders, which is the way to redirect while rendering.
+
+Both take `replace`, which swaps the current history entry instead of pushing a new one. Use it for redirects: if `/profile` redirected to `/login` without it, pressing back would return to `/profile`, which redirects again, and the user is stuck.
+
+### A protected route
+
+Pages like a profile need a logged-in user. Assume a minimal auth context built like the one in lesson 7: an `AuthProvider` holding `user: string | null` in state, and a `useAuth()` hook returning `{ user, login, logout }`. Real authentication comes in the Node.js module. Now a layout route that guards everything inside it:
+
+```tsx
+// src/components/RequireAuth.tsx
+import { Navigate, Outlet, useLocation } from "react-router";
+import { useAuth } from "../auth";
+
+export function RequireAuth() {
+  const { user } = useAuth();
+  const location = useLocation();
+
+  if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+
+  return <Outlet />;
+}
+```
+
+```tsx
+// in <Routes>, inside the Layout route (wrap <Routes> in <AuthProvider> in App)
+<Route path="login" element={<Login />} />
+<Route element={<RequireAuth />}>
+  <Route path="profile" element={<Profile />} />
+</Route>
+```
+
+The `state` option attaches a value to the history entry that is not shown in the URL, here the page the user wanted. The login page reads it with `useLocation` and sends the user back after logging in:
+
+```tsx
+// src/pages/Login.tsx (the form with a name input is left out)
+export function Login() {
+  const [name, setName] = useState("");
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const from = (location.state as { from?: string } | null)?.from ?? "/";
+
+  function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
+    event.preventDefault();
+    login(name);
+    navigate(from, { replace: true });
+  }
+  // return <form onSubmit={handleSubmit}> ... </form>
+}
+```
+
+Logged out, clicking Profile ended on `/login`. After typing "Ana" and submitting, the URL became `/profile` and the page said "Profile of Ana". Pressing back from the redirected login page went to `/courses`, the page before Profile, not into a loop.
+
+<Callout type="warning" title="A route guard is not security">
+`RequireAuth` only decides what the browser shows. The JavaScript for the profile page still downloads, and anyone can edit it. Real protection happens on the server, which must check the session on every request for private data. The guard is for user experience.
+</Callout>
+
+## Deploying a single-page app
+
+When you refresh at `/courses/react-basics`, the browser asks the server for a file at that path. A plain static server has none and returns 404, unless it answers every unknown path with `index.html` so the router can take over. Vite's dev server and `vite preview` do this already, and static hosts have a setting for it, often called "SPA fallback". The Next.js module avoids the problem, because the server knows the routes.
+
+<Exercise title="Predict the output">
+These are the routes:
+
+```tsx
+<Routes>
+  <Route path="/" element={<Home />} />
+  <Route path="shop">
+    <Route index element={<ShopHome />} />
+    <Route path=":productId" element={<Product />} />
+    <Route path="cart" element={<Cart />} />
+  </Route>
+  <Route path="*" element={<NotFound />} />
+</Routes>
+```
+
+Which component renders for `/`, `/shop`, `/shop/cart`, `/shop/42` and `/shop/42/reviews`? What does `useParams().productId` hold in `Product`?
+
+<Solution>
+`/` renders `Home`, `/shop` renders `ShopHome` (the index route), `/shop/cart` renders `Cart` and `/shop/42` renders `Product`. The URL `/shop/42/reviews` has no route, so it falls to `*` and renders `NotFound`.
+
+`/shop/cart` could also match `:productId` with the value `"cart"`. React Router prefers the static segment over the dynamic one, so `Cart` wins, and the order of the lines does not matter. In `Product`, `productId` is the **string** `"42"`, not the number.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+A product page shows "Product not found" for every URL, even `/products/1`. Why?
+
+```tsx
+const products = [{ id: 1, name: "Keyboard" }, { id: 2, name: "Mouse" }];
+
+function ProductPage() {
+  const { productId } = useParams();
+  const product = products.find((p) => p.id === productId);
+  return product ? <h1>{product.name}</h1> : <h1>Product not found</h1>;
+}
+```
+
+<Solution>
+`useParams` returns strings, so `productId` is `"1"` and `1 === "1"` is `false`. Convert it before comparing:
+
+```tsx
+const id = Number(productId);
+const product = products.find((p) => p.id === id);
+```
+
+If the segment is not a number (`/products/abc`), `Number` gives `NaN`, which equals nothing, so the page still shows "Product not found" and does not crash.
+</Solution>
+</Exercise>
+
+<Exercise title="Search that keeps the filter">
+Add a text input to `CourseList` that filters by title using a `q` search parameter, and keep the `level` filter working together with it. The URL must be shareable, and typing must not fill the back button with history entries.
+
+<Solution>
+```tsx
+const q = searchParams.get("q") ?? "";
+
+const visible = courses.filter(
+  (course) =>
+    (!level || course.level === level) && course.title.toLowerCase().includes(q.toLowerCase()),
+);
+
+function updateParam(name: string, value: string) {
+  setSearchParams(
+    (previous) => {
+      const next = new URLSearchParams(previous);
+      if (value) next.set(name, value);
+      else next.delete(name);
+      return next;
+    },
+    { replace: true },
+  );
+}
+```
+
+Call `updateParam("q", e.target.value)` from the input's `onChange`. In the sandbox, typing "node" gave `/courses?q=node` and one result. Clicking Beginner made it `/courses?q=node&level=beginner`, and clearing the box left `/courses?level=beginner`. The history length did not change during all of this, because of `replace: true`.
+</Solution>
+</Exercise>
+
+<Exercise title="Skip the login page when already logged in">
+A logged-in user who types `/login` should be sent to the home page instead of seeing the form. Change `Login` to do this.
+
+<Solution>
+Return a `Navigate` after the hooks (hooks must always run in the same order, so the early return goes below them). Send the user to `from` and remove the `navigate` call from `handleSubmit`, so one place decides where to go:
+
+```tsx
+const { user, login } = useAuth();
+const location = useLocation();
+const from = (location.state as { from?: string } | null)?.from ?? "/";
+
+if (user) return <Navigate to={from} replace />;
+
+function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
+  event.preventDefault();
+  login(name);
+}
+```
+
+In the sandbox, logging in from the redirect to `/profile` ended on `/profile`, and visiting `/login` while logged in ended on `/`. A first attempt that sent every logged-in user to `/` while keeping `navigate(from)` in `handleSubmit` lost the saved page: the user landed on `/` after logging in. Having a single place decide the destination avoids that.
+</Solution>
+</Exercise>

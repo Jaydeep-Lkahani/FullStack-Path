@@ -1,0 +1,394 @@
+---
+title: Setting Up React with Vite
+summary: Understand what React is and why it exists, then create, run and explore a React + TypeScript project with Vite.
+order: 1
+takeaways:
+  - React is a JavaScript library for building user interfaces out of small reusable pieces called components.
+  - You describe what the screen should look like for the current data, and React updates the page for you (declarative UI).
+  - Vite is the tool that runs your project, with a fast dev server and a production build; the template is created with `npm create vite@latest`.
+  - A Vite app has one `index.html` with an empty `root` element, and `src/main.tsx` tells React to render `App` into it.
+  - The dev server reloads changes instantly, and `npm run build` produces the static files you would deploy.
+  - React DevTools adds Components and Profiler tabs to your browser so you can inspect props and state.
+videos:
+  - title: "Vite in 100 Seconds"
+    channel: "Fireship"
+    duration: "2:29"
+    url: https://www.youtube.com/watch?v=KCrXgy8qtjM
+  - title: "Understand Any React Project in 16 Minutes | Vite + React + TypeScript Folder Structure Explained"
+    channel: "ShawnDev"
+    duration: "15:57"
+    url: https://www.youtube.com/watch?v=8ub_3kjILV8
+docs:
+  - title: "react.dev — Quick Start"
+    url: https://react.dev/learn
+  - title: "react.dev — Build a React app from scratch"
+    url: https://react.dev/learn/build-a-react-app-from-scratch
+  - title: "react.dev — React Developer Tools"
+    url: https://react.dev/learn/react-developer-tools
+  - title: "Vite — Getting Started"
+    url: https://vite.dev/guide/
+---
+
+React is the most widely used library for building user interfaces, and it shows up in most frontend job listings. Everything in Phase 2 builds on it, and Next.js in Phase 3 is React plus extra features, so the ideas in this module carry over directly. This lesson gets a project running and explains every file in it, so nothing feels like magic later. It was written for React 19, Vite 8 and TypeScript 6.
+
+You already know HTML and CSS, and the earlier modules taught you JavaScript, the DOM and TypeScript. Those are everything you need.
+
+## What React is
+
+A **user interface (UI)** is what people see and click. With plain JavaScript (as you did in the DOM lessons) you update the page by hand:
+
+```js
+// Plain DOM: you describe the steps
+const p = document.querySelector("#message");
+p.textContent = `You clicked ${count} times.`;
+if (count > 10) {
+  p.classList.add("warning");
+}
+```
+
+This is **imperative**: you write each step, and you must remember every place that depends on `count`. In a big app, with hundreds of pieces of data on screen, keeping them all in sync gets painful and buggy.
+
+React flips this around. You describe what the screen should look like **for the current data**, and React works out the DOM changes:
+
+```tsx
+// React: you describe the result
+<p className={count > 10 ? "warning" : ""}>You clicked {count} times.</p>
+```
+
+This is **declarative**. When `count` changes, React re-runs this description, compares it with the previous one and updates only the parts of the page that differ. You never call `querySelector` or `textContent` yourself.
+
+React has two big ideas:
+
+1. **Components.** A component is a function that returns a piece of UI. You build pages by combining small components, like HTML elements you design yourself (`<Navbar />`, `<ProductCard />`).
+2. **Data drives the UI.** Your data (called state) is the source of truth. The screen is a function of that data.
+
+<Callout type="note" title="Library, not framework">
+React only handles the UI. It does not include routing, data fetching or a server. You add those with other libraries (React Router and TanStack Query later in this module) or you use a framework built on React, such as Next.js. Learning plain React first makes frameworks much easier to understand.
+</Callout>
+
+## Why a build tool?
+
+Open `index.html` in a browser and you could load React from a `<script>` tag. Real projects don't, because browsers can't run what you actually write:
+
+- **JSX**, the HTML-like syntax in React code, is not valid JavaScript.
+- **TypeScript** has to be converted into JavaScript.
+- You want to `import` hundreds of files and npm packages, then ship them as a few small optimised files.
+
+A **build tool** handles all of that. This module uses **Vite** (pronounced "veet", French for "quick"). It gives you:
+
+- A **dev server** that starts almost instantly and updates the browser the moment you save a file.
+- A **production build** that bundles and minifies everything into static files.
+
+Vite takes the place of `create-react-app`, which the React team deprecated for new projects in February 2025. They now recommend a framework or a build tool like Vite. We use Vite here and Next.js later.
+
+## Create the project
+
+You need Node.js **20.19 or newer** (or 22.12+) for Vite 8. Check yours in the terminal:
+
+```bash
+node -v
+```
+
+Create the project. `react-ts` is the template name for React with TypeScript:
+
+```bash
+npm create vite@latest my-app -- --template react-ts
+```
+
+Reading this command: `npm create vite@latest` downloads and runs the latest project generator, `my-app` is the new folder name, and everything after `--` is passed to the generator. If you leave out `--template`, it asks you questions and you pick React, then TypeScript.
+
+Now install the dependencies and start the dev server:
+
+```bash
+cd my-app
+npm install
+npm run dev
+```
+
+The terminal prints something like this:
+
+```text
+  VITE v8.3.4  ready in 151 ms
+
+  ➜  Local:   http://localhost:5173/
+```
+
+Open that address. You'll see the starter page with a counter button. Leave the dev server running while you work; stop it with `Ctrl+C`.
+
+<Callout type="tip" title="Your template may look slightly different">
+The Vite team updates the starter often, so file names and the demo page can differ a little from this lesson. The structure explained below stays the same.
+</Callout>
+
+## Tour of the project
+
+```text
+my-app/
+├── index.html          the one HTML page
+├── package.json        dependencies and scripts
+├── vite.config.ts      Vite settings
+├── tsconfig.json       TypeScript settings (points at the two files below)
+├── tsconfig.app.json   settings for your src/ code
+├── tsconfig.node.json  settings for vite.config.ts
+├── public/             files served as-is (favicon, robots.txt)
+└── src/
+    ├── main.tsx        entry point: starts React
+    ├── App.tsx         your first component
+    ├── index.css       global styles
+    └── assets/         images and other files you import
+```
+
+### `index.html`: the only page
+
+```html
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+```
+
+A React app like this is a **single-page application (SPA)**: the browser loads one nearly empty HTML file, and JavaScript builds the whole page inside `<div id="root">`. The `<script type="module">` line loads your code. Unlike older tools, Vite keeps `index.html` at the project root, and it is the starting point for everything.
+
+### `src/main.tsx`: the entry point
+
+```tsx
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import "./index.css";
+import App from "./App.tsx";
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
+```
+
+Line by line:
+
+- `react-dom/client` is the package that connects React to the browser's DOM. (React itself is separate, so the same React can also render to phones or the terminal.)
+- `document.getElementById("root")` finds the empty `div` from `index.html`. The `!` after it is TypeScript's non-null assertion: `getElementById` can return `null`, and you promise it won't here.
+- `createRoot(...)` tells React "you own everything inside this element", and `.render(...)` says what to put there.
+- `import "./index.css"` pulls in the global stylesheet. Vite handles CSS imports.
+
+You rarely edit this file again. It runs once, at startup.
+
+### `StrictMode`: a development helper
+
+`StrictMode` doesn't render anything. In development it runs extra checks to expose bugs early. The most visible effect is that React calls each component function **twice** per render, to catch code that isn't predictable. A `console.log` inside a component therefore prints twice while developing.
+
+```tsx
+function App() {
+  console.log("App rendered"); // appears twice in dev, once in production
+  return <h1>Hello</h1>;
+}
+```
+
+<Callout type="warning" title="Don't remove StrictMode to hide the double log">
+The double call is the point: it reveals components that change things they shouldn't. In the production build, it runs once. Keep `StrictMode` on.
+</Callout>
+
+### `src/App.tsx`: your first component
+
+A component is a function whose name starts with a capital letter and that returns JSX. This is the smallest useful version:
+
+```tsx
+// src/App.tsx
+import { useState } from "react";
+
+function App() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <main>
+      <h1>Hello, React!</h1>
+      <p>You clicked {count} times.</p>
+      <button type="button" onClick={() => setCount(count + 1)}>
+        Click me
+      </button>
+    </main>
+  );
+}
+
+export default App;
+```
+
+What it does: `useState(0)` gives the component a piece of memory called state, starting at `0`, plus a function to change it. `{count}` puts the value into the page. Clicking the button calls `setCount`, React runs `App` again with the new value, and the text updates. The next two lessons explain JSX and state properly; for now, replace the contents of your `App.tsx` with this and watch the counter work.
+
+If you also delete `src/App.css`, make sure no file still imports it, or the build fails.
+
+### `package.json`: scripts and dependencies
+
+```json
+{
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  }
+}
+```
+
+- `dev` starts the dev server.
+- `build` first type-checks with TypeScript (`tsc -b`), then creates the production files in `dist/`. If there is a type error, the build stops.
+- `lint` runs the linter, which flags suspicious code, such as hooks used in the wrong place.
+- `preview` serves the built `dist/` folder locally so you can test the real production output.
+
+`dependencies` are packages your app needs at runtime. Tools used only while developing (Vite, TypeScript, type definitions) sit under `devDependencies`.
+
+## Hot module replacement
+
+Keep `npm run dev` running, then edit the heading in `App.tsx` to `<h1>Hello, Vite!</h1>` and save. The browser updates immediately without a full reload, and your counter keeps its value. This is **hot module replacement (HMR)**: Vite swaps only the changed module into the running page.
+
+HMR works well but isn't perfect. If the page looks stale or odd after a big change, refresh the tab. If a change to `index.html` or `vite.config.ts` doesn't appear, refresh or restart the dev server.
+
+## The production build
+
+```bash
+npm run build
+npm run preview
+```
+
+```text
+dist/index.html                   0.46 kB │ gzip:  0.29 kB
+dist/assets/index-DGNrK5qb.css    1.78 kB │ gzip:  0.81 kB
+dist/assets/index-AdVjVVO3.js   219.76 kB │ gzip: 68.69 kB
+✓ built in 84ms
+```
+
+`dist/` holds plain static files (one HTML file, one CSS file, one JavaScript file). You can host these on any static host. The long hashes in file names let browsers cache files safely, because a changed file gets a new name. Most of the 220 kB of JavaScript is React itself.
+
+Never open `dist/index.html` by double-clicking it. Files loaded from `file://` hit browser restrictions on modules. Use `npm run preview`, or any static server.
+
+### What happens when the page loads
+
+```text
+Browser requests /            → gets index.html (empty <div id="root">)
+Browser runs main.tsx         → createRoot(...).render(<App />)
+React calls App()             → gets JSX back
+React builds real DOM nodes   → puts them inside #root
+User clicks the button        → setCount → React calls App() again → updates only the changed text
+```
+
+## React Developer Tools
+
+Install the **React Developer Tools** extension for Chrome, Edge or Firefox (the link is in the docs list above). After installing, open your browser's DevTools and you'll find two new tabs:
+
+- **Components** shows the component tree (`App`, and the components inside it). Click one to see its **props** and **state**, and even edit state to test things.
+- **Profiler** records renders to show what re-rendered and how long it took. You'll use it in the performance lesson.
+
+In your app, open Components, select `App`, and you'll see the `useState` value as a hook entry. Click the button and watch it change live. The extension only lights up on pages that use React. Production builds usually have shortened component names, so DevTools is most useful on the dev server.
+
+## Cleaning up and good habits
+
+Every project starts the same way, so do this at the start of each new app:
+
+1. Replace the demo in `App.tsx` with your own markup, as above.
+2. Remove demo assets you don't use from `src/assets/` and `public/`.
+3. Keep the small starter styles or replace them. Tailwind comes in the styling lesson.
+4. Set the `<title>` in `index.html`; it defaults to your project name.
+5. Run `npm run lint` and `npm run build` now and then. A build that fails with a type error is much easier to fix straight after the change that caused it.
+
+### Common mistakes
+
+- **Running commands in the wrong folder.** `npm run dev` must run inside `my-app/` (where `package.json` is). If you see `Missing script: "dev"`, run `pwd` and `cd` into the project.
+- **Forgetting `npm install`** after creating or cloning a project. The `node_modules` folder is not committed to Git.
+- **Editing `dist/`.** It is generated output. Change `src/`, then build again.
+- **A blank white page.** Open the browser console (`F12`). Usually it names the problem: a typo in an import, or a missing `root` element.
+- **Putting code that needs `await` or the DOM in the component body.** Components should only compute JSX. Side effects get their own tool, `useEffect`, in lesson 6.
+
+<Exercise title="Create and change the app">
+Create a new project called `hello-react` with the `react-ts` template, install, and start it. Replace `App.tsx` with a heading that says your name, a paragraph, and the counter button from this lesson. Confirm it works in the browser, then run `npm run build` and `npm run preview` and open the preview address.
+
+<Solution>
+```bash
+npm create vite@latest hello-react -- --template react-ts
+cd hello-react
+npm install
+npm run dev        # http://localhost:5173
+```
+
+```tsx
+// src/App.tsx
+import { useState } from "react";
+
+function App() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <main>
+      <h1>Hi, I'm Asha</h1>
+      <p>I'm learning React.</p>
+      <button type="button" onClick={() => setCount(count + 1)}>
+        Clicked {count} times
+      </button>
+    </main>
+  );
+}
+
+export default App;
+```
+
+```bash
+npm run build
+npm run preview    # http://localhost:4173
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the output">
+You add a log line to `App`:
+
+```tsx
+function App() {
+  console.log("App rendered");
+  const [count, setCount] = useState(0);
+  // ...
+}
+```
+
+You reload the page in the dev server, then click the button once. Roughly how many times does "App rendered" appear in the console, and how many times would you see it in the same flow of a production build?
+
+<Solution>
+In development with `StrictMode`, the first load logs it **twice** (React renders twice to check for impure code), and the click causes another render that logs **twice** more, so about four lines. In a production build there is no double rendering: once on load and once after the click, so two lines. The extra calls are a development check, not a bug in your code.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the blank page">
+After a refactor, the page is blank and the console shows `Uncaught Error: Target container is not a DOM element.` Here are the two relevant files. Find and fix the problem.
+
+```html
+<!-- index.html -->
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+```
+
+```tsx
+// src/main.tsx
+createRoot(document.getElementById("root")!).render(<App />);
+```
+
+<Solution>
+`main.tsx` looks for an element with id `root`, but `index.html` has `id="app"`, so `getElementById` returns `null` (the `!` only silences TypeScript, it doesn't create the element). Make the two match. Either change the HTML:
+
+```html
+<div id="root"></div>
+```
+
+or change the lookup: `document.getElementById("app")!`. The convention is `root`.
+</Solution>
+</Exercise>
+
+<Exercise title="Explore the tree">
+Install React DevTools. In your app, open the Components tab, select `App`, and find the `count` state. Click the button three times. Then, without clicking the button, use DevTools to change the state to `100` and describe what you see on the page.
+
+<Solution>
+In the Components tab, `App` lists its hooks; the `State` entry shows the number. Click it, type `100` and press Enter. The page immediately shows "100" (or your own text) because React re-rendered `App` with that state, exactly as it would after `setCount(100)`. This proves the UI is driven by state: change the data and the screen follows, with no DOM code from you.
+</Solution>
+</Exercise>

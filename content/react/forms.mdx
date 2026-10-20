@@ -1,0 +1,400 @@
+---
+title: Forms
+summary: Build forms in React with controlled and uncontrolled inputs, then use React Hook Form and Zod to validate, submit and show errors without writing the plumbing yourself.
+order: 11
+takeaways:
+  - A controlled input gets its value from state and updates it in onChange, so React is the source of truth; an uncontrolled input keeps its own value in the DOM and you read it on submit.
+  - Controlled inputs re-render the component on every keystroke, which is fine for small forms but adds up with many fields and extra validation.
+  - React Hook Form registers inputs as uncontrolled and gives you errors, isSubmitting and handleSubmit, so a form needs very little state code of your own.
+  - A Zod schema describes valid data once; the zodResolver runs it on submit, and z.infer gives you the matching TypeScript type.
+  - Field errors from the server belong in the form with setError, and a rule that compares two fields needs refine with a path.
+  - Always validate again on the server, because client-side validation only helps honest users.
+videos:
+  - title: "Controlled vs Uncontrolled Components in React | Explained Clearly"
+    channel: "Code Ryan"
+    duration: "9:06"
+    url: https://www.youtube.com/watch?v=TRZ6K7hzBzo
+  - title: "React Hook Form - Complete Tutorial (with Zod)"
+    channel: "Cosden Solutions"
+    duration: "28:22"
+    url: https://www.youtube.com/watch?v=cc_xmawJ8Kg
+docs:
+  - title: "react.dev — <input>"
+    url: https://react.dev/reference/react-dom/components/input
+  - title: "react.dev — <form>"
+    url: https://react.dev/reference/react-dom/components/form
+  - title: "React Hook Form — Get started"
+    url: https://react-hook-form.com/get-started
+  - title: "React Hook Form — useForm"
+    url: https://react-hook-form.com/docs/useform
+  - title: "Zod — API reference"
+    url: https://zod.dev/api
+---
+
+Almost every real app has a sign-up form, a checkout, a settings page or a search box, and interviewers love to ask "controlled or uncontrolled?" and "how do you validate a form?". Forms are also where beginners write the most repeated code: one `useState` per field, one `if` per error, one flag for "submitting". This lesson shows the plain React way first, so you understand what is happening, then the library pair most teams use: **React Hook Form** (RHF) and **Zod**.
+
+Written for React 19, React Hook Form 7.90, Zod 4 and `@hookform/resolvers` 6, in the Vite + TypeScript app from lesson 1. Lesson 12 adds React 19's form Actions, and the Next.js module uses Zod with Server Actions.
+
+## Controlled inputs
+
+A **controlled** input has its value in React state. You pass the state to `value` and update it in `onChange`, so the screen always shows what the state holds:
+
+```tsx
+import { useState } from "react";
+import type { FormEvent } from "react";
+
+export function ControlledSignup() {
+  const [email, setEmail] = useState("");
+  const [age, setAge] = useState("");
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    console.log({ email, age: Number(age) });
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <label>
+        Email
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      </label>
+      <label>
+        Age
+        <input type="number" value={age} onChange={(e) => setAge(e.target.value)} />
+      </label>
+      <p>Live preview: {email || "(empty)"}</p>
+      <button type="submit">Sign up</button>
+    </form>
+  );
+}
+```
+
+Typing `x@y.co` shows "Live preview: x@y.co" after every keystroke, because each key calls `setEmail` and React renders again. Three details matter (use controlled inputs when the UI must react to each keystroke):
+
+- `event.preventDefault()` stops the browser's default submit, which would reload the page.
+- `e.target.value` is **always a string**, even for `type="number"`. That is why `age` is a string and we convert with `Number(age)`.
+- Start state at `""`, never `undefined`. A value that changes from `undefined` to a string makes React warn that the input switched from uncontrolled to controlled.
+
+<Callout type="warning" title="value without onChange freezes the input">
+`<input value="hello" />` renders but can't be edited, and React logs "You provided a `value` prop to a form field without an `onChange` handler". Add `onChange`, or use `defaultValue` if you want the input to start with a value and stay editable.
+</Callout>
+
+## Uncontrolled inputs
+
+An **uncontrolled** input keeps its value in the DOM, as plain HTML does. React doesn't re-render while the user types; you read the values when the form is submitted, using the browser's `FormData`:
+
+```tsx
+function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault();
+  const data = new FormData(event.currentTarget);
+  const email = String(data.get("email"));
+  const newsletter = data.get("newsletter") === "on";
+  console.log({ email, newsletter });
+}
+
+return (
+  <form onSubmit={handleSubmit}>
+    <input name="email" type="email" defaultValue="" />
+    <label>
+      <input name="newsletter" type="checkbox" /> Send me the newsletter
+    </label>
+    <button type="submit">Sign up</button>
+  </form>
+);
+```
+
+Typing `u@v.co`, ticking the box and submitting logs `{ email: "u@v.co", newsletter: true }`. Each input needs a `name`, which is the key in `FormData`. `data.get` returns `FormDataEntryValue | null` (a string, a `File` or `null`), so convert it yourself. An unticked checkbox isn't in `FormData` at all, so `get` returns `null`.
+
+| | Controlled | Uncontrolled |
+| --- | --- | --- |
+| Value lives in | React state | The DOM |
+| Renders per keystroke | Yes | No |
+| Live validation, preview, formatting | Easy | Awkward |
+| File inputs | Not possible | The only option |
+
+Neither is "better". The trouble with both is what comes next: errors, "touched" fields, submit state and reset. Writing that by hand for a ten-field form is a lot of `useState`.
+
+## React Hook Form
+
+React Hook Form handles all of that. It registers inputs as **uncontrolled**, so typing doesn't re-render your component, and tracks errors and submit status for you.
+
+```bash
+npm install react-hook-form zod @hookform/resolvers
+# if npm reports an ERESOLVE peer-dependency conflict, add --legacy-peer-deps
+```
+
+```tsx
+import { useForm } from "react-hook-form";
+
+type Values = { email: string };
+
+export function RhfBasic() {
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<Values>();
+
+  function onSubmit(values: Values) {
+    console.log("valid:", values);
+  }
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} noValidate>
+      <label>
+        Email
+        <input
+          type="email"
+          {...register("email", {
+            required: "Email is required",
+            pattern: { value: /^\S+@\S+\.\S+$/, message: "Enter a valid email" },
+          })}
+        />
+      </label>
+      {errors.email && <p role="alert">{errors.email.message}</p>}
+
+      <button type="submit">Sign up</button>
+    </form>
+  );
+}
+```
+
+Clicking "Sign up" on the empty form shows "Email is required" and does **not** call `onSubmit`. What each part does:
+
+- `useForm<Values>()` creates the form. The type parameter makes `register("emial")` a compile error.
+- `register("email", rules)` returns an object with `name`, `onChange`, `onBlur` and `ref`. Spreading it onto the input (`{...register("email")}`) is how RHF connects to that field.
+- `handleSubmit(onSubmit)` returns the submit handler. It calls `preventDefault` for you, validates, and calls `onSubmit` with the values only when everything is valid.
+- `formState.errors` holds the current error for each field, with the `message` you gave.
+- `noValidate` on the `<form>` turns off the browser's own popups, so your messages are shown instead.
+
+By default RHF validates on submit, then re-checks a field each time it changes, so an error disappears as the user fixes it. `mode: "onBlur"` or `mode: "onChange"` in `useForm` changes that.
+
+This works, but the rules are scattered through the JSX and can't be reused on the server. Zod fixes that.
+
+## Describing valid data with Zod
+
+**Zod** lets you write the shape and rules of your data once, as a **schema**. You can run the schema anywhere: in the browser, in Express (module 2.2) or in a Server Action.
+
+```ts
+// schema.ts
+import { z } from "zod";
+
+export const signupSchema = z
+  .object({
+    name: z.string().trim().min(2, "Name must be at least 2 characters"),
+    email: z.email("Enter a valid email"),
+    age: z.coerce
+      .number({ error: "Age must be a number" })
+      .int("Age must be a whole number")
+      .min(18, "You must be 18 or older"),
+    password: z.string().min(8, "At least 8 characters"),
+    confirmPassword: z.string(),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: "Passwords do not match",
+    path: ["confirmPassword"],
+  });
+
+export type SignupInput = z.input<typeof signupSchema>;
+export type SignupData = z.output<typeof signupSchema>;
+```
+
+You can try a schema in plain Node, with no React. `safeParse` never throws; it returns `{ success, data }` or `{ success: false, error }`. A good submission comes back cleaned up (`" Asha "` becomes `"Asha"`, `"30"` becomes `30`), and a bad one lists every problem by field:
+
+```ts
+const bad = signupSchema.safeParse({
+  name: "A", email: "nope", age: "abc", password: "123", confirmPassword: "x",
+});
+console.log(bad.error?.issues.map((i) => `${i.path.join(".")}: ${i.message}`));
+// ['name: Name must be at least 2 characters', 'email: Enter a valid email',
+//  'age: Age must be a number', 'password: At least 8 characters']
+```
+
+How the schema works:
+
+- `z.object({...})` describes an object, and each key gets a schema. The text you pass (`"At least 8 characters"`) is the error message.
+- **Checks chain** left to right: `.trim()` modifies the value, then `.min(2)` checks it.
+- **`z.coerce.number()`** converts a string to a number first. HTML inputs always give strings, so without it the `age` rule would fail on `"30"` with "Invalid input: expected number, received string".
+- **`refine`** adds a custom rule across fields. Zod can't know which field a failed `refine` belongs to, so `path: ["confirmPassword"]` tells it where to attach the error.
+- **Inferred types**: `z.infer<typeof schema>` gives the output type, so you never write the type by hand and the two can't drift apart. Here we use `z.input` and `z.output` because `coerce` makes them differ: the form holds `age` as the string `"30"` (input), but your submit code receives the number `30` (output).
+
+<Callout type="warning" title="Two Zod surprises">
+First, `refine` on an object runs only when every field already passed. In the "bad" example above there is no "Passwords do not match" message at all, so a user may fix four errors and then see a fifth. Second, `z.coerce.number()` turns an empty string into `0`, so an empty age field shows "You must be 18 or older" rather than "required". If you want a different message, check for empty yourself, for example with `z.string().min(1, "Age is required")` before converting.
+</Callout>
+
+## Connecting RHF and Zod
+
+The `zodResolver` plugs a schema into `useForm`, replacing the `required` and `pattern` rules in `register`:
+
+```tsx
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { signupSchema } from "../schema";
+import type { SignupData, SignupInput } from "../schema";
+
+const {
+  register,
+  handleSubmit,
+  formState: { errors, isSubmitting },
+} = useForm<SignupInput, unknown, SignupData>({
+  resolver: zodResolver(signupSchema),
+  defaultValues: { name: "", email: "", age: "", password: "", confirmPassword: "" },
+});
+```
+
+The three type arguments are the form's input type, an unused context slot (`unknown`), and the output type. `onSubmit` then receives `SignupData` (with `age` as a number), while `register("age")` still treats the field as the input type. If your schema has no `coerce` or transforms, `useForm<z.infer<typeof schema>>` is enough.
+
+Always provide `defaultValues`. Without them every field starts as `undefined`, which causes the controlled/uncontrolled warning when you use controlled components, and `reset()` has nothing to go back to.
+
+The fields only need `register` now:
+
+```tsx
+<label>
+  Name
+  <input {...register("name")} aria-invalid={!!errors.name} />
+</label>
+{errors.name && <p role="alert">{errors.name.message}</p>}
+```
+
+`aria-invalid` and `role="alert"` let screen readers announce the problem. Repeating this group for every field gets old, so teams extract a small `TextField` component; shadcn/ui (lesson 13) ships one.
+
+## Submitting and server errors
+
+A real submit calls an API, which takes time and can fail. RHF tracks the waiting part for you: if `onSubmit` is async, `isSubmitting` is `true` until it settles.
+
+Here `signUp` is a fake API call that waits 0.8 seconds, then throws `Error("EMAIL_TAKEN")` for `taken@example.com`.
+
+```tsx
+const { setError, reset } = useForm<SignupInput, unknown, SignupData>({ /* as above */ });
+
+async function onSubmit(data: SignupData) {
+  try {
+    await signUp(data);
+    reset();
+  } catch (err) {
+    if (err instanceof Error && err.message === "EMAIL_TAKEN") {
+      setError("email", { message: "That email is already registered" });
+    } else {
+      setError("root", { message: "Something went wrong. Try again." });
+    }
+  }
+}
+
+// in the JSX
+{errors.root && <p role="alert">{errors.root.message}</p>}
+<button type="submit" disabled={isSubmitting}>
+  {isSubmitting ? "Signing up…" : "Sign up"}
+</button>
+```
+
+In the sandbox, an empty submit showed four errors without calling `onSubmit`; differing passwords showed "Passwords do not match" under Confirm password; `taken@example.com` disabled the button ("Signing up…") for 0.8s and then showed "That email is already registered" under Email; and a new email showed "Account created!" with every field empty again.
+
+`setError("email", ...)` attaches a message to one field, exactly like a validation error, and `"root"` is for errors that belong to the whole form. Disabling the button while `isSubmitting` stops double submits, a classic bug that creates duplicate orders. `reset()` returns every field to `defaultValues` and clears errors.
+
+<Callout type="tip" title="Validate again on the server">
+Anyone can send a request without your form, using curl or the browser console. Run the same schema in your API, and return field-level errors for it to display. Putting `schema.ts` where both sides can import it is the main reason teams pick Zod; you'll do this in the validation lesson of the Node module.
+</Callout>
+
+## Showing live values
+
+Sometimes a form needs to show something based on what is typed, like a character counter. Use `useWatch`:
+
+```tsx
+import { useForm, useWatch } from "react-hook-form";
+
+const { register, control } = useForm<{ bio: string }>({ defaultValues: { bio: "" } });
+const bio = useWatch({ control, name: "bio" });
+
+return (
+  <>
+    <textarea {...register("bio")} />
+    <p>{bio.length}/20</p>
+  </>
+);
+```
+
+There is also a `watch()` function on the form object, but the React Compiler (on in this course) can't safely optimise components that call it, and the linter warns about "incompatible library". `useWatch` is the version to use. It re-renders on each keystroke, so watch only the fields you need. To disable "Save" until the form is valid, use `mode: "onChange"` and `formState.isValid`.
+
+<Exercise title="Predict the output">
+What happens when you type in each input, and what does React log?
+
+```tsx
+function Demo() {
+  const [name, setName] = useState("Ben");
+  return (
+    <>
+      <input value="hello" />
+      <input value={name} onChange={() => {}} />
+      <input defaultValue="hi" />
+    </>
+  );
+}
+```
+
+<Solution>
+The first input can't be edited, and React logs "You provided a `value` prop to a form field without an `onChange` handler". The second can't be edited either: it is controlled by `name`, and its `onChange` never calls `setName`, so every keystroke is thrown away and the state stays "Ben" (no warning, because a handler exists). The third works normally: `defaultValue` only sets the starting text, and the DOM owns the value after that.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the validation bug">
+The user types `30` in the age field, but the form says "Invalid input: expected number, received string". Why, and what are two fixes?
+
+```tsx
+const schema = z.object({ age: z.number().min(18) });
+
+<input type="number" {...register("age")} />
+```
+
+<Solution>
+Inputs always produce strings, even with `type="number"`, and `z.number()` rejects a string. Two fixes:
+
+```tsx
+// 1. Let Zod convert it
+const schema = z.object({ age: z.coerce.number().min(18) });
+
+// 2. Let React Hook Form convert it before Zod sees it
+<input type="number" {...register("age", { valueAsNumber: true })} />
+```
+
+With `valueAsNumber`, an empty field becomes `NaN`, which Zod reports as "expected number, received NaN", so give that message a friendlier text with `z.number({ error: "Age is required" })`.
+</Solution>
+</Exercise>
+
+<Exercise title="Accept the terms">
+Add a "I accept the terms" checkbox to a form. Submitting without ticking it must show "You must accept the terms".
+
+<Solution>
+```tsx
+const schema = z.object({
+  terms: z.boolean().refine((value) => value, "You must accept the terms"),
+});
+type Input = z.input<typeof schema>;
+
+const { register, handleSubmit, formState: { errors } } = useForm<Input>({
+  resolver: zodResolver(schema),
+  defaultValues: { terms: false },
+});
+
+<label>
+  <input type="checkbox" {...register("terms")} /> I accept the terms
+</label>
+{errors.terms && <p role="alert">{errors.terms.message}</p>}
+```
+
+RHF gives `true` or `false` for a single checkbox. `z.literal(true, { error: "..." })` also works, but then `defaultValues: { terms: false }` is a type error because the input type is just `true`.
+</Solution>
+</Exercise>
+
+<Exercise title="Optional website field">
+Add an optional "Website" field that is valid when empty or a proper URL. Why does `z.url().optional()` fail on an empty input?
+
+<Solution>
+An empty text input gives `""`, not `undefined`, and `optional()` only accepts `undefined`. Allow the empty string explicitly:
+
+```ts
+website: z.url("Enter a valid URL").or(z.literal("")),
+```
+
+In the sandbox this accepted `""` and `"https://a.dev"` and rejected `"x"`, while `z.url().optional()` rejected `""`.
+</Solution>
+</Exercise>

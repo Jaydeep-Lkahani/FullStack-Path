@@ -1,0 +1,399 @@
+---
+title: Global State with Zustand and Redux Toolkit
+summary: "Share client state across components with Zustand, add persistence, and read Redux Toolkit code well enough for interviews and older codebases."
+order: 16
+takeaways:
+  - A store holds client state outside the component tree, so any component can read it or change it without props or a provider.
+  - A Zustand component passes a selector to the store hook and re-renders only when the selected value changes.
+  - Zustand updates must be immutable, because set compares by reference and changing an object in place does not re-render anything.
+  - In Zustand 5 a selector that returns a new object every time needs useShallow, or React loops forever.
+  - The persist middleware saves part of a store to localStorage, and version plus migrate handle old saved shapes.
+  - Redux Toolkit puts state in one store built from slices, changes it by dispatching actions, and lets you write reducers with Immer so they look like mutations.
+videos:
+  - title: "Zustand - Complete Tutorial"
+    channel: "Cosden Solutions"
+    duration: "19:27"
+    url: https://www.youtube.com/watch?v=_ngCLZ5Iz-0
+  - title: "React Redux Tutorial for Beginners: Easiest Way to Learn Redux Toolkit"
+    channel: "Code with Ahsan"
+    duration: "42:33"
+    url: https://www.youtube.com/watch?v=RmPGtHrvT8Y
+docs:
+  - title: "Zustand — Introduction"
+    url: https://zustand.docs.pmnd.rs/learn/getting-started/introduction
+  - title: "Zustand — Persisting store data"
+    url: https://zustand.docs.pmnd.rs/reference/middlewares/persist
+  - title: "Redux — Redux Toolkit quick start"
+    url: https://redux.js.org/tutorials/quick-start
+---
+
+Sooner or later two distant components need the same data: the cart count in the header, the items in the cart page, and the "Add" buttons on product cards. Passing props through every level is painful, and "which state management library?" is one of the most common interview questions. This lesson shows when you need a store, builds one with Zustand (the choice for this course's projects, including the expense tracker), and then covers Redux Toolkit, which you will meet in many existing codebases.
+
+Written for Zustand 5.0, Redux Toolkit 2.13 and React Redux 9.3, in the Vite + TypeScript app from lesson 1. The server data (lists from an API) belongs in TanStack Query from the last lesson, so everything here is **client state**: a cart, a coupon code, a theme.
+
+## Do you need a store?
+
+Go up this ladder one step at a time, and stop at the first step that works:
+
+1. **`useState` in the component** that uses the value.
+2. **Lift the state up** to the closest shared parent (lesson 4).
+3. **Context** (lesson 7), for values that rarely change, such as the theme or the current user.
+4. **A store**, when many unrelated components read or change the same fast-changing state.
+
+Context has a weakness at step 4. Every component that reads a context re-renders when **any part** of its value changes. In a test, a context holding `{ a, b }` and a component that only reads `a` re-rendered on each update of `b`. With a store, a component subscribes to just the slice it needs, so unrelated updates leave it alone.
+
+## Zustand: your first store
+
+```bash
+npm install zustand
+```
+
+A **store** is a hook created with `create`. It holds the state and the functions that change it, together:
+
+```ts
+// src/store/cart.ts
+import { create } from "zustand";
+
+export type CartItem = { id: string; name: string; price: number; qty: number };
+
+type CartState = {
+  items: CartItem[];
+  couponCode: string;
+  add: (product: Omit<CartItem, "qty">) => void;
+  remove: (id: string) => void;
+  setCoupon: (code: string) => void;
+};
+
+export const useCartStore = create<CartState>()((set) => ({
+  items: [],
+  couponCode: "",
+  add: (product) =>
+    set((state) => {
+      const existing = state.items.find((item) => item.id === product.id);
+      if (existing) {
+        return {
+          items: state.items.map((item) =>
+            item.id === product.id ? { ...item, qty: item.qty + 1 } : item,
+          ),
+        };
+      }
+      return { items: [...state.items, { ...product, qty: 1 }] };
+    }),
+  remove: (id) => set((state) => ({ items: state.items.filter((item) => item.id !== id) })),
+  setCoupon: (couponCode) => set({ couponCode }),
+}));
+```
+
+Notes:
+
+- `create<CartState>()(...)` has two pairs of parentheses on purpose. The first call passes the type, and the second passes the store. Without the type, TypeScript can't know what `set` and `state` are. You will see this shape in every TypeScript Zustand project.
+- `set` takes a **partial** update and **merges** it: `set({ couponCode })` keeps `items` untouched. Pass a function when the new value depends on the old one.
+- There is no provider. The hook works anywhere, which is the main difference from context and Redux.
+
+### Reading with selectors
+
+A component calls the hook with a **selector**, a function that picks what it needs:
+
+```tsx
+import { useCartStore } from "../store/cart";
+
+export function CartBadge() {
+  const count = useCartStore((state) => state.items.reduce((sum, item) => sum + item.qty, 0));
+  return <p>Cart: {count} items</p>;
+}
+
+export function Coupon() {
+  const couponCode = useCartStore((state) => state.couponCode);
+  const setCoupon = useCartStore((state) => state.setCoupon);
+  return <input value={couponCode} onChange={(e) => setCoupon(e.target.value)} />;
+}
+```
+
+An action such as `add` is read the same way: `const add = useCartStore((state) => state.add)`.
+
+The component re-renders only when what its selector returns changes (compared with `Object.is`). That is the whole trick, and we measured it: with `CartBadge`, `Products`, `Coupon` and a cart panel on screen, clicking Add re-rendered `CartBadge` and the panel, but not `Products` or `Coupon`. Typing in the coupon box re-rendered only `Coupon`. Derived values such as the total or the count are computed in the selector, and are not stored as extra state that could get out of sync. Calling the hook without a selector returns the whole store, so avoid it.
+
+<Callout type="warning" title="A selector that returns a new object loops forever in Zustand 5">
+Selecting several fields as an object, `useCartStore((s) => ({ count: s.items.length, couponCode: s.couponCode }))`, creates a new object on every call, so React thinks the state changed every time. In Zustand 5 the page went blank, and the console said "The result of getSnapshot should be cached to avoid an infinite loop" followed by "Maximum update depth exceeded". Wrap such a selector in `useShallow`, or use one hook call per field.
+</Callout>
+
+```tsx
+import { useShallow } from "zustand/react/shallow";
+
+const { count, couponCode } = useCartStore(
+  useShallow((state) => ({ count: state.items.length, couponCode: state.couponCode })),
+);
+```
+
+`useShallow` compares the object's fields one by one, so the component renders again only when `count` or `couponCode` actually changes. A quantity change that left both the same caused no render, and a coupon change did.
+
+### Updates must be immutable
+
+<Callout type="warning" title="Mutating state in place does not update the screen">
+`set` compares the new state with the old one by reference. If you change the existing object and return it, nothing looks different to Zustand and no component re-renders:
+
+```ts
+useCartStore.setState((state) => {
+  state.items[0].qty = 99; // mutation
+  return state;            // same reference
+});
+```
+
+In the test, the store held `qty: 99` but the screen still said `x2`, with zero renders. The screen caught up only after the next real update that created a new array. Always return new arrays and objects: `map`, `filter`, spread.
+</Callout>
+
+### Using a store outside React
+
+The hook is also a plain object with `getState`, `setState` and `subscribe`. That helps in event handlers, utility files and tests, where you cannot call a hook:
+
+```ts
+useCartStore.getState().add({ id: "ms", name: "Mouse", price: 25 });
+```
+
+Running that line from the browser console added the mouse to the cart on screen, with no component involved.
+
+### Persisting to localStorage
+
+The `persist` middleware (a wrapper around the store creator) saves the state in `localStorage` and loads it on startup:
+
+```ts
+import { persist } from "zustand/middleware";
+
+export const useCartStore = create<CartState>()(
+  persist(
+    (set) => ({
+      // ...same state and actions as before
+    }),
+    {
+      name: "cart-v1",
+      partialize: (state) => ({ items: state.items }),
+    },
+  ),
+);
+```
+
+`name` is the storage key and `partialize` picks the fields to save, so the coupon box is not remembered but the cart is. After adding two keyboards and reloading the page, the cart still said "Cart: 2 items", and `localStorage` held `{"state":{"items":[{"id":"kb",...,"qty":2}]},"version":0}`. Functions are not saved, since they are recreated from the code.
+
+When you change the shape of saved data, bump `version` and write `migrate`, or old users load data that no longer fits. Here `ids` used to be a comma separated string and is now an array of numbers:
+
+```ts
+persist(creator, {
+  name: "favorites",
+  version: 1,
+  migrate: (persisted, version) => {
+    if (version === 0) {
+      const old = persisted as { ids: string };
+      return { ids: old.ids.split(",").map(Number) };
+    }
+    return persisted as { ids: number[] };
+  },
+});
+```
+
+A saved `{ ids: "1,2" }` at version 0 came back as `[1,2]` and was rewritten with `"version":1`. Remember what lesson "Browser storage" said: `localStorage` can be edited by the user and read by any script on the page, so never store tokens or secrets in a persisted store, and treat loaded data as untrusted.
+
+## Redux Toolkit
+
+**Redux** is the older and bigger approach, and **Redux Toolkit (RTK)** is its official, much simpler way to write it. You do not need it for the projects here, but job listings still ask for it. The ideas:
+
+- One **store** holds all the state.
+- A component never changes the state directly. It **dispatches an action**, a plain object describing what happened, such as `{ type: "cart/add", payload: {...} }`.
+- A **reducer** is a pure function `(state, action) => newState` that computes the next state.
+- Components read with a **selector** and re-render when the selected value changes.
+
+```text
+click -> dispatch(action) -> reducer(state, action) -> new state -> selectors -> re-render
+```
+
+The same cart as an RTK **slice**, which is the state, the reducers and the generated action creators for one feature:
+
+```ts
+// src/redux/cartSlice.ts
+import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import type { CartItem } from "../store/cart";
+
+type CartState = { items: CartItem[]; couponCode: string };
+
+const initialState: CartState = { items: [], couponCode: "" };
+
+export const cartSlice = createSlice({
+  name: "cart",
+  initialState,
+  reducers: {
+    add: (state, action: PayloadAction<Omit<CartItem, "qty">>) => {
+      const existing = state.items.find((item) => item.id === action.payload.id);
+      if (existing) {
+        existing.qty += 1;
+      } else {
+        state.items.push({ ...action.payload, qty: 1 });
+      }
+    },
+    remove: (state, action: PayloadAction<string>) => {
+      state.items = state.items.filter((item) => item.id !== action.payload);
+    },
+    setCoupon: (state, action: PayloadAction<string>) => {
+      state.couponCode = action.payload;
+    },
+  },
+});
+
+export const { add, remove, setCoupon } = cartSlice.actions;
+export default cartSlice.reducer;
+```
+
+Those reducers look like mutations (`existing.qty += 1`, `push`), which would be a bug in Zustand. In RTK they are safe because of **Immer**: it hands you a draft copy, records your changes, and produces a new immutable state. In a test, two `add` calls produced a new state object, and the old state was untouched. When only the coupon changed, `items` was the **same array** as before, which is how selectors know that nothing changed there.
+
+Calling `add({ id: "kb", name: "Keyboard", price: 49 })` does not change anything. It only builds the action `{ type: "cart/add", payload: { id: "kb", ... } }`, and `dispatch` sends it to the reducer.
+
+Next the store and typed hooks (unlike Zustand, Redux also needs a provider):
+
+```ts
+// src/redux/store.ts
+export const store = configureStore({ reducer: { cart: cartReducer } });
+
+export type RootState = ReturnType<typeof store.getState>;
+export type AppDispatch = typeof store.dispatch;
+
+// src/redux/hooks.ts
+export const useAppDispatch = useDispatch.withTypes<AppDispatch>();
+export const useAppSelector = useSelector.withTypes<RootState>();
+```
+
+```tsx
+// main.tsx wraps <App /> in <Provider store={store}>; then in a component:
+const items = useAppSelector((state) => state.cart.items);
+const dispatch = useAppDispatch();
+<button onClick={() => dispatch(add({ id: "kb", name: "Keyboard", price: 49 }))}>Add</button>;
+```
+
+The types come from the store itself (`RootState`, `AppDispatch`), and the pre-typed hooks save you from annotating every selector. Selectors behave as in Zustand: with the cart and a coupon display on screen, dispatching `setCoupon` re-rendered only the coupon component.
+
+`configureStore` also connects the Redux DevTools browser extension, where you can see each action and travel back through earlier states. That is the biggest reason teams like Redux. RTK also ships RTK Query for server data, but this course uses TanStack Query for that, as most new projects do.
+
+### Zustand or Redux Toolkit?
+
+| | Zustand | Redux Toolkit |
+| --- | --- | --- |
+| Setup | One `create` call, no provider | Slice, store, provider, typed hooks |
+| Updating | `set` with immutable updates | Dispatch actions, Immer reducers |
+| Code for the cart | About 30 lines, 1 file | About 50 lines, 3 files |
+| Strength | Small and quick to learn | Strict structure, DevTools, fits large teams |
+
+Pick Zustand for a new project of your own. Pick Redux Toolkit when the codebase already uses it. Both stay small if server data lives in TanStack Query and only real client state goes into the store.
+
+<Exercise title="Predict the renders">
+Two components use the cart store:
+
+```tsx
+function A() {
+  const count = useCartStore((s) => s.items.length);
+  return <p>{count}</p>;
+}
+
+function B() {
+  const couponCode = useCartStore((s) => s.couponCode);
+  return <p>{couponCode}</p>;
+}
+```
+
+Which components re-render after `add` for a product already in the cart (so its quantity goes from 1 to 2), and which after `setCoupon("SAVE")`?
+
+<Solution>
+After `add` for an existing product, `items` is a new array but its length is still 1, so `A`'s selector returns the same number and `A` does **not** re-render. `B` does not either. After `setCoupon("SAVE")` only `B` re-renders, because `A`'s selector still returns the same length. A selector decides what a component cares about, and not the whole store.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+Clicking "Add" updates nothing on screen, although the store does hold the new item. Why, and how do you fix it?
+
+```ts
+add: (product) =>
+  set((state) => {
+    state.items.push({ ...product, qty: 1 });
+    return state;
+  }),
+```
+
+<Solution>
+`push` changes the existing array, and `return state` gives back the same object, so Zustand sees the same reference and notifies no one. Return new objects:
+
+```ts
+add: (product) => set((state) => ({ items: [...state.items, { ...product, qty: 1 }] })),
+```
+
+In Redux Toolkit the original code would be correct, because Immer turns the mutation into a new state. Zustand has no Immer by default, so you write immutable updates yourself.
+</Solution>
+</Exercise>
+
+<Exercise title="A favorites store">
+Build `useFavoritesStore` with `ids: string[]` and `toggle(id)` (adds the id if it is missing and removes it if present). It must survive a page reload. Then show how a `FavoriteButton` component reads whether its own `id` is a favorite so it re-renders only when that changes.
+
+<Solution>
+```ts
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+
+type FavoritesState = {
+  ids: string[];
+  toggle: (id: string) => void;
+};
+
+export const useFavoritesStore = create<FavoritesState>()(
+  persist(
+    (set) => ({
+      ids: [],
+      toggle: (id) =>
+        set((state) => ({
+          ids: state.ids.includes(id) ? state.ids.filter((x) => x !== id) : [...state.ids, id],
+        })),
+    }),
+    { name: "favorites-v1" },
+  ),
+);
+```
+
+```tsx
+function FavoriteButton({ id }: { id: string }) {
+  const isFavorite = useFavoritesStore((state) => state.ids.includes(id));
+  const toggle = useFavoritesStore((state) => state.toggle);
+  return <button onClick={() => toggle(id)}>{isFavorite ? "Unfavorite" : "Favorite"}</button>;
+}
+```
+
+The selector returns a boolean, so toggling a different id leaves the button alone. `persist` saves all fields here (functions are skipped), so no `partialize` is needed.
+</Solution>
+</Exercise>
+
+<Exercise title="Write a Redux slice and test it">
+Create a `counter` slice (initial state `{ value: 0 }`) with `increment` and `incrementByAmount(number)`. Check it by calling the reducer directly, without React.
+
+<Solution>
+```ts
+import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+
+export const counterSlice = createSlice({
+  name: "counter",
+  initialState: { value: 0 },
+  reducers: {
+    increment: (state) => {
+      state.value += 1;
+    },
+    incrementByAmount: (state, action: PayloadAction<number>) => {
+      state.value += action.payload;
+    },
+  },
+});
+
+export const { increment, incrementByAmount } = counterSlice.actions;
+export default counterSlice.reducer;
+```
+
+```ts
+let state = counterReducer(undefined, { type: "unknown" }); // { value: 0 }
+state = counterReducer(state, increment());                 // { value: 1 }
+state = counterReducer(state, incrementByAmount(5));        // { value: 6 }
+```
+
+Run in Node this printed `{"value":0}` and then `{"value":6}`. Reducers are pure functions, so testing them needs no store and no rendering.
+</Solution>
+</Exercise>

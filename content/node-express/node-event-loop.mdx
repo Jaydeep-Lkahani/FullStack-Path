@@ -1,0 +1,265 @@
+---
+title: The Node.js Event Loop
+summary: Predict the order Node runs timers, promises, nextTick and setImmediate, and understand why blocking the single JavaScript thread slows down every user.
+order: 2
+takeaways:
+  - Node runs your JavaScript on one thread, and libuv's event loop moves through phases (timers, poll, check and others) to run callbacks.
+  - Between callbacks Node empties the `process.nextTick` queue and then the promise queue, so those run before the loop moves on.
+  - Callbacks from `setImmediate` run in the check phase, right after I/O, so inside an I/O callback they always run before `setTimeout(fn, 0)`.
+  - File, crypto and zlib work runs on libuv's thread pool (four threads by default), not on your JavaScript thread.
+  - A long loop or a `*Sync` call blocks every other request, so use async functions in servers and worker threads for heavy computing.
+videos:
+  - title: "Nodejs Tutorial 12: Node.js Event Loop Explained | All 6 Phases with Animation | Advanced Nodejs"
+    channel: "Code for Interview"
+    duration: "21:09"
+    url: https://www.youtube.com/watch?v=HlebgIgOfHM
+  - title: "Understanding the Node.js Event Loop: Is Node.js Single or Multithreaded?"
+    channel: "Mahesh Kariya"
+    duration: "6:37"
+    url: https://www.youtube.com/watch?v=wMGCwfLsyhc
+docs:
+  - title: "Node.js — The Node.js event loop"
+    url: https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick
+  - title: "Node.js — Don't block the event loop"
+    url: https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop
+---
+
+"How can Node serve thousands of users with a single thread?" is one of the most common Node interview questions, and the answer is the event loop. It also explains real bugs: a server that freezes under load, a timer that fires late, a callback that runs in a surprising order. Express (the next lessons) and every database call you make later depend on it. This lesson was written for Node 24, and it builds on `node-runtime` (lesson 1) and on the browser event loop lesson in the Modern JavaScript module.
+
+## The phases of the loop
+
+You learned the browser event loop in the Modern JavaScript module: a call stack, a task queue and a microtask queue. Node runs the same JavaScript, but libuv drives the loop and it has more steps. One round of the loop is called a **tick**, and it moves through **phases**:
+
+```text
+   ┌───────────────────────────┐
+┌─▶│ 1. timers                 │  setTimeout and setInterval callbacks
+│  └─────────────┬─────────────┘
+│  ┌─────────────▼─────────────┐
+│  │ 2. pending callbacks      │  a few system-level callbacks (rarely matters)
+│  └─────────────┬─────────────┘
+│  ┌─────────────▼─────────────┐
+│  │ 3. idle, prepare          │  internal use only
+│  └─────────────┬─────────────┘
+│  ┌─────────────▼─────────────┐
+│  │ 4. poll                   │  finished I/O: files, sockets, HTTP requests
+│  └─────────────┬─────────────┘  (waits here when there is nothing else to do)
+│  ┌─────────────▼─────────────┐
+│  │ 5. check                  │  setImmediate callbacks
+│  └─────────────┬─────────────┘
+│  ┌─────────────▼─────────────┐
+│  │ 6. close callbacks        │  socket.on("close"), cleanup
+└──┴───────────────────────────┘
+```
+
+Between every callback, Node empties two queues before moving on: first the `process.nextTick` queue, then the promise microtask queue (`.then`, `await`, `queueMicrotask`).
+
+The three phases that matter for real work are **timers** (run due timeouts), **poll** (run callbacks for finished I/O, such as a file that was read or a request that arrived) and **check** (run `setImmediate`).
+
+## What runs first
+
+```js
+// order.cjs  (run as a CommonJS file: node order.cjs)
+setTimeout(() => console.log("timeout"), 0);
+setImmediate(() => console.log("immediate"));
+process.nextTick(() => console.log("nextTick"));
+Promise.resolve().then(() => console.log("promise"));
+queueMicrotask(() => console.log("queueMicrotask"));
+console.log("sync");
+```
+
+Output:
+
+```text
+sync
+nextTick
+promise
+queueMicrotask
+timeout
+immediate
+```
+
+The synchronous code finishes first. Then the `nextTick` queue, then promises, then the loop starts its phases: timers, then check. `process.nextTick` is not part of any phase; the name is historical, and it simply means "run this right after the current operation, before anything else". It has the highest priority, so a function that keeps calling `process.nextTick` on itself starves the loop: timers and I/O never run. Prefer `queueMicrotask` or `setImmediate` for your own code.
+
+<Callout type="note" title="ES modules flip nextTick and promises">
+Run the same code as an `.mjs` file and the order becomes `sync, promise, queueMicrotask, nextTick, timeout, immediate`. An ES module is itself loaded inside a promise, so the microtask queue is already being emptied when your code runs. Inside a callback (a timer, a request handler) `nextTick` goes first again. In practice: never write code that depends on this ordering.
+</Callout>
+
+## `setTimeout(fn, 0)` versus `setImmediate`
+
+Both mean "soon", but they sit in different phases. From the main file, which one runs first depends on how busy the machine is, so it can change between runs. Inside an I/O callback the order is fixed, because the loop is in the poll phase and the next phase is check:
+
+```js
+// inside-io.mjs
+import { readFile } from "node:fs";
+
+readFile(import.meta.filename, () => {
+  setTimeout(() => console.log("timeout"), 0);
+  setImmediate(() => console.log("immediate"));
+});
+// always: immediate, then timeout
+```
+
+Remember the rule: `setImmediate` means "right after the I/O that is happening now", and `setTimeout` means "after at least this many milliseconds, once the loop reaches the timers phase". Like in the browser, the delay is a minimum.
+
+## Put the rules together
+
+```js
+// predict.mjs
+import { readFile } from "node:fs";
+
+console.log("A");
+process.nextTick(() => console.log("B"));
+Promise.resolve().then(() => console.log("C"));
+
+readFile(import.meta.filename, () => {
+  console.log("D");
+  setTimeout(() => console.log("E"), 0);
+  setImmediate(() => console.log("F"));
+  process.nextTick(() => console.log("G"));
+  Promise.resolve().then(() => console.log("H"));
+});
+console.log("I");
+```
+
+Walk through it. `A` and `I` are synchronous. This is an ES module, so the promise callback `C` runs before the `nextTick` callback `B`. The file read happens outside JavaScript, and when it finishes the loop runs its callback in the poll phase: `D` prints. After that callback, Node empties its queues, so `G` (nextTick) comes before `H` (promise). The next phase after poll is check, so `F` (setImmediate) runs, and the timer `E` waits for the next round of the loop. Result: `A I C B D G H F E`.
+
+## Single-threaded, but not alone
+
+Your JavaScript runs on **one thread**: only one function runs at a time. So how does a Node server answer thousands of requests? Because waiting is not work. When code asks for a file or a network response, Node hands the job to the operating system (or to libuv's helpers) and goes on to other callbacks. The result comes back through the poll phase.
+
+Some jobs cannot be done without blocking by the operating system, so libuv has a **thread pool**, four helper threads by default. It handles file system calls, `crypto` functions such as password hashing, `zlib` compression and `dns.lookup`. You can see it:
+
+```js
+// threadpool.mjs
+import { pbkdf2 } from "node:crypto";
+
+const start = Date.now();
+for (let i = 1; i <= 8; i++) {
+  pbkdf2("password", "salt", 600_000, 64, "sha512", () => {
+    console.log(`hash ${i} done after ${Date.now() - start} ms`);
+  });
+}
+```
+
+On my laptop this prints four results at about 140 ms and four more at about 280 ms: the pool did four jobs at once and the next four waited. Running it as `UV_THREADPOOL_SIZE=8 node threadpool.mjs` lets all eight run together, if you have the cores. Your numbers will differ, but the two-wave shape shows how it works.
+
+## Never block the loop
+
+The thread pool does not help your own JavaScript. A long loop, a huge `JSON.parse` or a `*Sync` function holds the only JavaScript thread, and every other request waits:
+
+```js
+// block.mjs
+const start = Date.now();
+setTimeout(() => console.log("timer wanted 10ms, ran after", Date.now() - start, "ms"), 10);
+while (Date.now() - start < 200) {}   // blocks everything for 200 ms
+// prints: timer wanted 10ms, ran after 200 ms
+```
+
+On a server, that delay is added to every user's response. This is why Node has two versions of most file functions:
+
+```js
+import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+
+const a = readFileSync("big.bin");        // blocks: nothing else runs meanwhile
+const b = await readFile("big.bin");      // other callbacks keep running
+```
+
+`*Sync` functions are fine in a start-up script (reading config once) and wrong inside a request handler. For heavy computation, use **worker threads** (`node:worker_threads`) or a separate service.
+
+## Common mistakes
+
+- Relying on the order of `setTimeout(fn, 0)` and `setImmediate` in the main file. It can change between runs.
+- Calling `process.nextTick` over and over, which stops timers and I/O from ever running.
+- Using `readFileSync` or a long loop inside a request handler.
+- Believing that Node cannot use more than one CPU core. It can, with worker threads or several processes, but your own JavaScript on one thread does not.
+
+<Exercise title="Predict the order">
+Without running it, write the output of this ES module and explain the order of the last three lines.
+
+```js
+import { readFile } from "node:fs";
+
+console.log("start");
+process.nextTick(() => console.log("tick"));
+Promise.resolve().then(() => console.log("promise"));
+
+readFile(import.meta.filename, () => {
+  console.log("read");
+  setTimeout(() => console.log("timeout"), 0);
+  setImmediate(() => console.log("immediate"));
+  process.nextTick(() => console.log("tick 2"));
+});
+console.log("end");
+```
+
+<Solution>
+`start, end, promise, tick, read, tick 2, immediate, timeout`.
+
+The synchronous lines run first. In an ES module the promise callback runs before `nextTick`, because the module itself runs inside a microtask. The file read finishes later, in the poll phase, so `read` prints. When that callback ends, Node empties the `nextTick` queue (`tick 2`). The next phase after poll is check, so `immediate` runs before the loop comes back around to the timers phase for `timeout`. Inside an I/O callback this order is always the same.
+</Solution>
+</Exercise>
+
+<Exercise title="Measure event loop lag">
+Write `lag.mjs` that starts a 100 ms interval and, each time it fires, works out how many milliseconds late it was. Print a warning when it is more than 50 ms late. Then add a `setTimeout` at 250 ms that blocks for 400 ms with a `while` loop, and watch the warning appear. Stop the interval after 900 ms so the program ends.
+
+<Solution>
+```js
+// lag.mjs
+const interval = 100;
+let expected = Date.now() + interval;
+
+const timer = setInterval(() => {
+  const lag = Date.now() - expected;
+  if (lag > 50) console.log(`Event loop was blocked for about ${lag} ms`);
+  expected = Date.now() + interval;
+}, interval);
+
+setTimeout(() => {
+  const end = Date.now() + 400;
+  while (Date.now() < end) {} // pretend this is heavy work
+}, 250);
+
+setTimeout(() => clearInterval(timer), 900);
+```
+
+It prints a line such as `Event loop was blocked for about 349 ms`. Production monitoring tools use the same idea: Node ships a ready-made version as `monitorEventLoopDelay` in `node:perf_hooks`.
+</Solution>
+</Exercise>
+
+<Exercise title="Make the handler non-blocking">
+This server reads a file inside the request handler with a blocking call. Rewrite it so the loop is free while the file is read, and so a missing file gives a 500 response instead of crashing.
+
+```js
+import http from "node:http";
+import { readFileSync } from "node:fs";
+
+http
+  .createServer((req, res) => {
+    const html = readFileSync("page.html", "utf8");
+    res.end(html);
+  })
+  .listen(3000);
+```
+
+<Solution>
+```js
+import http from "node:http";
+import { readFile } from "node:fs/promises";
+
+http
+  .createServer(async (req, res) => {
+    try {
+      const html = await readFile("page.html", "utf8");
+      res.end(html);
+    } catch {
+      res.statusCode = 500;
+      res.end("Could not read the page");
+    }
+  })
+  .listen(3000);
+```
+
+`await readFile(...)` hands the work to libuv and returns to the loop, so other requests are served while this one waits. With `readFileSync` every user waits for every other user's file read. The `try`/`catch` matters too: an unhandled rejection in a handler would otherwise crash the process or leave the request hanging.
+</Solution>
+</Exercise>

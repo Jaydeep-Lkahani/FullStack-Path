@@ -1,0 +1,391 @@
+---
+title: "Project: Weather App, Part 1"
+summary: "Start a weather app with React, TypeScript, TanStack Query and the free Open-Meteo API: write a typed API layer that validates data with Zod, and build a city search with a debounced input and loading, error and empty states."
+order: 21
+takeaways:
+  - Treat data from an API as untrusted, and parse it with a Zod schema in one place so the rest of the app can rely on its types.
+  - Every non-2xx response needs handling, because fetch only rejects on network failures, so check res.ok and throw an error that carries the server's reason.
+  - Debounce a search box by feeding the debounced value, not the raw text, into the query key, so one pause in typing means one request.
+  - Set enabled to false until the input is long enough to search, and pass the signal from the query function to fetch so old requests are cancelled.
+  - Every request has four outcomes, loading, error, empty and success, and each one needs its own message on screen.
+videos:
+  - title: "React Debounce Search Input API Call | useDebounce React Hook"
+    channel: "Dave Gray"
+    duration: "16:09"
+    url: https://www.youtube.com/watch?v=MHm-2YmWEek
+docs:
+  - title: "Open-Meteo — Weather Forecast API"
+    url: https://open-meteo.com/en/docs
+  - title: "Open-Meteo — Geocoding API"
+    url: https://open-meteo.com/en/docs/geocoding-api
+  - title: "TanStack Query — Disabling/Pausing Queries"
+    url: https://tanstack.com/query/latest/docs/framework/react/guides/disabling-queries
+  - title: "TanStack Query — Query Cancellation"
+    url: https://tanstack.com/query/latest/docs/framework/react/guides/query-cancellation
+  - title: "Zod — Basic usage"
+    url: https://zod.dev/api
+---
+
+A weather app is the classic "does this person know how to use an API" project. It looks small, but it forces you to handle everything that goes wrong with real data: a slow network, a city that does not exist, a server that says no, and a user who types faster than the server answers. Interviewers like it for that reason. This project uses lesson 15 (TanStack Query), lesson 9 (custom hooks), lesson 6 (`useEffect`) and lesson 5 (TypeScript), and Part 3 uses lesson 18 (testing).
+
+It is split in three parts. **Part 1** (this lesson) sets up the project, writes a typed API layer and builds the city search. **Part 2** shows the current weather and the 5-day forecast, adds a °C/°F switch and remembers the last city. **Part 3** adds the tests. It was written for Vite 8, React 19.3, TypeScript 6, TanStack Query 5.104 and Zod 4.6, and the code was built and tested in a sandbox project against the real API.
+
+## What you will build
+
+You type a city, pick it from the results, and see its weather now and for the next five days. The data comes from [Open-Meteo](https://open-meteo.com), which is free and needs no API key, so you can ship it without hiding a secret.
+
+```text
+┌──────────────────────────────────────────┐
+│ Weather                                  │
+│ Search for a city [ Berlin           ]   │
+│  · Berlin, State of Berlin, Germany      │
+│  · Berlin, New Hampshire, United States  │
+│                             [°C] [°F]    │
+│ Berlin, State of Berlin, Germany         │
+│ ☁️ Overcast   10°   Feels like 7°         │
+│ Humidity 77%   Wind 10 km/h              │
+│ Tue ☁️ Overcast, 10° / 6°, 3% rain        │
+│ Wed 🌧️ Light rain, 15° / 9°, 55% rain     │
+└──────────────────────────────────────────┘
+```
+
+### Requirements for the whole project
+
+- [ ] Searching starts after the user pauses typing and only for 2 or more characters
+- [ ] The search shows loading, error (with Try again), empty and results states
+- [ ] Choosing a city shows the current weather: description, temperature, feels like, humidity and wind
+- [ ] The weather area shows loading and error states, and a Try again button
+- [ ] A 5-day forecast with high, low and chance of rain
+- [ ] A °C/°F switch that refetches in the chosen unit
+- [ ] The last city and unit are saved in `localStorage`, and broken saved data never crashes the app
+- [ ] API responses are validated, and the API layer and main flows have tests
+
+<Callout type="tip" title="Write your own version first">
+Each stage ends with something you can run. Try each stage yourself before opening the solution, even if your version is rough, and then compare. Where your version differs, find out why before you copy anything.
+</Callout>
+
+## Stage 1: Set up and write the API layer
+
+Create the project and add the libraries:
+
+```bash
+npm create vite@latest weather-app -- --template react-ts
+cd weather-app
+npm install
+npm install @tanstack/react-query zod
+```
+
+Clean up as in the todo project (delete `src/App.css` and `src/assets/`, empty `src/index.css`). Wrap the app in a `QueryClientProvider` in `src/main.tsx`, as in lesson 15. Set `retry: 1` on the client: the default of 3 retries with growing delays makes an error take about 7 seconds to appear.
+
+Before you write any code, look at the two endpoints you will call. Open them in the browser or use `curl`:
+
+```bash
+curl "https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m&daily=temperature_2m_max&timezone=auto"
+curl "https://geocoding-api.open-meteo.com/v1/search?name=zzzzqq"
+curl "https://api.open-meteo.com/v1/forecast?latitude=999&longitude=0&current=temperature_2m"
+```
+
+Notice three things. `daily` data arrives as parallel arrays (`time`, `temperature_2m_max`, ...), one array per field, not one object per day. A search with no matches returns `{}` with **no** `results` key, not an empty list. And a bad request returns status 400 with `{"error":true,"reason":"..."}`.
+
+Now write `src/api.ts`. It should contain:
+
+1. Zod schemas for a city, the geocoding response and the forecast response, and the TypeScript types made from them with `z.infer`.
+2. An `ApiError` class carrying the HTTP `status`.
+3. One private `getJson(url, schema, signal)` helper that calls `fetch`, throws an `ApiError` using the `reason` when `res.ok` is false, and otherwise parses the body with the schema.
+4. `searchCities(name, signal)` and `getForecast(city, unit, signal)`. The second one should turn the parallel `daily` arrays into an array of one object per day.
+
+<Solution>
+
+```ts
+// src/api.ts
+import { z } from "zod";
+
+export const CitySchema = z.object({
+  id: z.number(),
+  name: z.string(),
+  latitude: z.number(),
+  longitude: z.number(),
+  country: z.string().optional(),
+  admin1: z.string().optional(),
+});
+export type City = z.infer<typeof CitySchema>;
+
+// When nothing matches, the API leaves out "results" instead of sending [].
+const GeocodingSchema = z.object({ results: z.array(CitySchema).default([]) });
+
+const ForecastSchema = z.object({
+  current: z.object({
+    temperature_2m: z.number(),
+    apparent_temperature: z.number(),
+    relative_humidity_2m: z.number(),
+    wind_speed_10m: z.number(),
+    weather_code: z.number(),
+  }),
+  daily: z.object({
+    time: z.array(z.string()),
+    weather_code: z.array(z.number()),
+    temperature_2m_max: z.array(z.number()),
+    temperature_2m_min: z.array(z.number()),
+    precipitation_probability_max: z.array(z.number().nullable()),
+  }),
+});
+
+export type Unit = "celsius" | "fahrenheit";
+
+export type Forecast = {
+  current: {
+    temperature: number;
+    feelsLike: number;
+    humidity: number;
+    windSpeed: number;
+    code: number;
+  };
+  days: { date: string; code: number; max: number; min: number; rainChance: number | null }[];
+};
+
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+async function getJson<T>(url: URL, schema: z.ZodType<T>, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    // Open-Meteo explains errors as { error: true, reason: "..." }
+    const body = await res.json().catch(() => null);
+    throw new ApiError(res.status, body?.reason ?? `Request failed with status ${res.status}`);
+  }
+  return schema.parse(await res.json());
+}
+
+export async function searchCities(name: string, signal?: AbortSignal): Promise<City[]> {
+  const url = new URL("https://geocoding-api.open-meteo.com/v1/search");
+  url.search = new URLSearchParams({ name, count: "5", language: "en" }).toString();
+  return (await getJson(url, GeocodingSchema, signal)).results;
+}
+
+export async function getForecast(
+  city: Pick<City, "latitude" | "longitude">,
+  unit: Unit,
+  signal?: AbortSignal,
+): Promise<Forecast> {
+  const url = new URL("https://api.open-meteo.com/v1/forecast");
+  url.search = new URLSearchParams({
+    latitude: String(city.latitude),
+    longitude: String(city.longitude),
+    current: "temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code",
+    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+    forecast_days: "5",
+    timezone: "auto",
+    temperature_unit: unit,
+  }).toString();
+  const { current, daily } = await getJson(url, ForecastSchema, signal);
+  return {
+    current: {
+      temperature: current.temperature_2m,
+      feelsLike: current.apparent_temperature,
+      humidity: current.relative_humidity_2m,
+      windSpeed: current.wind_speed_10m,
+      code: current.weather_code,
+    },
+    days: daily.time.map((date, i) => ({
+      date,
+      code: daily.weather_code[i],
+      max: daily.temperature_2m_max[i],
+      min: daily.temperature_2m_min[i],
+      rainChance: daily.precipitation_probability_max[i],
+    })),
+  };
+}
+```
+
+```tsx
+// src/main.tsx
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App.tsx";
+import "./index.css";
+
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1 } } });
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <App />
+    </QueryClientProvider>
+  </StrictMode>,
+);
+```
+
+Why parse with Zod when TypeScript already has types? Types disappear at runtime: `res.json()` returns `any`, so a changed API would produce `undefined` deep inside a component, far from the cause, while `schema.parse` fails right here and names the wrong field. `fetch` does not reject on a 404 or 500, only when the network fails, which is why `getJson` checks `res.ok` itself. `URLSearchParams` encodes the values for you, so a city such as "São Paulo" works. `precipitation_probability_max` is `nullable` because the API can send `null` for a day it has no value for; a schema that rejected `null` would make the whole forecast fail for one missing number, and Part 3's tests cover this case.
+
+</Solution>
+
+## Stage 2: Search with a debounced input
+
+Build `CitySearch`, an input with a results list. The naive version sends a request on every keystroke: typing "Berlin" would make six requests, and a slow answer for "Ber" could arrive after the answer for "Berlin". Two tools fix this.
+
+**Debouncing** waits until the user has stopped typing for a moment. Write a small hook `useDebouncedValue(value, delay)` in `src/useDebouncedValue.ts` (lesson 9): it returns `value`, but only after `value` has stayed the same for `delay` milliseconds. Use a `useEffect` that starts a `setTimeout` and **cleans it up** (lesson 6), so every new keystroke cancels the previous timer.
+
+**A disabled query** does nothing until it has something to search for. In `src/queries.ts` write `useCitySearch(term)` with `useQuery`: put `term` in the query key, pass the `signal` that TanStack Query hands to the query function on to `searchCities` (it aborts the old request when the key changes), set `enabled: term.length >= 2`, and give it a `staleTime` of 5 minutes so searching for the same city again is instant.
+
+The component keeps the raw text in `useState`, derives `term = useDebouncedValue(text.trim(), 300)`, and shows exactly one of these: "Searching…" while loading, an error with a Try again button, "No cities found", or the list of results. Picking a result calls `onSelect(city)` and clears the input. Give the input a `<label>` and use `role="status"` and `role="alert"` for messages, so screen readers announce them (and so the tests in Part 3 can find them).
+
+<Solution>
+
+```ts
+// src/useDebouncedValue.ts
+import { useEffect, useState } from "react";
+
+// Returns `value`, but only after it has stopped changing for `delay` ms.
+export function useDebouncedValue<T>(value: T, delay = 300): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+
+  return debounced;
+}
+```
+
+```ts
+// src/queries.ts
+import { useQuery } from "@tanstack/react-query";
+import { searchCities } from "./api";
+
+const FIVE_MINUTES = 5 * 60 * 1000;
+
+export function useCitySearch(term: string) {
+  return useQuery({
+    queryKey: ["cities", term],
+    queryFn: ({ signal }) => searchCities(term, signal),
+    enabled: term.length >= 2,
+    staleTime: FIVE_MINUTES,
+  });
+}
+```
+
+```ts
+// src/format.ts
+import type { City } from "./api";
+
+export function cityLabel(city: City) {
+  return [city.name, city.admin1, city.country].filter(Boolean).join(", ");
+}
+```
+
+```tsx
+// src/CitySearch.tsx
+import { useState } from "react";
+import type { City } from "./api";
+import { cityLabel } from "./format";
+import { useCitySearch } from "./queries";
+import { useDebouncedValue } from "./useDebouncedValue";
+
+type Props = { onSelect: (city: City) => void };
+
+export function CitySearch({ onSelect }: Props) {
+  const [text, setText] = useState("");
+  const term = useDebouncedValue(text.trim(), 300);
+  const { data, isLoading, isError, error, refetch } = useCitySearch(term);
+  // The query stays disabled for short text, so ignore anything it still holds from before.
+  const active = text.trim().length >= 2;
+
+  return (
+    <section>
+      <label htmlFor="city">Search for a city</label>
+      <input
+        id="city"
+        type="search"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        autoComplete="off"
+      />
+
+      {active && isLoading && <p role="status">Searching…</p>}
+      {active && isError && (
+        <p role="alert">
+          Search failed: {error.message} <button onClick={() => refetch()}>Try again</button>
+        </p>
+      )}
+      {active && data?.length === 0 && <p>No cities found for “{term}”.</p>}
+      {active && data && data.length > 0 && (
+        <ul aria-label="Search results">
+          {data.map((city) => (
+            <li key={city.id}>
+              <button
+                onClick={() => {
+                  onSelect(city);
+                  setText("");
+                }}
+              >
+                {cityLabel(city)}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+```
+
+The `text` and `term` split is the heart of this: `text` updates on every keystroke, so the input feels instant, while `term` (and therefore the query key) changes only after a 300 ms pause. `isLoading` is TanStack Query's "first fetch in progress" flag (`isFetching` and `isPending` together), which stays `false` while the query is disabled, unlike `isPending`, which would be `true` forever for a query that never starts. The `active` check hides stale results: after you pick a city and the input clears, the debounced `term` still holds the old text for 300 ms, and the list would flicker on for that time. In the sandbox, typing "Berlin" sent one request, and one letter sent none.
+
+</Solution>
+
+## Add the selected city to the page
+
+For now, `App` only has to prove that selecting works. Keep the chosen city in `useState<City | null>`, pass `setCity` to `CitySearch` as `onSelect`, and show the city's label and coordinates below the search, or a hint when none is chosen. Part 2 replaces that line with the real weather.
+
+<Solution>
+
+```tsx
+// src/App.tsx
+import { useState } from "react";
+import type { City } from "./api";
+import { CitySearch } from "./CitySearch";
+import { cityLabel } from "./format";
+
+export default function App() {
+  const [city, setCity] = useState<City | null>(null);
+
+  return (
+    <main>
+      <h1>Weather</h1>
+      <CitySearch onSelect={setCity} />
+      {city ? (
+        <p>
+          Selected: {cityLabel(city)} ({city.latitude}, {city.longitude})
+        </p>
+      ) : (
+        <p>Search for a city to see its weather.</p>
+      )}
+    </main>
+  );
+}
+```
+
+Run `npm run dev` and search for "Berlin": you should see up to five matches and, after choosing the first one, "Selected: Berlin, State of Berlin, Germany (52.52437, 13.41053)".
+
+</Solution>
+
+## Try the failure cases
+
+A feature is not finished until you have seen it fail. Try these now, by hand, before moving on:
+
+- Type a single letter: nothing should be requested (watch the Network tab).
+- Type "zzzzqq": you should see "No cities found".
+- In DevTools, set the network to **Offline** and search: you should see the error with **Try again**, and Try again should work once you are back online.
+- Type "Berlin" quickly: the Network tab should show one request to the geocoding API, not six.
+
+<Callout type="note" title="What is next">
+Part 1 ends here, with a working search. In Part 2 you show the current weather and the 5-day forecast, add the °C/°F switch and save the last city. Continue in the same project; Part 2 assumes the files from this part.
+</Callout>

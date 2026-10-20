@@ -1,0 +1,103 @@
+---
+title: "React Quiz"
+summary: "Check that you can build, structure, fetch data for and test a React app with hooks, TanStack Query and the React Compiler."
+order: 99
+quiz:
+  - question: "A button shows `Count: 0`. You write `setCount(count + 1)` three times in one click handler. What is the count after the click?"
+    options:
+      - "3, because each call adds one"
+      - "0, because the state never updates"
+      - "1, because `count` is a snapshot and all three calls set it to `0 + 1`"
+      - "It throws an error about too many updates"
+    answer: 2
+    explanation: "State is a snapshot for the whole render, so `count` is `0` in all three calls. Use the updater form, `setCount(n => n + 1)`, when the next value depends on the previous one."
+  - question: "Why does a list of items that can be reordered or deleted need a stable `key` such as an id?"
+    options:
+      - "So React can match each item to its previous render and keep its state with the right item"
+      - "So the items sort themselves"
+      - "So the browser can style each item differently"
+      - "Because `map` refuses to run without it"
+    answer: 0
+    explanation: "Keys tell React which item is which between renders. With array indexes, a deleted item hands its state to the next one down."
+  - question: "A component keeps `fullName` in state and copies it from `firstName` and `lastName` in an effect. What is the better design?"
+    options:
+      - "Put `fullName` in a ref instead"
+      - "Move all three values into context"
+      - "Add `fullName` to the dependency array"
+      - "Calculate `fullName` during render, because anything you can derive from props or state should not be stored"
+    answer: 3
+    explanation: "Storing a copy and syncing it in an effect adds an extra render and a chance for the copies to disagree. A plain `const fullName = first + ' ' + last` is always correct."
+  - question: "Two sibling components need to show and change the same value. Where should the state live?"
+    options:
+      - "In each sibling, kept in sync with an effect"
+      - "In a global variable outside React"
+      - "In their closest common parent, passed down as props along with a callback to change it"
+      - "In whichever sibling renders first"
+    answer: 2
+    explanation: "Lifting state up keeps one source of truth. Data flows down through props, and changes flow back up through functions the parent passed down."
+  - question: "Which of these belongs in a `useEffect` rather than in an event handler or in the render?"
+    options:
+      - "Adding up the prices in a cart"
+      - "Subscribing to a browser event or starting a timer that must be cleaned up when the component disappears"
+      - "Filtering a list by the search text"
+      - "Saving a form after the user clicks Submit"
+    answer: 1
+    explanation: "Effects synchronise a component with something outside React, and their cleanup undoes the setup. Calculations belong in render, and work caused by a click belongs in the handler."
+  - question: "What is true about changing `ref.current`?"
+    options:
+      - "It re-renders the component, like a state setter"
+      - "It should be done inside the render so the value is always fresh"
+      - "It only works for DOM elements"
+      - "It does not re-render the component, so it suits values the screen does not show, and you change it in handlers or effects"
+    answer: 3
+    explanation: "A ref is a box that survives re-renders without triggering one. Reading or writing it during render makes the output depend on something React cannot track."
+  - question: "Which of these errors is NOT caught by an error boundary around a component?"
+    options:
+      - "An error thrown while the component renders"
+      - "An error thrown inside an `onClick` handler of the component"
+      - "An error thrown while a deeply nested child renders"
+      - "A `lazy` component whose code fails to load"
+    answer: 1
+    explanation: "Error boundaries catch errors during rendering. Errors in event handlers and other async callbacks need their own `try` and `catch`."
+  - question: "You call `useQuery` with the key `['todos']` and a `queryFn` that fetches todos using a `filter` variable. What is wrong?"
+    options:
+      - "The `filter` is missing from the `queryKey`, so changing it will not fetch new data"
+      - "`queryKey` must be a string"
+      - "`queryFn` cannot read variables"
+      - "Nothing, TanStack Query reads the filter by itself"
+    answer: 0
+    explanation: "Every variable the `queryFn` uses belongs in the key, for example `['todos', filter]`. A changed key is a different cache entry and triggers a new fetch."
+  - question: "With the React Compiler turned on, what should you do about `useMemo`, `useCallback` and `memo`?"
+    options:
+      - "Add them to every component"
+      - "Skip them by default, because the compiler memoizes at build time, and keep them only where an effect or library needs a stable value"
+      - "Replace them with `useRef`"
+      - "Nothing, they now throw errors"
+    answer: 1
+    explanation: "The compiler skips unchanged work for you, and the linter reports components it cannot optimise. Reach for manual memoization only when you have measured a problem the compiler does not fix."
+  - question: "Which Testing Library query should you try first to find a button the user sees?"
+    options:
+      - "`getByTestId('submit')`"
+      - "`container.querySelector('button')`"
+      - "`getByRole('button', { name: /submit/i })`"
+      - "`getByText` with the CSS class"
+    answer: 2
+    explanation: "Queries by role and label follow how users and assistive technology find things, and they fail when the accessibility is broken. Test ids are the last resort."
+---
+
+You have finished the React module. React is the front half of every full-stack app you will build from here, and Next.js is built directly on top of it, so these ideas come back in every later lesson.
+
+## Ready to move on?
+
+Tick these off in your head. If you hesitate on one, reopen that lesson before moving on.
+
+- [ ] I can explain what a component, props and state are, and why state is a snapshot
+- [ ] I can render lists with stable keys and split a UI into components, lifting state up when needed
+- [ ] I can type props, events, refs and state with TypeScript
+- [ ] I can tell when something belongs in an effect, write its cleanup, and avoid effects I do not need
+- [ ] I can choose between `useState`, `useReducer`, context and a custom hook
+- [ ] I can build a validated form with React Hook Form and Zod
+- [ ] I can fetch and change server data with TanStack Query, and keep global client state in Zustand
+- [ ] I can add routes, loading and error states, then write tests that act like a user
+
+When the list feels solid, take the quiz below. It saves your best score in this browser, and you can retake it as often as you like.

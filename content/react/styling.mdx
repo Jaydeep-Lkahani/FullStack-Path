@@ -1,0 +1,400 @@
+---
+title: Styling React Apps
+summary: "Style React components with plain CSS, CSS Modules, Tailwind CSS and shadcn/ui, and learn when each one fits so you can read any codebase you join."
+order: 13
+takeaways:
+  - React uses className instead of class, and the style prop takes an object with camelCase keys, so it is best for one-off dynamic values.
+  - A CSS Module is a CSS file whose class names are renamed to unique ones at build time, so styles cannot leak into other components.
+  - Tailwind gives you small utility classes such as p-4 and hover:bg-gray-100, and variants like md and dark apply them only in some situations.
+  - Tailwind finds classes by scanning your source for complete class names, so a name built with a template string like bg-${color}-500 is never generated.
+  - The cn helper combines clsx and tailwind-merge so conditional classes work and a later class beats an earlier conflicting one, and cva turns variants into a typed function.
+  - shadcn/ui copies component source into your project instead of installing a library, so you own the code and edit it directly.
+videos:
+  - title: "Tailwind CSS 4.0 is finally here - The NEW way to install with Vite + React (2025)"
+    channel: "Lukas | Web Development & Design"
+    duration: "6:18"
+    url: https://www.youtube.com/watch?v=sHnG8tIYMB4
+  - title: "Shadcn UI React Tutorial: Build Stunning UIs in Minutes!"
+    channel: "Monsterlessons Academy"
+    duration: "13:01"
+    url: https://www.youtube.com/watch?v=Yz3Rfn_UJOo
+docs:
+  - title: "react.dev — Common components (className and style)"
+    url: https://react.dev/reference/react-dom/components/common
+  - title: "Vite — CSS Modules"
+    url: https://vite.dev/guide/features.html
+  - title: "Tailwind CSS — Installation with Vite"
+    url: https://tailwindcss.com/docs/installation/using-vite
+  - title: "Tailwind CSS — Dark mode"
+    url: https://tailwindcss.com/docs/dark-mode
+  - title: "shadcn/ui — Installation with Vite"
+    url: https://ui.shadcn.com/docs/installation/vite
+---
+
+You already know CSS well, so this lesson is not about properties. It is about **where the CSS lives** when your UI is made of components. A real job means picking up a codebase that uses one of four approaches (plain CSS files, CSS Modules, Tailwind, or a component kit like shadcn/ui) and being productive on day one. Tailwind with shadcn/ui is the choice for this course's projects, and the Next.js module uses it too.
+
+Written for Tailwind CSS 4.3, shadcn CLI 4.22 (Radix flavour) and Vite 8, in the Vite + TypeScript app from lesson 1. The shadcn CLI changes often, so if a command differs from what you see here, its docs win (the older video below shows an earlier setup).
+
+## Plain CSS and the style prop
+
+The first things to know are two renamed attributes. `class` is a reserved word in JavaScript, so React uses `className`. And `style` takes an **object** with camelCase keys, not a string:
+
+```tsx
+import { useState } from "react";
+
+export function PlainStyles() {
+  const [active, setActive] = useState(false);
+
+  return (
+    <button
+      type="button"
+      className={active ? "chip chip-active" : "chip"}
+      style={{ padding: "0.25rem 0.75rem", borderWidth: 1, borderStyle: "solid" }}
+      onClick={() => setActive(!active)}
+    >
+      {active ? "On" : "Off"}
+    </button>
+  );
+}
+```
+
+```css
+.chip { border-color: #999; }
+.chip-active { background: #fde68a; }
+```
+
+Clicking toggles the class between `chip` and `chip chip-active`, and the background changes from transparent to `rgb(253, 230, 138)`. In the style object, `borderWidth: 1` becomes `1px` (React adds `px` to plain numbers for most properties), and `border-width` would be written `borderWidth`. The `style` prop can't do `:hover`, media queries or pseudo-elements, so use it only for values that really change at runtime, such as a width calculated in JavaScript.
+
+The catch with plain CSS files is that class names are **global**. Two components that both define `.title` overwrite each other, and the winner depends on which stylesheet loads last. That is the bug CSS Modules remove.
+
+## CSS Modules
+
+A file ending in `.module.css` is a **CSS Module**. Vite renames every class in it to a unique name, and importing the file gives you an object that maps your names to the new ones:
+
+```css
+/* Pill.module.css */
+.pill {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  background: #e5e7eb;
+}
+
+.active {
+  background: #16a34a;
+  color: white;
+}
+```
+
+```tsx
+import { useState } from "react";
+import styles from "./Pill.module.css";
+
+export function Pill() {
+  const [active, setActive] = useState(false);
+
+  return (
+    <button
+      type="button"
+      className={active ? `${styles.pill} ${styles.active}` : styles.pill}
+      onClick={() => setActive(!active)}
+    >
+      {active ? "Active" : "Inactive"}
+    </button>
+  );
+}
+```
+
+In the browser, the button's class was `_pill_1n0ad_1` before the click and `_pill_1n0ad_1 _active_1n0ad_8` after, with a gray background first and green with white text afterwards. The `1n0ad` part comes from the file, so another file's `.pill` gets a different name and can never clash. Things to remember:
+
+- You write normal CSS, so `:hover`, media queries and nesting all work.
+- Use `styles.pill`, not the string `"pill"`. The plain string would match nothing.
+- Names with dashes need brackets, `styles["card-title"]`, so people use camelCase (`cardTitle`).
+- TypeScript already knows `*.module.css` files through `vite/client`.
+
+CSS Modules are a fine, dependency-free default. The cost is that you jump between two files for every component, and you must invent a name for every little wrapper. Tailwind removes both.
+
+## Tailwind CSS
+
+**Tailwind** gives you many tiny classes, each doing one thing (`p-4` is padding, `font-semibold` is the font weight), and you combine them directly in `className`. There is no separate CSS file and no naming.
+
+Setup for Vite is two packages and one CSS line:
+
+```bash
+npm install tailwindcss @tailwindcss/vite
+```
+
+```ts
+// vite.config.ts
+import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({ plugins: [react(), tailwindcss()] });
+```
+
+```css
+/* src/index.css */
+@import "tailwindcss";
+```
+
+Tailwind 4 needs no `tailwind.config.js` and no `content` list: it finds your files by itself. Now a card with the three things you will write all day, states, breakpoints and dark mode:
+
+```tsx
+export function TailwindCard() {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm hover:shadow-md md:flex md:items-center md:gap-4 dark:border-gray-700 dark:bg-gray-800">
+      <h3 className="text-lg font-semibold text-brand">Tailwind card</h3>
+      <p className="text-sm text-gray-600 dark:text-gray-300">Stacked on phones, a row from 768px.</p>
+    </div>
+  );
+}
+```
+
+A prefix before a colon is a **variant**: the class applies only in that situation. `hover:shadow-md` applies on hover, `md:flex` applies from 768px up (Tailwind is **mobile first**, so unprefixed classes are the phone layout), and `dark:bg-gray-800` applies in dark mode. In the sandbox the card was `display: block` in a 436px window and `display: flex` at 1000px.
+
+`text-brand` is not built in. Tailwind 4 lets you add design tokens in your CSS with `@theme`, and every token becomes classes:
+
+```css
+@theme {
+  --color-brand: oklch(0.55 0.2 270);
+}
+```
+
+After that, `text-brand`, `bg-brand` and `border-brand` all exist, and the heading's computed colour was `oklch(0.55 0.2 270)`. 
+
+Plain Tailwind's `dark:` follows the operating system setting (`prefers-color-scheme`). Sites with a theme toggle switch to a class instead, and shadcn does this for you (see below).
+
+### The dynamic class name trap
+
+Tailwind does not run your code. It **reads your source files as plain text** and generates CSS for every complete class name it finds. So this looks right but fails:
+
+```tsx
+// Looks fine, styles nothing
+function BadStatus({ color }: { color: string }) {
+  return <span className={`bg-${color}-500 px-2 text-white`}>{color}</span>;
+}
+```
+
+The text `bg-violet-500` appears nowhere in your files, only `bg-${color}-500`, so no CSS is generated. In the sandbox, `<BadStatus color="violet" />` had a transparent background, and a production build had no `.bg-violet-500` rule. The fix is to write complete names and pick between them:
+
+```tsx
+type Color = "red" | "green";
+
+const colorClasses: Record<Color, string> = {
+  red: "bg-red-500",
+  green: "bg-green-500",
+};
+
+function GoodStatus({ color }: { color: Color }) {
+  return <span className={`${colorClasses[color]} px-2 text-white`}>{color}</span>;
+}
+```
+
+The green badge got the Tailwind green, and both full names were in the built CSS.
+
+### Combining classes with cn
+
+Real components take a `className` prop and add conditional classes, and plain string joining goes wrong quickly. Two small packages solve it: `clsx` joins classes and drops falsy values, and `tailwind-merge` removes classes that conflict, keeping the **last** one. Together they are the `cn` helper in nearly every Tailwind project:
+
+```ts
+// src/lib/utils.ts
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+```
+
+```ts
+cn("px-2 py-1", "px-4");                          // "py-1 px-4"
+cn("text-sm", false, "font-bold", null, "");      // "text-sm font-bold"
+cn("bg-red-500", { "bg-blue-500": true });        // "bg-blue-500"
+cn("px-2", "p-4");                                // "p-4"
+cn("p-4", "px-2");                                // "p-4 px-2"
+```
+
+These are real outputs from Node, and the last two matter: `p-4` sets all four sides, so after it `px-2` is a deliberate override and both stay, but `px-2` before `p-4` is useless and is removed. Without `twMerge`, `"px-2 px-4"` keeps both and the **stylesheet's order**, not the class order, decides which one wins.
+
+<Callout type="note" title="shadcn's cn comes from a package now">
+Tutorials show the `utils.ts` above. The current shadcn CLI generates `export { cn } from "cn"` instead, a small package from the shadcn team that behaves the same (it gave identical results for every example above) with a faster implementation. You can use either. The idea to remember is the same: join, then resolve conflicts.
+</Callout>
+
+### Variants with cva
+
+A button with `variant` and `size` props becomes a pile of `if` statements. `class-variance-authority` (**cva**) declares the variants once and gives you a typed function:
+
+```tsx
+import { cva, type VariantProps } from "class-variance-authority";
+import type { ComponentProps } from "react";
+import { cn } from "@/lib/utils";
+
+const alertVariants = cva("rounded-md border px-3 py-2 text-sm", {
+  variants: {
+    tone: {
+      info: "border-blue-200 bg-blue-50 text-blue-900",
+      danger: "border-red-200 bg-red-50 text-red-900",
+    },
+    compact: { true: "py-1 text-xs", false: "" },
+  },
+  defaultVariants: { tone: "info", compact: false },
+});
+
+type AlertProps = ComponentProps<"div"> & VariantProps<typeof alertVariants>;
+
+export function Alert({ tone, compact, className, ...props }: AlertProps) {
+  return <div role="alert" className={cn(alertVariants({ tone, compact }), className)} {...props} />;
+}
+
+```
+
+The first argument is the base classes. `VariantProps` makes `tone="dnager"` a compile error. The compact alert's class list was `rounded-md border px-3 border-blue-200 bg-blue-50 text-blue-900 py-1 text-xs`: `py-2` from the base was removed because `cn` saw the conflicting `py-1`. Passing `className` last lets the caller override anything.
+
+## shadcn/ui
+
+**shadcn/ui** is not an npm library of components. A CLI **copies the source code** of a component into your project, built from accessible Radix parts and Tailwind classes. Because the files are yours, there is no theming API to fight: you open the file and change it.
+
+Setup in the Vite app, after Tailwind is installed: add an `@/*` alias (so `@/components/ui/button` works from anywhere) to `tsconfig.json` and `tsconfig.app.json`, and to `vite.config.ts`:
+
+```ts
+// tsconfig.json and tsconfig.app.json, in compilerOptions: "paths": { "@/*": ["./src/*"] }
+// vite.config.ts, inside defineConfig (import path from "node:path"):
+resolve: { alias: { "@": path.resolve(import.meta.dirname, "./src") } },
+```
+
+```bash
+npm install -D @types/node
+npx shadcn@latest init -t vite
+npx shadcn@latest add button card input
+```
+
+The `init` command asks for a style preset, then writes `components.json`, `src/lib/utils.ts`, a `Button`, and a block of CSS variables for colours in `index.css`. Each `add` creates files under `src/components/ui/`. Using them is plain React:
+
+```tsx
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+
+export function ShadcnDemo() {
+  return (
+    <Card className="max-w-sm">
+      <CardHeader>
+        <CardTitle>Join the beta</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-2">
+        <Input type="email" placeholder="you@example.com" />
+      </CardContent>
+      <CardFooter className="gap-2">
+        <Button>Join</Button>
+      </CardFooter>
+    </Card>
+  );
+}
+```
+
+The `Button` is built with the cva and `cn` pattern you just saw, so `variant` and `size` are typed props and your own `className` always wins. To add a new look, edit `src/components/ui/button.tsx` and add a line to its `variants`:
+
+```tsx
+success: "bg-green-600 text-white hover:bg-green-600/90",
+```
+
+`<Button variant="success">` then rendered a green button, and `variant="succes"` failed to compile with "Did you mean '"success"'?". That freedom is the point, and also the price: you maintain the files, and updating a component later means running `add` again and merging the differences.
+
+<Callout type="tip" title="Dark mode in a shadcn project">
+`init` adds `@custom-variant dark (&:is(.dark *))`, so `dark:` now means "inside an element with the class `dark`". It no longer follows the operating system. In the sandbox, with the OS set to dark, the Tailwind card above stayed white until `document.documentElement.classList.add("dark")` was run, and then the card, body and buttons all switched. A theme toggle is just that one line, plus saving the choice in `localStorage`.
+</Callout>
+
+## Which one should I use?
+
+Plain CSS suits tiny sites and global resets, but class names collide. CSS Modules give normal, scoped CSS at the cost of two files per component. Tailwind is fast and keeps spacing and colours consistent, but forbids dynamic class names. shadcn/ui gives accessible dialogs, menus and form parts, but you maintain the copied code. They mix well: shadcn is Tailwind underneath, and a CSS Module can still handle one complicated animation. For this course, use Tailwind and shadcn/ui.
+
+<Exercise title="Fix the bug">
+A `Tag` component should show a different background for `"info"`, `"warning"` and `"error"`, but in production the background is always transparent. Why, and how do you fix it?
+
+```tsx
+function Tag({ level }: { level: "info" | "warning" | "error" }) {
+  const color = { info: "blue", warning: "yellow", error: "red" }[level];
+  return <span className={`bg-${color}-200 rounded px-2`}>{level}</span>;
+}
+```
+
+<Solution>
+Tailwind scans the source text, and `bg-${color}-200` never appears as a complete class name, so no CSS is generated for any of them. Write the full names in a lookup object:
+
+```tsx
+const levelClasses = {
+  info: "bg-blue-200",
+  warning: "bg-yellow-200",
+  error: "bg-red-200",
+} as const;
+
+function Tag({ level }: { level: keyof typeof levelClasses }) {
+  return <span className={`${levelClasses[level]} rounded px-2`}>{level}</span>;
+}
+```
+
+</Solution>
+</Exercise>
+
+<Exercise title="Build a Badge with cva">
+Create a `Badge` component with a `tone` prop (`"neutral"` or `"success"`) and a `size` prop (`"sm"` or `"md"`). The defaults are `neutral` and `md`, and the caller's `className` must be able to override anything.
+
+<Solution>
+```tsx
+import { cva, type VariantProps } from "class-variance-authority";
+import type { ComponentProps } from "react";
+import { cn } from "@/lib/utils";
+
+const badgeVariants = cva("inline-block rounded-full font-medium", {
+  variants: {
+    tone: {
+      neutral: "bg-gray-100 text-gray-800",
+      success: "bg-green-100 text-green-800",
+    },
+    size: {
+      sm: "px-2 py-0.5 text-xs",
+      md: "px-3 py-1 text-sm",
+    },
+  },
+  defaultVariants: { tone: "neutral", size: "md" },
+});
+
+type BadgeProps = ComponentProps<"span"> & VariantProps<typeof badgeVariants>;
+
+export function Badge({ tone, size, className, ...props }: BadgeProps) {
+  return <span className={cn(badgeVariants({ tone, size }), className)} {...props} />;
+}
+```
+
+Since `cn` is last, `<Badge className="px-6" />` replaces the `px-3` from the size variant (the sandbox showed 24px of left padding instead of 12px).
+</Solution>
+</Exercise>
+
+<Exercise title="Theme toggle">
+In your shadcn project, write a `ThemeToggle` button that switches dark mode on and off and remembers the choice.
+
+<Solution>
+The toggle works on the `dark` class, since shadcn's `dark:` variant is class-based:
+
+```tsx
+import { useState } from "react";
+import { Button } from "@/components/ui/button";
+
+export function ThemeToggle() {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+
+  function toggle() {
+    const next = !dark;
+    document.documentElement.classList.toggle("dark", next);
+    localStorage.setItem("theme", next ? "dark" : "light");
+    setDark(next);
+  }
+
+  return <Button variant="outline" onClick={toggle}>{dark ? "Light mode" : "Dark mode"}</Button>;
+}
+```
+
+In the sandbox the button switched the page between dark and light, and `localStorage` held `dark` and then `light`. To restore the choice on the next visit, run `document.documentElement.classList.toggle("dark", localStorage.getItem("theme") === "dark")` at the top of `main.tsx`.
+</Solution>
+</Exercise>

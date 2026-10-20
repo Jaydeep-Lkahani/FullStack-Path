@@ -1,0 +1,288 @@
+---
+title: DOM Manipulation
+summary: Select, create, update and remove elements with JavaScript — the foundation that React abstracts away.
+order: 1
+takeaways:
+  - The DOM is a live tree of nodes the browser builds from HTML; JavaScript reads and changes it through the document object.
+  - Use querySelector / querySelectorAll (CSS selectors) to find elements; they return an element or a static NodeList.
+  - Prefer textContent over innerHTML for user-provided text - innerHTML with untrusted data is an XSS vulnerability.
+  - Create with createElement, insert with append/prepend/before/after/replaceWith, remove with element.remove().
+  - Toggle styling with classList, store state in data-* attributes, and batch DOM writes to avoid layout thrashing.
+videos:
+  - title: "Learn JavaScript DOM Manipulation - Tutorial for Beginners"
+    channel: "Beau Carnes (freeCodeCamp.org)"
+    duration: "37:14"
+    url: https://www.youtube.com/watch?v=IWRS_AM2fiE
+  - title: "JavaScript DOM Manipulation - Full Course for Beginners"
+    channel: "freeCodeCamp.org"
+    duration: "2:41:21"
+    url: https://www.youtube.com/watch?v=5fb2aPlgoys
+docs:
+  - title: "MDN: Introduction to the DOM"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Document_Object_Model/Introduction
+  - title: "MDN: Locating DOM elements using selectors"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Document_Object_Model/Locating_DOM_elements_using_selectors
+  - title: "MDN: Node.textContent"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Node/textContent
+---
+
+You know HTML and CSS well, so this lesson focuses on the JavaScript side: how code reads and changes the page. React, Vue and Svelte all exist to manage exactly this work for you, and understanding the raw DOM makes their behaviour much less mysterious.
+
+## What the DOM is
+
+The **Document Object Model** is the browser's in-memory representation of your page: a **tree of nodes**. Each tag becomes an **element node**, text becomes a **text node**, and the root is `document`.
+
+```html
+<body>
+  <h1 id="title">Hello</h1>
+  <ul class="list"><li>One</li><li>Two</li></ul>
+</body>
+```
+
+```text
+document
+└── html
+    └── body
+        ├── h1#title
+        │   └── "Hello"
+        └── ul.list
+            ├── li ── "One"
+            └── li ── "Two"
+```
+
+JavaScript can change this tree at any time, and the browser re-renders to match. Run the examples below in the DevTools console of any page.
+
+## Selecting elements
+
+```js
+document.getElementById("title");                 // by id (fast, one element)
+document.querySelector(".list li");               // FIRST match of any CSS selector, or null
+document.querySelectorAll(".list li");            // ALL matches → static NodeList
+document.getElementsByClassName("item");          // live HTMLCollection (older API)
+```
+
+`querySelector`/`querySelectorAll` accept anything you'd write in CSS — `"#id"`, `".class"`, `"ul > li:first-child"`, `"input[type=email]"`. Use them by default.
+
+A `NodeList` isn't an array but is iterable and has `forEach`. Convert it when you need `map`/`filter`:
+
+```js
+const items = [...document.querySelectorAll(".list li")];
+items.map((li) => li.textContent);                // ["One", "Two"]
+```
+
+Scope a search to part of the page:
+
+```js
+const list = document.querySelector(".list");
+list.querySelectorAll("li");        // only inside this list
+button.closest(".card");            // nearest ancestor matching a selector
+```
+
+Walk the tree relative to an element:
+
+```js
+el.parentElement;  el.children;  el.firstElementChild;  el.lastElementChild;
+el.nextElementSibling;  el.previousElementSibling;
+```
+
+## Reading and changing content
+
+```js
+const title = document.querySelector("#title");
+
+title.textContent;                  // "Hello" — all text, plain
+title.textContent = "New title";    // sets text; HTML is NOT interpreted (safe)
+
+title.innerHTML;                    // the inner HTML as a string
+title.innerHTML = "<em>Hi</em>";    // parses HTML — DANGEROUS with untrusted input
+```
+
+<Callout type="warning" title="XSS: never put untrusted text into innerHTML">
+If `name` comes from a user, `el.innerHTML = name` lets an attacker inject `<img src=x onerror=stealCookies()>`. Use `textContent` for text. If you must render HTML, sanitise it with a library like DOMPurify. (React escapes by default — the prop is literally called `dangerouslySetInnerHTML` for this reason.)
+</Callout>
+
+`innerText` is similar to `textContent` but respects CSS (hidden text is skipped), triggering layout; prefer `textContent`.
+
+## Attributes, properties and data
+
+```js
+const link = document.querySelector("a");
+
+link.getAttribute("href");          // the attribute as written in HTML
+link.setAttribute("href", "/home");
+link.removeAttribute("target");
+link.hasAttribute("download");
+
+link.href;                          // the property: resolved to a full URL
+input.value;                        // properties reflect the CURRENT state
+input.checked = true;
+button.disabled = true;
+```
+
+Attributes are the initial HTML; **properties** are the live state on the object. For form controls, always use the property (`input.value`), because `getAttribute("value")` returns only the original default.
+
+### Custom data attributes
+
+```html
+<button data-product-id="42" data-action="add-to-cart">Add</button>
+```
+
+```js
+btn.dataset.productId;              // "42" (camelCased)
+btn.dataset.action;                 // "add-to-cart"
+btn.dataset.qty = "2";              // writes data-qty="2"
+```
+
+## Styling and classes
+
+Prefer toggling **classes** and keeping the styles in CSS:
+
+```js
+el.classList.add("active", "highlight");
+el.classList.remove("hidden");
+el.classList.toggle("open");             // add if missing, remove if present
+el.classList.toggle("open", isOpen);     // force on/off
+el.classList.contains("active");
+el.classList.replace("old", "new");
+```
+
+Inline styles are for dynamic values (positions, computed sizes), and CSS custom properties bridge the two:
+
+```js
+el.style.backgroundColor = "tomato";            // camelCase
+el.style.setProperty("--progress", "75%");      // CSS variable usable in your stylesheet
+getComputedStyle(el).getPropertyValue("width"); // final computed value
+```
+
+## Creating and inserting elements
+
+```js
+const li = document.createElement("li");
+li.textContent = "Three";
+li.classList.add("item");
+li.dataset.id = "3";
+
+const list = document.querySelector(".list");
+list.append(li);                     // add as last child (accepts nodes AND strings)
+list.prepend("start");               // add as first child
+list.firstElementChild.before(li);   // insert before a node
+list.firstElementChild.after(li);    // insert after a node
+oldEl.replaceWith(newEl);
+```
+
+Moving an element that's already in the DOM **moves** it rather than copying. To duplicate, use `el.cloneNode(true)` (deep clone).
+
+### Removing
+
+```js
+li.remove();                         // remove this element
+list.replaceChildren();              // remove all children
+list.replaceChildren(a, b, c);       // replace with exactly these nodes
+```
+
+### Building bigger structures: `template` and fragments
+
+```html
+<template id="card-template">
+  <article class="card"><h3></h3><p></p></article>
+</template>
+```
+
+```js
+function renderCard({ title, body }) {
+  const clone = document.querySelector("#card-template").content.cloneNode(true);
+  clone.querySelector("h3").textContent = title;
+  clone.querySelector("p").textContent = body;
+  return clone;
+}
+
+const fragment = document.createDocumentFragment();     // off-DOM container
+for (const post of posts) fragment.append(renderCard(post));
+document.querySelector("#feed").append(fragment);       // single insertion → single reflow
+```
+
+## Performance: reflow and repaint
+
+Changing the DOM can force the browser to recalculate layout (**reflow**) and redraw (**repaint**). The expensive mistake is **layout thrashing** — interleaving reads and writes:
+
+```js
+// Slow: each iteration reads layout (forcing a reflow) after a write
+for (const el of items) {
+  el.style.width = el.parentElement.offsetWidth / 2 + "px";
+}
+
+// Better: read everything first, then write
+const widths = items.map((el) => el.parentElement.offsetWidth);
+items.forEach((el, i) => (el.style.width = widths[i] / 2 + "px"));
+```
+
+Other tips: batch inserts with fragments, animate `transform`/`opacity` (compositor-friendly) rather than `top`/`left`, and use `requestAnimationFrame` for visual updates. This cost is precisely why frameworks diff a **virtual DOM** and apply only the minimal changes.
+
+## Putting it together: a tiny render function
+
+```js
+const state = { todos: ["Learn the DOM", "Learn React"] };
+
+function render() {
+  const list = document.querySelector("#todos");
+  list.replaceChildren(
+    ...state.todos.map((text) => {
+      const li = document.createElement("li");
+      li.textContent = text;
+      return li;
+    }),
+  );
+}
+
+render();
+```
+
+Notice the pattern: **state → render function → DOM**. React is this idea with a smart diffing algorithm and a component model.
+
+<Exercise title="Build a list from data">
+Given an array `const fruits = ["Apple", "Banana", "Cherry"]`, and an empty `<ul id="fruits"></ul>`, write code that fills the list, adds the class `fruit` to every `li`, and highlights (adds the class `highlight` to) any item whose text length is greater than 5.
+
+<Solution>
+```js
+const ul = document.querySelector("#fruits");
+const fragment = document.createDocumentFragment();
+
+for (const name of fruits) {
+  const li = document.createElement("li");
+  li.textContent = name;
+  li.classList.add("fruit");
+  li.classList.toggle("highlight", name.length > 5);
+  fragment.append(li);
+}
+ul.append(fragment);
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Spot the vulnerability">
+Why is this code dangerous, and how do you fix it?
+
+```js
+const params = new URLSearchParams(location.search);
+document.querySelector("#welcome").innerHTML = `Welcome, ${params.get("name")}!`;
+```
+
+<Solution>
+A link like `?name=<img src=x onerror=alert(1)>` runs arbitrary script in the visitor's session (reflected XSS). Fix: ``el.textContent = `Welcome, ${params.get("name")}!`;``, or create elements and set `textContent`. If HTML is genuinely required, sanitise with DOMPurify.
+</Solution>
+</Exercise>
+
+<Exercise title="Reorder rows">
+Write `sortList(ul)` that sorts the `li` elements of a list alphabetically by text, using only DOM APIs and without recreating the elements.
+
+<Solution>
+```js
+function sortList(ul) {
+  const sorted = [...ul.children].sort((a, b) =>
+    a.textContent.localeCompare(b.textContent),
+  );
+  ul.append(...sorted);   // appending existing nodes MOVES them into the new order
+}
+```
+</Solution>
+</Exercise>

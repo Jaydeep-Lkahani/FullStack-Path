@@ -1,0 +1,400 @@
+---
+title: Custom Hooks
+summary: Extract repeated stateful logic into your own `use` functions, follow the rules of hooks that make them work, and compose small hooks into bigger ones.
+order: 9
+takeaways:
+  - A custom hook is a function whose name starts with `use` and that calls other hooks; it lets components share stateful logic without copying it.
+  - Hooks share logic, not state, so every component that calls a hook gets its own independent copy of that hook's state.
+  - Call hooks only at the top level of a component or another hook, never inside conditions, loops or after an early return, because React matches hooks by the order they are called.
+  - The linter's `rules-of-hooks` check catches most rule breaks, so treat its errors as bugs to fix.
+  - Hooks compose like functions, so one hook's return value can be the next hook's argument, which is how a debounced search feeds a fetch.
+  - When a hook receives a callback that an effect calls, wrap it with `useEffectEvent` so the effect always runs the latest callback without restarting.
+videos:
+  - title: "React 19 Tutorial - 19 - Rules of Hooks"
+    channel: "Codevolution"
+    duration: "9:20"
+    url: https://www.youtube.com/watch?v=YdJPtx-ovWM
+  - title: "Custom Hooks in React (Design Patterns)"
+    channel: "Cosden Solutions"
+    duration: "12:56"
+    url: https://www.youtube.com/watch?v=I2Bgi0Qcdvc
+  - title: "Custom Hooks in React - Every React Developer Should Know This"
+    channel: "ByteGrad"
+    duration: "28:09"
+    url: https://www.youtube.com/watch?v=397259iiZ6M
+docs:
+  - title: "react.dev — Reusing Logic with Custom Hooks"
+    url: https://react.dev/learn/reusing-logic-with-custom-hooks
+  - title: "react.dev — Rules of Hooks"
+    url: https://react.dev/reference/rules/rules-of-hooks
+  - title: "react.dev — useEffectEvent"
+    url: https://react.dev/reference/react/useEffectEvent
+---
+
+You've already written two custom hooks without the name: `useTheme` in lesson 7 and `useTasks` in lesson 8. A custom hook is just a function that calls other hooks, and it's the main way React apps reuse logic: online status, local storage, debounced inputs and data fetching all end up as hooks. Libraries you'll use later are mostly custom hooks too: React Hook Form's `useForm`, TanStack Query's `useQuery`, Zustand's stores.
+
+Interviewers ask about the **rules of hooks** and why they exist, and "write a `useDebounce` hook" is a classic live-coding task. You need `useState` and `useEffect` (lessons 3 and 6). Written for React 19 and TypeScript.
+
+## Extracting your first hook
+
+Say two components need to know whether the browser is online: a status bar and a save button that disables itself offline. Both need the same state plus the same effect that listens to the `online` and `offline` events. Instead of copying that code, move it into a function whose name starts with `use`:
+
+```ts
+// useOnlineStatus.ts
+import { useEffect, useState } from "react";
+
+export function useOnlineStatus() {
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+
+  useEffect(() => {
+    function update() {
+      setIsOnline(navigator.onLine);
+    }
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+
+  return isOnline;
+}
+```
+
+Each component now reads like a description of **what** it needs, not **how** to get it:
+
+```tsx
+export function StatusBar() {
+  const isOnline = useOnlineStatus();
+  return <h2>{isOnline ? "✅ Online" : "❌ Disconnected"}</h2>;
+}
+
+export function SaveButton() {
+  const isOnline = useOnlineStatus();
+  return (
+    <button type="button" disabled={!isOnline}>
+      {isOnline ? "Save" : "Reconnecting…"}
+    </button>
+  );
+}
+```
+
+Simulating the browser going offline switched the bar to "❌ Disconnected" and the button to a disabled "Reconnecting…"; going back online restored both. Nothing about the hook is magic: when `StatusBar` renders, it calls `useOnlineStatus`, which calls `useState` and `useEffect` **as if they were written inside `StatusBar`**.
+
+The `use` prefix isn't decoration. It tells React's tooling (and readers) that the function may call hooks, so the rules below apply to it. A function that calls no hooks, such as `formatDate(date)`, should **not** start with `use`.
+
+## The rules of hooks
+
+1. **Only call hooks at the top level** of a component or custom hook: not inside `if`, loops, nested functions, or after an early `return`.
+2. **Only call hooks from React functions**: components and other custom hooks, never from plain functions or event handlers.
+
+Why? React doesn't know your hooks by name. It stores each component's hook state in a list and matches them up **by call order**: the first `useState` call gets slot 1, the second gets slot 2, every render. If a call is skipped on one render, every hook after it reads the wrong slot. Here's a component that breaks rule 1:
+
+```tsx
+function Greeting({ name }: { name: string | null }) {
+  const [count, setCount] = useState(0);
+  if (name === null) return <p>Who are you?</p>;
+  const [emoji] = useState("👋"); // only called when name isn't null
+  return (
+    <button type="button" onClick={() => setCount(count + 1)}>
+      {emoji} Hi {name} ({count})
+    </button>
+  );
+}
+```
+
+It renders "Who are you?" fine with one hook. When `name` changes to `"Asha"`, the second render calls **two** hooks and React throws `Rendered more hooks than during the previous render`. The whole app went blank, and the console printed a table showing hook 2 was `undefined` before and `useState` now.
+
+You rarely need to debug this by hand. The Vite project from lesson 1 runs `oxlint` with the `rules-of-hooks` check, and `npm run lint` flags the line before you run anything:
+
+```text
+error react-hooks(rules-of-hooks): React Hook "useState" is called conditionally.
+React Hooks must be called in the exact same order in every component render.
+```
+
+The fix is always the same: call every hook first, then branch. Move `const [emoji] = useState("👋");` above the `if`. If you need a hook "only sometimes", call it every time and put the condition **inside** it (as `useFetch` below does with a `null` URL).
+
+<Callout type="warning" title="Hooks don't run in event handlers">
+`onClick={() => { const x = useOnlineStatus(); }}` breaks rule 2. Hooks are called while rendering. Read the value at the top of the component, then use it in the handler.
+</Callout>
+
+## Hooks share logic, not state
+
+Two components calling `useOnlineStatus` don't share one `isOnline` variable. Each call creates its own state and its own effect, exactly as if you had pasted the code into each component. They show the same value only because they watch the same browser events.
+
+The same holds inside one component: calling `useCounter(0)` twice gives two independent counters (the first exercise tests this). When components must **share** one piece of state, lift it up (lesson 4) or put it in context (lessons 7 and 8). A custom hook can hide that context, as `useTasks()` did, but the sharing comes from the context, not the hook.
+
+## Inputs and outputs
+
+A hook is a function, so it takes any arguments and returns anything. This one works like `useState` but saves the value to `localStorage` (lesson 4 of browser JavaScript):
+
+```ts
+// useLocalStorage.ts
+import { useEffect, useState } from "react";
+
+export function useLocalStorage<T>(key: string, initialValue: T) {
+  const [value, setValue] = useState<T>(() => {
+    const saved = localStorage.getItem(key);
+    return saved === null ? initialValue : (JSON.parse(saved) as T);
+  });
+
+  useEffect(() => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, [key, value]);
+
+  return [value, setValue] as const;
+}
+```
+
+```tsx
+const [note, setNote] = useLocalStorage("note", "");
+const [fontSize, setFontSize] = useLocalStorage("font-size", 16);
+```
+
+After typing "hello" and clicking a font-size button twice, a page reload restored the note and the 20px size. Three design points:
+
+- **Generic type.** `<T>` (from the generics lesson) is inferred from `initialValue`, so `note` is a `string` and `fontSize` is a `number`.
+- **Tuple or object?** Return a tuple when callers will want to rename the parts, like `useState`. Without `as const`, TypeScript types the array as `(string | Dispatch<...>)[]` and destructuring loses the types. Return an object (`{ data, error, loading }`) when there are three or more values.
+- **Lazy initial state.** Reading storage inside `useState(() => ...)` happens once, not on every render.
+
+## Composing hooks
+
+Hooks can call hooks, and one hook's output can be the next one's input. A search box shouldn't fetch on every keystroke, so first build a hook that returns a value only after it has stopped changing:
+
+```ts
+// useDebouncedValue.ts
+export function useDebouncedValue<T>(value: T, delay: number) {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]);
+
+  return debounced;
+}
+```
+
+Each keystroke changes `value`, so the cleanup cancels the pending timer and starts a new one. Only a pause of `delay` milliseconds lets `setDebounced` run. Next, move lesson 6's fetching effect into a reusable hook. It accepts `null` to mean "don't fetch yet":
+
+```ts
+// useFetch.ts
+type Result<T> = { url: string; data?: T; error?: string };
+
+export function useFetch<T>(url: string | null) {
+  const [result, setResult] = useState<Result<T> | null>(null);
+
+  useEffect(() => {
+    if (url === null) return;
+    const controller = new AbortController();
+    fetch(url, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<T>;
+      })
+      .then((data) => setResult({ url, data }))
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setResult({ url, error: err instanceof Error ? err.message : "Failed" });
+      });
+    return () => controller.abort();
+  }, [url]);
+
+  const current = result?.url === url ? result : null;
+  return { data: current?.data, error: current?.error, loading: url !== null && !current };
+}
+```
+
+Now a city search (using the free Open-Meteo geocoding API, which you'll meet again in the weather project) is three hooks chained together:
+
+```tsx
+type GeoResponse = { results?: { id: number; name: string; country: string }[] };
+
+export function CitySearch() {
+  const [query, setQuery] = useState("");
+  const debouncedQuery = useDebouncedValue(query.trim(), 400);
+  const url =
+    debouncedQuery.length >= 2
+      ? `https://geocoding-api.open-meteo.com/v1/search?count=5&name=${encodeURIComponent(debouncedQuery)}`
+      : null;
+  const { data, error, loading } = useFetch<GeoResponse>(url);
+
+  return (
+    <div>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="City" />
+      {loading && <p>Searching…</p>}
+      {error && <p role="alert">Error: {error}</p>}
+      <ul>
+        {data?.results?.map((city) => (
+          <li key={city.id}>{city.name}, {city.country}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+Typing "Berlin" sent **one** request instead of six, and the list showed "Berlin, Germany" first. Each re-render passes the latest `query` into `useDebouncedValue`, whose result builds the `url` for `useFetch`. Values flow down the chain on every render, just as props flow into components. Lesson 15 replaces `useFetch` with TanStack Query, which adds caching and retries, but it's used the same way.
+
+## Hooks that take a callback
+
+Sometimes a hook receives a function to call later, like `setInterval` does. A naive `useInterval` lists `callback` in the effect's dependencies, but a component creates a new callback on every render, so the interval would be torn down and restarted after each tick. Leaving `callback` out instead makes the interval call a stale closure with old state. React 19.2 added `useEffectEvent` for this:
+
+```ts
+// useInterval.ts
+import { useEffect, useEffectEvent } from "react";
+
+export function useInterval(callback: () => void, delay: number | null) {
+  const onTick = useEffectEvent(callback);
+
+  useEffect(() => {
+    if (delay === null) return;
+    const id = setInterval(() => onTick(), delay);
+    return () => clearInterval(id);
+  }, [delay]);
+}
+
+// in a component: useInterval(() => setCount(count + step), running ? 1000 : null);
+```
+
+`onTick` always calls the **latest** `callback`, but it isn't a dependency, so the interval only restarts when `delay` changes. In the sandbox, raising `step` from 1 to 2 made the next tick add 2 without restarting the timer, and passing `null` paused it. Only call an effect event from inside effects, never during render or from JSX.
+
+## When not to write a hook
+
+- **Lifecycle wrappers** such as `useMount(fn)` or `useEffectOnce(fn)` hide the dependency array, so the linter can't check it. Write the `useEffect` itself, or a hook named after the purpose (`useOnlineStatus`, `useChatRoom`).
+- **Logic without hooks** is just a function. Name it `formatPrice`, not `useFormatPrice`.
+- **One-off code** used in one component can stay there. Extract when a second component needs it, or when naming it makes the component easier to read.
+
+<Callout type="tip" title="Hooks are code, not magic">
+Lessons 7 and 8 wrapped `useContext` in `useTheme` and `useTasks` for the same reasons: a clear name, one place for the error message, and callers that don't care how the value is stored.
+</Callout>
+
+<Exercise title="Predict the output">
+The user clicks the button twice. What does it show?
+
+```tsx
+function useCounter(initial: number) {
+  const [count, setCount] = useState(initial);
+  return { count, increment: () => setCount((c) => c + 1) };
+}
+
+function TwoCounters() {
+  const a = useCounter(0);
+  const b = useCounter(10);
+  return (
+    <button onClick={a.increment}>
+      a: {a.count}, b: {b.count}
+    </button>
+  );
+}
+```
+
+<Solution>
+`a: 2, b: 10`. Each `useCounter` call has its own `useState`, so incrementing `a` never touches `b`. Hooks share logic, not state.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the hook order">
+This component crashes with "Rendered more hooks than during the previous render" when `user` goes from `null` to a user. Fix it without changing what it shows.
+
+```tsx
+function Profile({ user }: { user: { name: string } | null }) {
+  const [tab, setTab] = useState("posts");
+  if (!user) return <p>Please log in</p>;
+  const isOnline = useOnlineStatus();
+  return (
+    <p onClick={() => setTab("likes")}>
+      {user.name} {isOnline ? "●" : "○"} ({tab})
+    </p>
+  );
+}
+```
+
+<Solution>
+`useOnlineStatus` is skipped whenever `user` is `null`, so the number of hooks changes between renders. Call every hook before the early return:
+
+```tsx
+function Profile({ user }: { user: { name: string } | null }) {
+  const [tab, setTab] = useState("posts");
+  const isOnline = useOnlineStatus();
+  if (!user) return <p>Please log in</p>;
+  return (
+    <p onClick={() => setTab("likes")}>
+      {user.name} {isOnline ? "●" : "○"} ({tab})
+    </p>
+  );
+}
+```
+</Solution>
+</Exercise>
+
+<Exercise title="useWindowWidth">
+Write `useWindowWidth()` that returns `window.innerWidth` and updates when the window is resized. Use it to show "(phone)" below 640px and "(wide)" otherwise. Don't forget the cleanup.
+
+<Solution>
+```ts
+import { useEffect, useState } from "react";
+
+export function useWindowWidth() {
+  const [width, setWidth] = useState(() => window.innerWidth);
+
+  useEffect(() => {
+    function handleResize() {
+      setWidth(window.innerWidth);
+    }
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  return width;
+}
+
+// const width = useWindowWidth();
+// <p>Width: {width}px {width < 640 ? "(phone)" : "(wide)"}</p>
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Add reload to useFetch">
+Extend `useFetch` so it also returns `reload()`, which fetches the same URL again and shows `loading` while it does. Hint: a counter in state that you add to the effect's dependencies.
+
+<Solution>
+```ts
+type Result<T> = { key: string; data?: T; error?: string };
+
+export function useFetch<T>(url: string | null) {
+  const [result, setResult] = useState<Result<T> | null>(null);
+  const [reloadCount, setReloadCount] = useState(0);
+  const key = `${url}#${reloadCount}`;
+
+  useEffect(() => {
+    if (url === null) return;
+    const controller = new AbortController();
+    const requestKey = `${url}#${reloadCount}`;
+    fetch(url, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<T>;
+      })
+      .then((data) => setResult({ key: requestKey, data }))
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setResult({ key: requestKey, error: err instanceof Error ? err.message : "Failed" });
+      });
+    return () => controller.abort();
+  }, [url, reloadCount]);
+
+  const current = result?.key === key ? result : null;
+  return {
+    data: current?.data,
+    error: current?.error,
+    loading: url !== null && current === null,
+    reload: () => setReloadCount((n) => n + 1),
+  };
+}
+```
+
+Each result is stored with the `url` **and** reload count it belongs to, so after `reload()` the old result no longer matches and `loading` is `true` until the new response arrives.
+</Solution>
+</Exercise>

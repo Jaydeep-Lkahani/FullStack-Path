@@ -1,0 +1,103 @@
+---
+title: "Modern JavaScript Quiz"
+summary: "Check that you can use ES6+ syntax, promises and async/await, and predict the order the event loop runs code in."
+order: 99
+quiz:
+  - question: "After `const { name: userName, age = 30 } = { name: 'Ada' };`, what are `userName` and `age`?"
+    options:
+      - "It throws a SyntaxError"
+      - "`name` is `'Ada'` and `age` is `undefined`"
+      - "`userName` is `'Ada'` and `age` is `30`"
+      - "`userName` is `undefined` and `age` is `30`"
+    answer: 2
+    explanation: "`name: userName` renames the property into a variable called `userName`, and `age = 30` is the default used when the property is missing."
+  - question: "What is the difference between spread and rest?"
+    options:
+      - "Spread expands values out of an iterable or object, rest collects remaining values into one"
+      - "Rest only works in loops"
+      - "They are identical"
+      - "Spread only works on strings"
+    answer: 0
+    explanation: "The same `...` syntax expands in calls, arrays and objects (spread) and collects in parameters and destructuring (rest)."
+  - question: "`const copy = { ...state }; copy.user.name = 'X';` changes `state.user.name` too. Why?"
+    options:
+      - "Spread makes a shallow copy, so nested objects are still shared"
+      - "`const` forces sharing"
+      - "Spread always makes deep copies, so this is a bug in the engine"
+      - "`copy` and `state` are the same object"
+    answer: 0
+    explanation: "Only the top level is copied. To change nested data immutably, spread each level you modify or use `structuredClone` for a deep copy."
+  - question: "Why do many teams prefer named exports over default exports?"
+    options:
+      - "Names stay consistent across imports, so they are easier to search, rename and auto-import"
+      - "Named exports are faster at runtime"
+      - "Default exports are not allowed in ES modules"
+      - "Named exports can be used without a bundler"
+    answer: 0
+    explanation: "With a default export every importer picks its own name, which hurts searching and refactoring. Some frameworks still require default exports, such as Next.js pages."
+  - question: "What does an `async` function always return?"
+    options:
+      - "A generator"
+      - "`undefined`"
+      - "The value you return, unwrapped"
+      - "A Promise"
+    answer: 3
+    explanation: "Returning a value fulfils the promise, and throwing rejects it. That is why callers must `await` it or use `.then`."
+  - question: "You need three independent API calls. Which approach is fastest?"
+    options:
+      - "`await Promise.all([a(), b(), c()])`"
+      - "Use `setTimeout` for each"
+      - "Call each inside `forEach` with `async`"
+      - "`await` each call one after another"
+    answer: 0
+    explanation: "`Promise.all` starts all three at once and waits for all of them. Awaiting in sequence adds the durations together."
+  - question: "`ids.forEach(async (id) => await save(id)); console.log('done');` prints `done` before the saves finish. Why?"
+    options:
+      - "`save` is broken"
+      - "`await` is not allowed in callbacks"
+      - "`forEach` ignores the promises returned by its callback and does not wait"
+      - "`console.log` is synchronous so it always runs last"
+    answer: 2
+    explanation: "Each async callback pauses itself, but `forEach` has already moved on. Use `for...of` with `await` for sequential work or `Promise.all(ids.map(save))` for parallel work."
+  - question: "`Promise.all` receives three promises and the second one rejects. What happens?"
+    options:
+      - "It ignores the rejection"
+      - "It resolves with `undefined`"
+      - "It rejects as soon as one promise rejects"
+      - "It waits for all three, then returns an array of results"
+    answer: 2
+    explanation: "`Promise.all` fails fast. Use `Promise.allSettled` when you want every outcome regardless of failures."
+  - question: "In what order does this log? `console.log('A'); setTimeout(() => console.log('B'), 0); Promise.resolve().then(() => console.log('C')); console.log('D');`"
+    options:
+      - "`A D C B`"
+      - "`A C D B`"
+      - "`A B C D`"
+      - "`A D B C`"
+    answer: 0
+    explanation: "Synchronous code runs first (`A`, `D`). Then the microtask queue is drained (`C`). Timer callbacks are macrotasks and run after that (`B`)."
+  - question: "Why can one long-running synchronous loop freeze a web page?"
+    options:
+      - "JavaScript has one call stack, so nothing else runs, including rendering and click handlers, until it returns"
+      - "`setTimeout` blocks the network"
+      - "Loops disable the garbage collector"
+      - "The browser pauses all other tabs"
+    answer: 0
+    explanation: "JavaScript runs one thing at a time. The event loop can only pick up queued work when the stack is empty. Break up heavy work, stream it, or use a Web Worker."
+---
+
+You have finished the Modern JavaScript module. Output-order questions on promises and the event loop are among the most common JavaScript interview questions, so be sure you can trace them.
+
+## Ready to move on?
+
+Tick these off in your head. If you hesitate on one, reopen that lesson before moving on.
+
+- [ ] I can destructure objects and arrays with defaults, renaming and nesting
+- [ ] I can tell spread from rest and use spread for immutable updates
+- [ ] I can explain why a spread copy is shallow
+- [ ] I can use named and default exports and say which I prefer
+- [ ] I can chain `.then`, `.catch` and `.finally` and explain what each returns
+- [ ] I can write an `async` function with `try/catch` and say what an `async` function returns
+- [ ] I can run independent requests in parallel with `Promise.all` and know how `allSettled` differs
+- [ ] I can trace the order of synchronous code, microtasks and timers for a short snippet
+
+When the list feels solid, take the quiz below. It saves your best score in this browser, and you can retake it as often as you like.

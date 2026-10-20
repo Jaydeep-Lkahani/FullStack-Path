@@ -1,0 +1,360 @@
+---
+title: "Project: Todo App, Part 1"
+summary: "Start a todo app with React, TypeScript and useReducer: set up the project, write the reducer, then add, list, toggle, delete and edit todos."
+order: 19
+takeaways:
+  - A reducer that takes the current todos and an action and returns the next todos puts all the app's rules in one pure function that is easy to test.
+  - Pass anything random, such as a new id, into the action instead of creating it inside the reducer, so the reducer stays pure.
+  - Compute values such as the "items left" count while rendering, instead of storing them as extra state that can get out of sync.
+  - A component that edits inline keeps its draft text in local state, so the todo only changes when the user presses Enter or leaves the field, and Escape throws the draft away.
+  - Give buttons that repeat on a page an accessible name that includes the item, such as Delete "Buy milk", so users and tests can tell them apart.
+videos: []
+docs:
+  - title: "react.dev — useReducer"
+    url: https://react.dev/reference/react/useReducer
+  - title: "react.dev — Extracting State Logic into a Reducer"
+    url: https://react.dev/learn/extracting-state-logic-into-a-reducer
+  - title: "react.dev — Choosing the State Structure"
+    url: https://react.dev/learn/choosing-the-state-structure
+---
+
+The todo app is the most common React project there is, and the reason is that it contains every basic skill in miniature: lists and keys, forms, state that several components share, an edit mode, filters, saved data and tests. Interviewers use it for machine-coding rounds, and your first full React app is worth having in your portfolio. This project pulls together lessons 3 to 5 (state, lifting state up, TypeScript), lesson 8 (`useReducer`) and lesson 18 (tests).
+
+It is split in two parts. **Part 1** (this lesson) sets up the project, writes the reducer, and builds adding, toggling, deleting and editing. **Part 2** adds filters, saving to `localStorage` and the tests. It was written for Vite 8, React 19.3, TypeScript 6 and Vitest 5, with no libraries beyond the test tools, and the code was built and tested in a sandbox project.
+
+## What you will build
+
+A single-page app where you type a todo and press Enter, tick todos off, edit their text in place, delete them, filter by All, Active or Completed, and clear the finished ones. Everything is still there after a page reload.
+
+```text
+┌──────────────────────────────────────────┐
+│ Todos                                    │
+│ [ What needs doing?            ] [ Add ] │
+│                                          │
+│ [ ] Buy milk                [Edit][Delete]│
+│ [x] Walk dog                [Edit][Delete]│
+│ [ ] Read a chapter          [Edit][Delete]│
+│                                          │
+│ 2 items left  [All][Active][Completed]   │
+│                          [Clear completed]│
+└──────────────────────────────────────────┘
+```
+
+### Requirements for the whole project
+
+- [ ] Add a todo with the Add button or Enter; empty or blank text is ignored and the input clears after adding
+- [ ] Toggle a todo done or not done, and show "N items left" (singular for 1)
+- [ ] Edit a todo in place: Enter or leaving the field saves, Escape cancels, empty text deletes it
+- [ ] Delete a todo
+- [ ] Filter by All, Active and Completed, with the current filter marked
+- [ ] "Clear completed" removes finished todos, and the button only shows when there are some
+- [ ] Todos are saved in `localStorage`, and broken saved data never crashes the app
+- [ ] Every control can be reached by role or label, so it works with a keyboard and with tests
+- [ ] The reducer, the storage code and the main user flows have tests
+
+<Callout type="tip" title="Work in the order of the stages">
+Each stage ends with something you can run. Write your own version of each stage before you open the solution, even if it is rough, and then compare. Seeing the difference teaches more than copying.
+</Callout>
+
+## Stage 1: Set up and write the reducer
+
+Create the project and add the test tools from lesson 18:
+
+```bash
+npm create vite@latest todo-app -- --template react-ts
+cd todo-app
+npm install
+npm install -D vitest jsdom @testing-library/react @testing-library/dom @testing-library/jest-dom @testing-library/user-event
+```
+
+Clean up: delete `src/App.css` and `src/assets/`, replace `src/App.tsx` with an empty `<main>` for now, and empty `src/index.css`. Then set up Vitest as in lesson 18: add the `test` block (jsdom, a setup file) to `vite.config.ts`, add `"vitest/jsdom"` to `types` in `tsconfig.app.json`, add the script `"test": "vitest"`, and create `src/test-setup.ts`.
+
+Now the heart of the app. Define the `Todo` and `Filter` types in `src/types.ts`, and write `todoReducer(todos, action)` in `src/todoReducer.ts`. It must handle these actions: `add`, `toggle`, `edit`, `delete` and `clearCompleted`. Think about the rules before you code: should `add` trim the text? What if the text is blank? What should `edit` do when the new text is empty? The reducer must never change the old array, and it must not call `crypto.randomUUID()` or any other impure function itself, so the `add` action carries its `id`.
+
+Check it with `npx tsc -b`, and, if you like, write a few reducer tests now (Part 2 has examples).
+
+<Solution>
+
+```ts
+// src/test-setup.ts
+import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach, beforeEach } from "vitest";
+
+beforeEach(() => localStorage.clear());
+afterEach(() => cleanup());
+```
+
+```ts
+// vite.config.ts
+/// <reference types="vitest/config" />
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [react()],
+  test: { environment: "jsdom", setupFiles: ["./src/test-setup.ts"] },
+});
+```
+
+```ts
+// src/types.ts
+export type Todo = { id: string; text: string; done: boolean };
+
+export type Filter = "all" | "active" | "completed";
+```
+
+```ts
+// src/todoReducer.ts
+import type { Todo } from "./types";
+
+export type Action =
+  | { type: "add"; id: string; text: string }
+  | { type: "toggle"; id: string }
+  | { type: "edit"; id: string; text: string }
+  | { type: "delete"; id: string }
+  | { type: "clearCompleted" };
+
+// The id arrives in the action, so the reducer stays pure (no randomness inside).
+export function todoReducer(todos: Todo[], action: Action): Todo[] {
+  switch (action.type) {
+    case "add": {
+      const text = action.text.trim();
+      if (!text) return todos;
+      return [...todos, { id: action.id, text, done: false }];
+    }
+    case "toggle":
+      return todos.map((t) => (t.id === action.id ? { ...t, done: !t.done } : t));
+    case "edit": {
+      const text = action.text.trim();
+      if (!text) return todos.filter((t) => t.id !== action.id);
+      return todos.map((t) => (t.id === action.id ? { ...t, text } : t));
+    }
+    case "delete":
+      return todos.filter((t) => t.id !== action.id);
+    case "clearCompleted":
+      return todos.filter((t) => !t.done);
+  }
+}
+```
+
+The `switch` has no `default`. Because `action` is a union, TypeScript knows every case returns, and if you add a new action type later, the function will fail to compile until you handle it.
+
+</Solution>
+
+## Stage 2: Add, list, toggle and delete
+
+Build three small components and connect them in `App`:
+
+- `TodoForm` has an input with a label (visually hidden is fine) and an Add button. It keeps the typed text in its own state, calls `onAdd(text)` on submit, and clears itself. Remember `e.preventDefault()`.
+- `TodoItem` shows a checkbox whose label is the todo text, plus a Delete button. Give the Delete button an `aria-label` that includes the todo text, because several "Delete" buttons on one page are not distinguishable otherwise.
+- `TodoList` renders the items with a stable `key` (the id, never the index), or "Nothing here." when the list is empty.
+
+`App` owns the todos with `useReducer`, creates ids with `crypto.randomUUID()` when dispatching `add`, and shows how many todos are not done. Run `npm run dev` and check that adding, ticking and deleting work.
+
+<Solution>
+
+```tsx
+// src/TodoForm.tsx
+import { useState, type FormEvent } from "react";
+
+export function TodoForm({ onAdd }: { onAdd: (text: string) => void }) {
+  const [text, setText] = useState("");
+
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!text.trim()) return;
+    onAdd(text);
+    setText("");
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <label htmlFor="new-todo" className="sr-only">
+        New todo
+      </label>
+      <input
+        id="new-todo"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="What needs doing?"
+      />
+      <button type="submit">Add</button>
+    </form>
+  );
+}
+```
+
+```tsx
+// src/TodoItem.tsx (first version: no editing yet)
+import type { Todo } from "./types";
+
+type Props = {
+  todo: Todo;
+  onToggle: (id: string) => void;
+  onDelete: (id: string) => void;
+};
+
+export function TodoItem({ todo, onToggle, onDelete }: Props) {
+  return (
+    <li className={todo.done ? "done" : undefined}>
+      <label>
+        <input type="checkbox" checked={todo.done} onChange={() => onToggle(todo.id)} />
+        {todo.text}
+      </label>
+      <button onClick={() => onDelete(todo.id)} aria-label={`Delete "${todo.text}"`}>
+        Delete
+      </button>
+    </li>
+  );
+}
+```
+
+```tsx
+// src/TodoList.tsx
+import { TodoItem } from "./TodoItem";
+import type { Todo } from "./types";
+
+type Props = {
+  todos: Todo[];
+  onToggle: (id: string) => void;
+  onDelete: (id: string) => void;
+};
+
+export function TodoList({ todos, ...handlers }: Props) {
+  if (todos.length === 0) return <p>Nothing here.</p>;
+  return (
+    <ul>
+      {todos.map((todo) => (
+        <TodoItem key={todo.id} todo={todo} {...handlers} />
+      ))}
+    </ul>
+  );
+}
+```
+
+```tsx
+// src/App.tsx
+import { useReducer } from "react";
+import { TodoForm } from "./TodoForm";
+import { TodoList } from "./TodoList";
+import { todoReducer } from "./todoReducer";
+
+export default function App() {
+  const [todos, dispatch] = useReducer(todoReducer, []);
+  const remaining = todos.filter((t) => !t.done).length;
+
+  return (
+    <main>
+      <h1>Todos</h1>
+      <TodoForm onAdd={(text) => dispatch({ type: "add", id: crypto.randomUUID(), text })} />
+      <TodoList
+        todos={todos}
+        onToggle={(id) => dispatch({ type: "toggle", id })}
+        onDelete={(id) => dispatch({ type: "delete", id })}
+      />
+      <p>
+        {remaining} {remaining === 1 ? "item" : "items"} left
+      </p>
+    </main>
+  );
+}
+```
+
+`TodoList` takes `...handlers` and passes them on, so adding a new handler later only changes its `Props` type. `remaining` is calculated while rendering from `todos`. It is not stored in state, so it can never disagree with the list.
+
+For some basic styling, put this in `src/index.css`:
+
+```css
+body { font-family: system-ui, sans-serif; background: #f5f5f5; margin: 0; }
+main { max-width: 32rem; margin: 2rem auto; padding: 1.5rem; background: white; border-radius: 0.75rem; }
+form { display: flex; gap: 0.5rem; }
+form input { flex: 1; }
+input, button { font: inherit; padding: 0.4rem 0.6rem; }
+ul { list-style: none; padding: 0; }
+li { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid #eee; }
+li label { flex: 1; display: flex; gap: 0.5rem; align-items: center; }
+li.done label { text-decoration: line-through; color: #888; }
+footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; }
+[aria-pressed="true"] { background: #222; color: white; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+```
+
+</Solution>
+
+## Stage 3: Edit in place
+
+Add an Edit button to each item. Clicking it replaces the checkbox row with a text input, focused and filled with the current text. Enter saves, Escape cancels, and clicking elsewhere saves. Which component should know whether an item is being edited, and where should the draft text live? Think about it using lesson 4: only `TodoItem` cares about this, so the state belongs there and `App` stays unaware. The only new thing `App` needs is an `onEdit(id, text)` handler that dispatches `edit`.
+
+Update `TodoList`'s `Props` with `onEdit: (id: string, text: string) => void`, because `...handlers` forwards it automatically, and add `onEdit={(id, text) => dispatch({ type: "edit", id, text })}` to `App`.
+
+<Solution>
+
+```tsx
+// src/TodoItem.tsx
+import { useState } from "react";
+import type { Todo } from "./types";
+
+type Props = {
+  todo: Todo;
+  onToggle: (id: string) => void;
+  onEdit: (id: string, text: string) => void;
+  onDelete: (id: string) => void;
+};
+
+export function TodoItem({ todo, onToggle, onEdit, onDelete }: Props) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(todo.text);
+
+  function save() {
+    onEdit(todo.id, draft);
+    setEditing(false);
+  }
+
+  function cancel() {
+    setDraft(todo.text);
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <li>
+        <input
+          aria-label="Edit todo"
+          value={draft}
+          autoFocus
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+            if (e.key === "Escape") cancel();
+          }}
+          onBlur={save}
+        />
+      </li>
+    );
+  }
+
+  return (
+    <li className={todo.done ? "done" : undefined}>
+      <label>
+        <input type="checkbox" checked={todo.done} onChange={() => onToggle(todo.id)} />
+        {todo.text}
+      </label>
+      <button onClick={() => setEditing(true)} aria-label={`Edit "${todo.text}"`}>
+        Edit
+      </button>
+      <button onClick={() => onDelete(todo.id)} aria-label={`Delete "${todo.text}"`}>
+        Delete
+      </button>
+    </li>
+  );
+}
+```
+
+The draft is separate state, so the todo in the list only changes when `save` runs. `cancel` puts the old text back into the draft, so the next edit starts clean. In a real browser, pressing Escape did cancel without also saving: the input is removed before a blur can save the half-typed text. Saving an empty draft calls `edit` with empty text, which the reducer turns into a delete.
+
+</Solution>
+
+## Check your work and what comes next
+
+Run `npm run dev` and use the app: add a few todos, tick one, edit one (try Escape and Enter), and delete one. Then run `npx tsc -b` and `npm run lint`; both should be clean. The app has no filters yet, nothing is saved when you reload, and there are no tests, which is exactly what **Part 2** adds.

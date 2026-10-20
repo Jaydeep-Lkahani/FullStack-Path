@@ -1,0 +1,446 @@
+---
+title: "Project: Weather App, Part 3"
+summary: "Test the weather app: fake the Open-Meteo API with MSW, test the API layer, the debounce hook and the main user flows with Vitest and Testing Library, and break the code on purpose to prove the tests can fail."
+order: 23
+takeaways:
+  - Fake the network at the edge with MSW, so the code under test still runs real fetch calls, real Zod parsing and real TanStack Query, and only the server is pretend.
+  - Give every test its own QueryClient with retry turned off, otherwise one test's cache leaks into the next and a failing request waits through its retries.
+  - Test the API layer on its own first, because its error handling and data mapping are easy to check without any React.
+  - Fake timers make a debounce test instant, and a test that waits for real time is better kept for the one flow where the delay is the point.
+  - A test that cannot fail proves nothing, so break the code on purpose and check that the right test goes red.
+videos: []
+docs:
+  - title: "MSW — Quick start"
+    url: https://mswjs.io/docs/quick-start
+  - title: "Testing Library — React Testing Library"
+    url: https://testing-library.com/docs/react-testing-library/intro/
+  - title: "Vitest — Mocking: timers"
+    url: https://vitest.dev/guide/mocking/timers
+---
+
+The app works, and you checked it by hand. Tests make that check repeatable: next month, when you add recent cities or swap the styling, one command tells you whether the old features still work. This part writes them, using lesson 18 (Vitest, Testing Library and MSW). Continue in the same project; it assumes the finished app from Part 2.
+
+## Where you are
+
+The last requirement of the project is the one this part covers:
+
+- [ ] API responses are validated, and the API layer and main flows have tests
+
+You will write tests in three layers: the **API layer** (no React), the **debounce hook** (React, but no screen), and the **whole app** (a user typing, clicking and reading, with a fake server).
+
+## Stage 6: Set up the tools and a fake server
+
+Install the test tools from lesson 18, plus MSW:
+
+```bash
+npm install -D vitest jsdom @testing-library/react @testing-library/dom @testing-library/jest-dom @testing-library/user-event msw
+```
+
+Set up Vitest as in lesson 18: add the `test` block (jsdom environment, a setup file) to `vite.config.ts`, add `"vitest/jsdom"` to `types` in `tsconfig.app.json`, and add the script `"test": "vitest"`.
+
+The tests must never call the real Open-Meteo. The real API is slow, changes every hour, and sometimes fails, so tests that use it fail for reasons that have nothing to do with your code. Instead, **MSW** (Mock Service Worker) catches the requests at the network level and answers from handlers you write. Write `src/mocks/handlers.ts` with a handler for each endpoint that returns realistic JSON, `src/mocks/server.ts`, and `src/test-setup.ts` that starts the server, resets handlers after each test, clears `localStorage` before each test, and makes an unhandled request an **error**. Make the fake forecast depend on the `temperature_unit` parameter (10°C is 50°F), and include a `null` rain chance, because the real API can send one.
+
+<Solution>
+
+```ts
+// vite.config.ts
+/// <reference types="vitest/config" />
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [react()],
+  test: { environment: "jsdom", setupFiles: ["./src/test-setup.ts"] },
+});
+```
+
+```ts
+// src/mocks/handlers.ts
+import { http, HttpResponse } from "msw";
+
+export const berlin = {
+  id: 2950159,
+  name: "Berlin",
+  latitude: 52.52,
+  longitude: 13.41,
+  country: "Germany",
+  admin1: "State of Berlin",
+};
+export const paris = {
+  id: 2988507,
+  name: "Paris",
+  latitude: 48.85,
+  longitude: 2.35,
+  country: "France",
+};
+
+const cities = [berlin, paris];
+
+function forecastBody(unit: string, city: string) {
+  const warm = unit === "fahrenheit" ? 50 : 10; // 10°C is 50°F
+  return {
+    current: {
+      temperature_2m: city === "paris" ? warm + 4 : warm,
+      apparent_temperature: warm - 2,
+      relative_humidity_2m: 77,
+      wind_speed_10m: 9.2,
+      weather_code: 3,
+    },
+    daily: {
+      time: ["2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23", "2026-10-24"],
+      weather_code: [3, 61, 61, 61, 2],
+      temperature_2m_max: [warm, warm + 5, warm + 3, warm + 4, warm + 2],
+      temperature_2m_min: [warm - 4, warm - 1, warm - 1, warm - 4, warm - 4],
+      precipitation_probability_max: [3, 55, 98, null, 23],
+    },
+  };
+}
+
+export const handlers = [
+  http.get("https://geocoding-api.open-meteo.com/v1/search", ({ request }) => {
+    const name = new URL(request.url).searchParams.get("name")!.toLowerCase();
+    const results = cities.filter((c) => c.name.toLowerCase().startsWith(name));
+    // Like the real API: no "results" key at all when nothing matches.
+    return HttpResponse.json(results.length ? { results } : {});
+  }),
+  http.get("https://api.open-meteo.com/v1/forecast", ({ request }) => {
+    const params = new URL(request.url).searchParams;
+    const city = params.get("latitude") === "48.85" ? "paris" : "berlin";
+    return HttpResponse.json(
+      forecastBody(params.get("temperature_unit") ?? "celsius", city),
+    );
+  }),
+];
+```
+
+```ts
+// src/mocks/server.ts
+import { setupServer } from "msw/node";
+import { handlers } from "./handlers";
+
+export const server = setupServer(...handlers);
+```
+
+```ts
+// src/test-setup.ts
+import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
+import { server } from "./mocks/server";
+
+beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
+beforeEach(() => localStorage.clear());
+afterEach(() => {
+  cleanup();
+  server.resetHandlers();
+});
+afterAll(() => server.close());
+```
+
+The handlers copy the real API's behaviour, including the odd parts: the geocoding handler leaves out `results` when nothing matches, and the forecast handler answers differently for each unit and city. `onUnhandledFrame: "error"` makes a request without a handler fail loudly, so a test can never quietly reach the real internet. We used the full URLs, so a handler answers only for that host.
+
+</Solution>
+
+## Stage 7: Test the API layer and the debounce hook
+
+Start with the code that has no screen. In `src/api.test.ts`, check that `searchCities` returns an empty list when the API leaves out `results`, that `getForecast` turns the parallel arrays into one object per day (and keeps the `null` rain chance), that an error response becomes an `ApiError` with the server's `reason` and status, and that a response in the wrong shape is rejected. Use `server.use(...)` to override a handler for one test.
+
+In `src/useDebouncedValue.test.ts`, test that the value changes only after the delay, and that typing again restarts the wait. A real 300 ms wait would work but wastes time, so use `vi.useFakeTimers()` and `vi.advanceTimersByTime(...)` (wrapped in `act`, since the hook updates state), and switch back to real timers after each test.
+
+<Solution>
+
+```ts
+// src/api.test.ts
+import { http, HttpResponse } from "msw";
+import { expect, test } from "vitest";
+import { ApiError, getForecast, searchCities } from "./api";
+import { berlin } from "./mocks/handlers";
+import { server } from "./mocks/server";
+
+test("searchCities returns an empty list when the API leaves out results", async () => {
+  expect(await searchCities("zzzz")).toEqual([]);
+});
+
+test("getForecast turns the API columns into one object per day", async () => {
+  const forecast = await getForecast(berlin, "celsius");
+  expect(forecast.current).toMatchObject({ temperature: 10, code: 3 });
+  expect(forecast.days).toHaveLength(5);
+  expect(forecast.days[1]).toEqual({
+    date: "2026-10-21",
+    code: 61,
+    max: 15,
+    min: 9,
+    rainChance: 55,
+  });
+  expect(forecast.days[3].rainChance).toBeNull();
+});
+
+test("an error response becomes an ApiError with the reason", async () => {
+  server.use(
+    http.get("https://api.open-meteo.com/v1/forecast", () =>
+      HttpResponse.json(
+        { error: true, reason: "Latitude must be in range of -90 to 90°." },
+        { status: 400 },
+      ),
+    ),
+  );
+  await expect(getForecast(berlin, "celsius")).rejects.toMatchObject({
+    name: "ApiError",
+    status: 400,
+    message: "Latitude must be in range of -90 to 90°.",
+  });
+  await expect(getForecast(berlin, "celsius")).rejects.toBeInstanceOf(ApiError);
+});
+
+test("a response in an unexpected shape is rejected", async () => {
+  server.use(
+    http.get("https://api.open-meteo.com/v1/forecast", () =>
+      HttpResponse.json({ current: {} }),
+    ),
+  );
+  await expect(getForecast(berlin, "celsius")).rejects.toThrow();
+});
+```
+
+```ts
+// src/useDebouncedValue.test.ts
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
+import { useDebouncedValue } from "./useDebouncedValue";
+
+afterEach(() => vi.useRealTimers());
+
+test("updates only after the value stops changing", () => {
+  vi.useFakeTimers();
+  const { result, rerender } = renderHook(({ value }) => useDebouncedValue(value, 300), {
+    initialProps: { value: "a" },
+  });
+
+  rerender({ value: "ab" });
+  act(() => vi.advanceTimersByTime(200));
+  rerender({ value: "abc" }); // typing again restarts the wait
+  act(() => vi.advanceTimersByTime(200));
+  expect(result.current).toBe("a");
+
+  act(() => vi.advanceTimersByTime(100));
+  expect(result.current).toBe("abc");
+});
+```
+
+The wrong-shape test matters more than it looks: it proves that a changed API fails inside `getForecast` with a clear Zod error, and not later inside a component. The debounce test steps through time by hand: after 200 ms and a new value, the old timer is gone, so another 200 ms still gives `"a"`, and only 100 more (300 ms after the last change) gives `"abc"`.
+
+</Solution>
+
+## Stage 8: Test the app like a user
+
+Now render the real `App` and use it the way a person does. Write a `renderApp()` helper that wraps `App` in a `QueryClientProvider` with a **new** `QueryClient` per test and `retry: false`. Then write one test for each of these:
+
+1. Search "Berlin", pick it, and see the heading, "Overcast", the humidity and five forecast items.
+2. A search with no matches shows "No cities found".
+3. A failing search shows the server's reason in an alert, and after the handler is fixed, **Try again** shows the results. (Change a variable the handler reads, not the handler.)
+4. One letter sends no request, and typing "Berlin" sends exactly one request. Count the requests in a handler.
+5. Switching to °F shows the Fahrenheit numbers and marks the button pressed.
+6. While a new city loads, the old city's numbers are not on screen. Make the forecast handler slow with MSW's `delay`.
+7. After unmounting and rendering again, the saved city and unit are back.
+8. Broken saved data in `localStorage` does not crash the app.
+
+Find elements with `getByRole`, `getByLabelText` and `findBy...` (which waits), and never with test ids.
+
+<Solution>
+
+```tsx
+// src/App.test.tsx
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { delay, http, HttpResponse } from "msw";
+import { describe, expect, test } from "vitest";
+import App from "./App";
+import { berlin } from "./mocks/handlers";
+import { server } from "./mocks/server";
+
+function renderApp() {
+  // A fresh client per test, with retries off so a failing request fails at once.
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={client}>
+      <App />
+    </QueryClientProvider>,
+  );
+}
+
+async function search(user: ReturnType<typeof userEvent.setup>, text: string) {
+  await user.type(screen.getByLabelText("Search for a city"), text);
+}
+
+describe("App", () => {
+  test("finds a city and shows its weather", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await search(user, "Berlin");
+    await user.click(
+      await screen.findByRole("button", { name: "Berlin, State of Berlin, Germany" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Berlin, State of Berlin, Germany" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Overcast")).toBeInTheDocument();
+    expect(screen.getByText("Humidity 77%")).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "5-day forecast" }).children).toHaveLength(5);
+  });
+
+  test("searches once after typing stops, and not for a single letter", async () => {
+    let requests = 0;
+    server.use(
+      http.get("https://geocoding-api.open-meteo.com/v1/search", () => {
+        requests++;
+        return HttpResponse.json({ results: [berlin] });
+      }),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await search(user, "B");
+    await new Promise((resolve) => setTimeout(resolve, 500)); // longer than the debounce
+    expect(requests).toBe(0);
+
+    await search(user, "erlin");
+    await screen.findByRole("button", { name: /^Berlin/ });
+    expect(requests).toBe(1); // six keystrokes, one request
+  });
+
+  test("says so when no city matches", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await search(user, "zzzz");
+
+    expect(await screen.findByText("No cities found for “zzzz”.")).toBeInTheDocument();
+  });
+
+  test("shows an error with a working Try again button", async () => {
+    let fail = true;
+    server.use(
+      http.get("https://geocoding-api.open-meteo.com/v1/search", () =>
+        fail
+          ? HttpResponse.json(
+              { error: true, reason: "Too many requests" },
+              { status: 429 },
+            )
+          : HttpResponse.json({
+              results: [{ id: 1, name: "Berlin", latitude: 52.52, longitude: 13.41 }],
+            }),
+      ),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await search(user, "Berlin");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Too many requests");
+
+    fail = false;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("button", { name: "Berlin" })).toBeInTheDocument();
+  });
+
+  test("switches the temperature unit", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await search(user, "Berlin");
+    await user.click(await screen.findByRole("button", { name: /^Berlin/ }));
+    await screen.findByText("10°");
+
+    await user.click(screen.getByRole("button", { name: "°F" }));
+
+    expect(await screen.findByText("50°")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "°F" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+  });
+
+  test("does not show the old city's numbers while a new city loads", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await search(user, "Berlin");
+    await user.click(await screen.findByRole("button", { name: /^Berlin/ }));
+    await screen.findByText("10°");
+
+    server.use(
+      http.get("https://api.open-meteo.com/v1/forecast", async () => {
+        await delay(200);
+        return HttpResponse.error();
+      }),
+    );
+    await search(user, "Paris");
+    await user.click(await screen.findByRole("button", { name: /^Paris/ }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("Loading weather for Paris…");
+    expect(screen.queryByText("10°")).not.toBeInTheDocument();
+  });
+
+  test("remembers the city and unit after a reload", async () => {
+    const user = userEvent.setup();
+    const first = renderApp();
+    await search(user, "Paris");
+    await user.click(await screen.findByRole("button", { name: /^Paris/ }));
+    await user.click(screen.getByRole("button", { name: "°F" }));
+    await screen.findByText("54°");
+    first.unmount();
+
+    renderApp();
+
+    expect(screen.getByRole("button", { name: "°F" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Paris, France" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("54°")).toBeInTheDocument();
+  });
+
+  test("ignores broken saved data", () => {
+    localStorage.setItem("weather-v1", '{"city":{"name":42},"unit":"kelvin"}');
+    renderApp();
+    expect(screen.getByText("Search for a city to see its weather.")).toBeInTheDocument();
+  });
+});
+```
+
+Run `npx vitest run`: 13 tests pass here (4 for the API layer, 1 for the hook and 8 for the app). Two details are worth copying. `findBy...` waits up to a second for something to appear, which is how the tests cope with the 300 ms debounce and the fake network without any `sleep`; the one real wait, in the single-letter test, is on purpose, because there the _absence_ of a request is the thing being tested. And test 6 returns `HttpResponse.error()` after a delay: the test only cares what is on screen during the wait, and the fake failure afterwards leaves nothing behind.
+
+</Solution>
+
+## Break it on purpose
+
+A test that passes proves little until you have seen it fail. Make each change below, run `npx vitest run`, check that the named test goes red, and undo the change. These are the results in the sandbox:
+
+| Break this | Result |
+| ---------- | ------ |
+| In `useCitySearch`, change `term.length >= 2` to `term.length >= 0` | The one-letter test fails (a request is sent for an empty search) |
+| In `App`, remove `key={city.id}` from `CurrentWeather` | The "old city's numbers" test fails: it finds "Updating…" instead of "Loading weather for Paris…" |
+| In `CitySearch`, use `text.trim()` instead of the debounced value | The "exactly one request" test fails |
+| In `ForecastSchema`, remove `.nullable()` from the rain chance | 4 tests fail: the API mapping test and three app flows that load a forecast |
+
+If one of these changes does **not** make a test fail, you found a gap. Write the missing test before moving on.
+
+## Stretch goals and checking your work
+
+- **A `formatDay` test:** check that `formatDay("2026-10-20")` is `"Tue"`, and that it does not change if you run the tests with `TZ=Pacific/Auckland` and `TZ=America/Los_Angeles` set.
+- **Coverage:** run `npx vitest run --coverage` (install `@vitest/coverage-v8`) and see which lines no test touches.
+- **Test the offline case:** make a forecast handler return `HttpResponse.error()` and check that "Could not load the weather" appears with a working Try again.
+- **Run in CI:** a later module adds a GitHub Actions workflow that runs these checks on every pull request. You can already write the one-line command: `npx tsc -b && npm run lint && npx vitest run`.
+
+Before calling the project done, run:
+
+```bash
+npx tsc -b
+npm run lint
+npx vitest run
+npm run build
+```
+
+All four should finish without errors. Push the project to a GitHub repository with a short README and a screenshot of the app. This is your second React portfolio piece: it talks to a real API, handles every failure on the way, and has tests.

@@ -1,0 +1,400 @@
+---
+title: Thinking in React
+summary: Break a design into components, decide what is state, and lift that state to the right parent so data flows in one direction.
+order: 4
+takeaways:
+  - Build a UI in five steps, which are draw the components, build a static version with props, find the minimal state, decide where it lives, then add callbacks that change it.
+  - Split the UI into components along natural boundaries; a component should do one job, like a function.
+  - Data flows one way, down the tree through props, and changes flow back up by calling functions the parent passed down.
+  - State is the smallest set of values that can change; anything you can calculate from props or other state is derived and should not be stored.
+  - When two components need the same state, lift it to their closest common parent and pass it down.
+  - Keep state as low in the tree as possible, and never copy a prop into state unless you want it to be only an initial value.
+videos:
+  - title: "Lifting State Up in React ( Simple Explanation ) in Hindi | React Interview Questions 2026"
+    channel: "Yoshita Jain"
+    duration: "11:02"
+    url: https://www.youtube.com/watch?v=DkDtqBVr94w
+  - title: "Thinking in React - Explained React.js Docs #07"
+    channel: "CodeFTW - Become one of the top developers"
+    duration: "31:30"
+    url: https://www.youtube.com/watch?v=ei6vN0XFkFc
+docs:
+  - title: "react.dev — Thinking in React"
+    url: https://react.dev/learn/thinking-in-react
+  - title: "react.dev — Sharing State Between Components"
+    url: https://react.dev/learn/sharing-state-between-components
+  - title: "react.dev — Choosing the State Structure"
+    url: https://react.dev/learn/choosing-the-state-structure
+  - title: "react.dev — Preserving and Resetting State"
+    url: https://react.dev/learn/preserving-and-resetting-state
+---
+
+Knowing `useState` and props isn't enough to build a real screen. The hard questions are "which components do I make?" and "which one owns this state?", and junior interviews often ask you to design a small UI on the spot. This lesson gives you a repeatable method that every later project in this module uses. It was written for React 19 and TypeScript.
+
+## The method
+
+Imagine a searchable product table: a search box, an "only show products in stock" checkbox, and a table grouped by category with out-of-stock items in red.
+
+```text
+┌─────────────────────────────────────┐
+│ [ Search...                      ]  │
+│ [x] Only show products in stock     │
+│ Audio                               │
+│ Headphones      $59                 │
+│ Speaker (red)   $89                 │
+└─────────────────────────────────────┘
+```
+
+Work through five steps in order:
+
+1. Break the UI into a component hierarchy.
+2. Build a static version (props only, no state).
+3. Find the minimal state.
+4. Decide where the state lives.
+5. Add inverse data flow, so children can change the parent's state.
+
+### Step 1: break the UI into components
+
+Draw a box around every piece and name it. Use the same instinct as for functions and CSS classes: one job per component.
+
+```text
+FilterableProductTable      the whole thing (and later, the owner of the state)
+├── SearchBar               the input and checkbox
+└── ProductTable            the table
+    ├── (category rows)     "Audio", "Cables" headings
+    └── ProductRow          one product
+```
+
+Nesting in the tree becomes nesting in the code. Components are cheap to split or merge later, so don't chase perfect boundaries.
+
+### Step 2: build a static version
+
+First build the screen from fixed data with **props only**, using no state at all. It's the quickest way to get the markup right, and you can see the whole structure working before adding behaviour.
+
+```ts
+// src/data.ts
+export type Product = {
+  id: number;
+  category: string;
+  name: string;
+  price: number;
+  inStock: boolean;
+};
+
+export const PRODUCTS: Product[] = [
+  { id: 1, category: "Audio", name: "Headphones", price: 59, inStock: true },
+  { id: 2, category: "Audio", name: "Speaker", price: 89, inStock: false },
+  { id: 3, category: "Audio", name: "Earbuds", price: 39, inStock: true },
+  { id: 4, category: "Cables", name: "USB-C cable", price: 9, inStock: true },
+  { id: 5, category: "Cables", name: "HDMI cable", price: 12, inStock: false },
+];
+```
+
+```tsx
+// src/components/ProductRow.tsx
+import type { Product } from "../data";
+
+export function ProductRow({ product }: { product: Product }) {
+  return (
+    <tr>
+      <td style={{ color: product.inStock ? undefined : "crimson" }}>{product.name}</td>
+      <td>${product.price}</td>
+    </tr>
+  );
+}
+```
+
+```tsx
+// src/components/ProductTable.tsx
+import type { Product } from "../data";
+import { ProductRow } from "./ProductRow";
+
+export function ProductTable({ products }: { products: Product[] }) {
+  const rows: React.ReactNode[] = [];
+  let lastCategory = "";
+
+  for (const product of products) {
+    if (product.category !== lastCategory) {
+      rows.push(
+        <tr key={product.category}>
+          <th colSpan={2}>{product.category}</th>
+        </tr>,
+      );
+      lastCategory = product.category;
+    }
+    rows.push(<ProductRow key={product.id} product={product} />);
+  }
+
+  return (
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Price</th></tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
+  );
+}
+```
+
+The loop pushes a heading whenever the category changes, then the product row. Data flows **down**: `FilterableProductTable` passes `products` to `ProductTable`, which passes one `product` to each row.
+
+### Step 3: find the minimal state
+
+State is data that **changes over time**. List every piece of data in the app, then ask three questions about each:
+
+1. Does it stay the same over time? Then it's not state.
+2. Is it passed in from a parent via props? Then it's not state (it belongs to the parent).
+3. Can you **calculate** it from other state or props? Then it's not state.
+
+Apply this to the product table:
+
+| Data | State? | Why |
+| ---- | ------ | --- |
+| The original product list | No | Passed in as props |
+| The search text | **Yes** | Changes as the user types |
+| The checkbox value | **Yes** | Changes when clicked |
+| The filtered list | No | Calculated from the list, text and checkbox |
+
+Only two pieces of state: `query` and `inStockOnly`. The filtered list is **derived**. If you stored it in its own `useState`, you would have to update it every time one of the others changed, and forgetting once leaves a stale screen.
+
+### Step 4: decide where the state lives
+
+For each piece of state, find every component that **uses** it, then find their **closest common parent**. That parent owns the state.
+- `SearchBar` needs `query` and `inStockOnly` to show the current values.
+- `ProductTable` needs them to decide which rows to show.
+- Their closest common parent is `FilterableProductTable`, so the state lives there.
+
+This move is called **lifting state up**: if `SearchBar` held the text in its own `useState`, `ProductTable` couldn't see it, because siblings can't read each other's state. The parent holds it and gives each child what it needs:
+
+```tsx
+// src/components/FilterableProductTable.tsx
+import { useState } from "react";
+import type { Product } from "../data";
+import { ProductTable } from "./ProductTable";
+import { SearchBar } from "./SearchBar";
+
+export function FilterableProductTable({ products }: { products: Product[] }) {
+  const [query, setQuery] = useState("");
+  const [inStockOnly, setInStockOnly] = useState(false);
+
+  const visible = products.filter((product) => {
+    const matches = product.name.toLowerCase().includes(query.toLowerCase());
+    return matches && (!inStockOnly || product.inStock);
+  });
+
+  return (
+    <div>
+      <SearchBar
+        query={query}
+        inStockOnly={inStockOnly}
+        onQueryChange={setQuery}
+        onInStockOnlyChange={setInStockOnly}
+      />
+      <ProductTable products={visible} />
+    </div>
+  );
+}
+```
+
+The `visible` list is the derived value from step 3, recalculated on every render.
+
+### Step 5: add inverse data flow
+
+Props only move **down**, but the user types into `SearchBar`, so the child must tell the parent. The parent passes **functions** as props (here the state setters), and the child calls them:
+
+```tsx
+// src/components/SearchBar.tsx
+type SearchBarProps = {
+  query: string;
+  inStockOnly: boolean;
+  onQueryChange: (query: string) => void;
+  onInStockOnlyChange: (value: boolean) => void;
+};
+
+export function SearchBar({ query, inStockOnly, onQueryChange, onInStockOnlyChange }: SearchBarProps) {
+  return (
+    <form>
+      <input
+        type="search"
+        placeholder="Search..."
+        value={query}
+        onChange={(event) => onQueryChange(event.target.value)}
+      />
+      <label>
+        <input
+          type="checkbox"
+          checked={inStockOnly}
+          onChange={(event) => onInStockOnlyChange(event.target.checked)}
+        />{" "}
+        Only show products in stock
+      </label>
+    </form>
+  );
+}
+```
+
+The cycle is: the user types, `onChange` calls `onQueryChange`, which is `setQuery` in the parent, which re-renders the parent with the new `query`, which flows back down as a prop. The input is **controlled**: its value always comes from the parent's state. Naming convention: props that receive functions start with `on` (`onQueryChange`), and the handlers that set state start with `handle`.
+
+<Callout type="note" title="One-way data flow">
+Data goes down, events go up. To find out why something shows a value, follow its prop up the tree to the component that owns the state.
+</Callout>
+
+## Where should state live?
+
+The answer from step 4 is the **lowest** component that is a common parent of everything that uses it. Two ways to get it wrong:
+
+- **Too low.** Siblings can't share it, so lift it.
+- **Too high.** State at the top of the app re-renders everything on every change and makes components hard to reuse. If only one component uses a value, keep it inside that component. Keeping state close to where it is used is called **colocation**.
+
+### Lifting state for coordination
+
+Lifting also coordinates siblings. An accordion where opening one panel closes the others can't work if each panel tracks its own `isOpen`. The parent stores which one is open, and each panel only receives a boolean:
+
+```tsx
+import { useState } from "react";
+
+type Panel = { id: string; title: string; body: string };
+
+function PanelView({ panel, isOpen, onToggle }: { panel: Panel; isOpen: boolean; onToggle: () => void }) {
+  return (
+    <section>
+      <h3>
+        <button type="button" aria-expanded={isOpen} onClick={onToggle}>
+          {panel.title}
+        </button>
+      </h3>
+      {isOpen && <p>{panel.body}</p>}
+    </section>
+  );
+}
+
+export function Accordion({ panels }: { panels: Panel[] }) {
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  return (
+    <div>
+      {panels.map((panel) => (
+        <PanelView
+          key={panel.id}
+          panel={panel}
+          isOpen={openId === panel.id}
+          onToggle={() => setOpenId(openId === panel.id ? null : panel.id)}
+        />
+      ))}
+    </div>
+  );
+}
+```
+
+`PanelView` has no state: it renders what it is told and reports clicks, which makes it easy to reuse and test. The state is one value (`openId`), not a boolean per panel, so "two panels open" is impossible.
+
+## Don't copy props into state
+
+A common mistake is making a state copy of a prop:
+
+```tsx
+function Greeting({ name }: { name: string }) {
+  const [shown] = useState(name); // copies the prop once
+  return <p>Hello, {shown}</p>;
+}
+```
+
+`useState(name)` uses `name` only for the **first** render. When the parent later passes `"Ben"` instead of `"Asha"`, the component keeps showing `Hello, Asha`. There are now two sources of truth. Use the prop directly (`Hello, {name}`). Copying is only right when you deliberately want the prop to be an initial value, and then name it that way (`initialName`).
+
+<Callout type="tip" title="Resetting state with key">
+When you do need a component to start fresh for a different item, give it a `key` that identifies the item: `<Profile key={userId} />`. React treats a new key as a new component and throws the old state away.
+</Callout>
+
+## Other state-structure rules
+
+- **Avoid duplicated state.** Don't store the selected item object and the item list; store the selected `id` and look the item up. Otherwise editing the item leaves a stale copy behind.
+
+## Common mistakes
+
+- Keeping state in a component whose sibling also needs it. Lift it to the common parent.
+- Forgetting `onChange` on a controlled input, so it can't be typed into (React warns about it).
+
+<Exercise title="Find the state">
+A to-do app shows a text box for a new task, a list of tasks (each with a done checkbox), and a footer saying "2 of 5 done". Which of these are state, and which are derived or props?
+
+1. The text in the box
+2. The array of tasks
+3. Whether each task is done
+4. The number of done tasks
+5. The footer text
+
+<Solution>
+State: **1** (changes as the user types), **2** (tasks are added and removed), and **3** (stored on each task inside the array, so it's part of the same state as 2, not a separate `useState`). Derived, so not state: **4** is `tasks.filter(t => t.done).length`, and **5** is built from 4 and `tasks.length`. If the footer count were stored in state you would have to update it in every handler that adds, removes or toggles a task.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the stale name">
+The parent switches the user from "Asha" to "Ben", but the card still says Asha. Fix it in two ways.
+
+```tsx
+function UserCard({ name }: { name: string }) {
+  const [shown] = useState(name);
+  return <p>{shown}</p>;
+}
+// parent: <UserCard name={currentUser} />
+```
+
+<Solution>
+Way 1 (usually best): there's no reason for state here, so read the prop.
+
+```tsx
+function UserCard({ name }: { name: string }) {
+  return <p>{name}</p>;
+}
+```
+
+Way 2: if the card needs its own editable state seeded from the prop, keep the state but give the instance a key that changes with the user, so React remounts it: `<UserCard key={currentUser} name={currentUser} />`.
+</Solution>
+</Exercise>
+
+<Exercise title="Lift the state up">
+Two buttons, "Like" (adds 1 point) and "Love" (adds 2 points), are separate components that each have their own count. Add a line "Total points" under them that shows the combined total. Show how to restructure it.
+
+<Solution>
+The total depends on what both buttons do, so the state moves to their parent. The buttons become presentational: they receive a label and a callback.
+
+```tsx
+import { useState } from "react";
+
+function VoteButton({ label, onVote }: { label: string; onVote: () => void }) {
+  return <button type="button" onClick={onVote}>{label}</button>;
+}
+
+export function Votes() {
+  const [total, setTotal] = useState(0);
+
+  return (
+    <div>
+      <VoteButton label="Like" onVote={() => setTotal(total + 1)} />
+      <VoteButton label="Love" onVote={() => setTotal(total + 2)} />
+      <p>Total points: {total}</p>
+    </div>
+  );
+}
+```
+
+After one Like and one Love the page shows `Total points: 3`.
+</Solution>
+</Exercise>
+
+<Exercise title="Add a sort toggle">
+Extend the product table with a checkbox "Sort by price (low to high)". Decide whether it is state or derived, where it lives, and write the changes.
+
+<Solution>
+The checkbox value is new **state** (it changes when clicked). `SearchBar` shows it and `FilterableProductTable` uses it to sort, so it lives in `FilterableProductTable`, just like `inStockOnly`. The sorted list stays **derived**. In `FilterableProductTable`:
+
+```tsx
+const [sortByPrice, setSortByPrice] = useState(false);
+
+const filtered = products.filter(/* same as before */);
+const visible = sortByPrice ? [...filtered].sort((a, b) => a.price - b.price) : filtered;
+```
+
+Pass `sortByPrice` and `onSortByPriceChange={setSortByPrice}` to `SearchBar` for the new controlled checkbox. Copy the array with `[...filtered]` before `sort`, because `sort` mutates in place.
+</Solution>
+</Exercise>

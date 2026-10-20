@@ -1,0 +1,358 @@
+---
+title: The Node.js Runtime
+summary: Understand what Node.js is, choose between ES modules and CommonJS, and use the process object and environment variables to control a program.
+order: 1
+takeaways:
+  - Node.js is a program that runs JavaScript outside the browser, built from the V8 engine, the libuv library and a set of built-in modules.
+  - Node has no `window` or `document`, but it has `process`, `node:fs`, `node:http` and many other modules that a browser does not.
+  - New projects use ES modules (`import`) by setting the `type` field to `module` in `package.json`, while older code uses CommonJS (`require`).
+  - The `process.argv` array holds the command line arguments and `process.env` holds environment variables, which are always strings.
+  - Secrets and per-machine settings belong in environment variables or an untracked `.env` file loaded with `node --env-file=.env`.
+videos:
+  - title: "Node.js Ultimate Beginner’s Guide in 7 Easy Steps"
+    channel: "Fireship"
+    duration: "16:20"
+    url: https://www.youtube.com/watch?v=ENrzD9HAZK4
+  - title: "ESM vs CommonJS in your Node Projects"
+    channel: "Covalence"
+    duration: "13:24"
+    url: https://www.youtube.com/watch?v=I3DrifH-rJE
+docs:
+  - title: "Node.js — Introduction to Node.js"
+    url: https://nodejs.org/en/learn/getting-started/introduction-to-nodejs
+  - title: "Node.js — ECMAScript modules"
+    url: https://nodejs.org/api/esm.html
+  - title: "Node.js — CommonJS modules"
+    url: https://nodejs.org/api/modules.html
+  - title: "Node.js — process"
+    url: https://nodejs.org/api/process.html
+---
+
+Almost every backend job that uses JavaScript means Node.js, and interviewers love to ask how it handles many requests with one thread. Every lesson in this module (Express, databases, authentication, WebSockets) runs on the ideas here, and Next.js in Phase 3 runs your server code on Node too. This lesson was written for Node 24, a **long term support (LTS)** release line meant for production, and everything in it also works on Node 22.12 and newer.
+
+You already know the language from the JavaScript modules. Here you learn what changes when JavaScript leaves the browser. The next lesson, `node-event-loop`, covers how Node runs your code without blocking.
+
+## What Node.js is
+
+**Node.js** is a program you install on a computer. You give it a JavaScript file and it runs the file, with no browser involved. Three parts make that work:
+
+- **V8**, the JavaScript engine from Chrome, which turns your code into machine instructions.
+- **libuv**, a C library that talks to the operating system for files, network and timers, and runs the event loop.
+- **Built-in modules** such as `node:fs` (files), `node:http` (web servers) and `node:path` (file paths), written by the Node team.
+
+```bash
+node --version        # v24.21.0 (yours may differ)
+node -e "console.log(1 + 1)"   # run a short piece of code: prints 2
+```
+
+Save this as `hello.js` and run `node hello.js`:
+
+```js
+// hello.js
+console.log("Hello from Node");
+console.log(typeof window, typeof document);   // undefined undefined
+console.log(typeof process, typeof globalThis.fetch); // object function
+```
+
+There is no `window` and no `document`, because there is no page. `globalThis` is the global object in both worlds, and Node also exposes it as `global`. Node does have `fetch`, `URL`, `setTimeout`, `AbortController` and `structuredClone`, so many browser APIs work the same way.
+
+<Callout type="note" title="Check your version">
+Run `node --version`. This module needs Node 22.12 or newer. Any LTS line is a safe choice, and your `package.json` can say so with `"engines": { "node": ">=22.12" }`.
+</Callout>
+
+### A tiny web server
+
+To see why Node exists, here is a whole web server with no libraries:
+
+```js
+// hello-server.mjs
+import http from "node:http";
+
+const server = http.createServer((req, res) => {
+  res.setHeader("content-type", "text/plain");
+  res.end(`You asked for ${req.method} ${req.url}\n`);
+});
+
+const port = Number(process.env.PORT ?? 3000);
+server.listen(port, () => console.log(`Listening on http://localhost:${port}`));
+```
+
+Run `node hello-server.mjs`, then `curl http://localhost:3000/hi` in a second terminal. It prints `You asked for GET /hi`. Stop the server with `Ctrl+C`. The server stays alive because it is waiting for requests; the next lesson explains how that waiting works. Express (lesson 5) is a nicer layer on top of exactly this `http` module.
+
+## Two module systems: ES modules and CommonJS
+
+A **module** is a file that shares code with other files. Node supports two systems, because Node was created (2009) years before JavaScript got its own module syntax (2015).
+
+| | CommonJS (CJS) | ES modules (ESM) |
+| --- | --- | --- |
+| Import | `const fs = require("node:fs")` | `import fs from "node:fs"` |
+| Export | `module.exports = { add }` | `export const add = ...` |
+| Loading | Synchronous, at runtime | Static analysis first, then loads |
+| Top-level `await` | No | Yes |
+| File path variables | `__dirname`, `__filename` | `import.meta.dirname`, `import.meta.filename` |
+| Relative imports | Extension optional | Extension required (`./math.js`) |
+
+New code, and everything in this site, uses **ES modules**, the same system you met in the browser. You still read CommonJS in older tutorials and packages, so you need both.
+
+### Choosing the system
+
+Node decides per file:
+
+- A `.mjs` file is always ESM and a `.cjs` file is always CommonJS.
+- A `.js` file follows the nearest `package.json`: with `"type": "module"` it is ESM, otherwise CommonJS.
+
+```json
+{
+  "name": "my-api",
+  "private": true,
+  "type": "module"
+}
+```
+
+Put `"type": "module"` in every new project. Here are two files that use it:
+
+```js
+// math.js
+export const add = (a, b) => a + b;
+export default function greet(name) {
+  return `Hello, ${name}`;
+}
+```
+
+```js
+// main.js
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import greet, { add } from "./math.js";   // note the .js extension
+
+console.log(greet("Node"), add(2, 3));    // Hello, Node 5
+console.log(typeof require, typeof module, typeof __dirname); // undefined x3
+console.log(import.meta.dirname);         // the folder this file is in
+
+const text = await readFile(path.join(import.meta.dirname, "math.js"), "utf8"); // top-level await
+console.log(text.split("\n")[0]);         // export const add = (a, b) => a + b;
+```
+
+Three habits to notice. Built-in modules are imported with the `node:` prefix, which makes it obvious they are not packages from npm. Relative imports need the full file name, so `./math.js` and not `./math`. And in ESM, `require`, `module` and `__dirname` do not exist: use `import.meta.dirname` and `import.meta.filename` instead (available since Node 20.11).
+
+The same program in CommonJS looks like this:
+
+```js
+// math.js
+const add = (a, b) => a + b;
+module.exports = { add };
+
+// main.js
+const path = require("node:path");
+const { add } = require("./math");        // extension is optional here
+console.log(add(2, 3), __dirname);
+```
+
+### Mixing the two
+
+You will sometimes need to cross the line. The current rules:
+
+```js
+// 1. ESM can import CommonJS: you get module.exports as the default import
+import cjs from "./old-file.cjs";
+
+// 2. CommonJS can load ESM with require() on Node 22.12+ and 24
+const lib = require("./lib.mjs");          // { answer: 42, default: ... }
+
+// 3. Any file can use dynamic import(), which returns a promise
+import("./lib.mjs").then((m) => console.log(m.answer));
+```
+
+All three work on Node 24. The one thing `require()` cannot load is an ES module that uses top-level `await`; use `import()` for that.
+
+<Callout type="warning" title="The missing-extension error">
+In ESM, `import { x } from "./lib"` fails with `ERR_MODULE_NOT_FOUND` because Node will not guess the extension. Write `"./lib.js"`. If you see `require is not defined in ES module scope`, you are using CommonJS code in a file Node treats as ESM; switch to `import`.
+</Callout>
+
+Node also looks at the code when a `.js` file has no `"type"`. If it finds `import` or `export` it runs the file as ESM and may print a warning. That helps small scripts, but it is slower and confusing, so always declare the `"type"`.
+
+## The `process` object
+
+`process` is a global that describes the running program and lets you control it. You will use four parts of it constantly.
+
+### Command line arguments
+
+```js
+// process-demo.mjs
+console.log(process.argv.slice(2));    // arguments you typed after the file name
+console.log(process.cwd());            // the folder you ran `node` from
+console.log(process.platform, process.version);   // darwin v24.21.0
+```
+
+```bash
+node process-demo.mjs --name Ada -v
+# [ '--name', 'Ada', '-v' ]
+```
+
+`process.argv` is an array of strings. The first two entries are the path to `node` and the path to your file, which is why code slices them off. Bigger tools use the built-in `util.parseArgs` or a library, but for a script `argv` is enough.
+
+### Exit codes
+
+When a program ends it reports a number to the shell: `0` means success and anything else means failure. Scripts and CI servers read it to decide whether a step passed.
+
+```js
+// check.mjs
+if (!process.argv[2]) {
+  console.error("Usage: node check.mjs <name>");
+  process.exitCode = 1;       // finish normally, but report failure
+}
+```
+
+Run `node check.mjs; echo $?` and the shell prints `1`. Prefer setting `process.exitCode` over calling `process.exit(1)`, because `process.exit()` stops immediately, even if a file is half written or a log line is still waiting to be printed.
+
+### Reacting to signals
+
+When you press `Ctrl+C` the operating system sends the program a **signal** called `SIGINT`, and hosting platforms send `SIGTERM` to stop a server. You can listen for them and clean up first. This is called a **graceful shutdown**, and you will use it for every real server.
+
+```js
+process.on("SIGINT", () => {
+  console.log("\nShutting down...");
+  server.close(() => process.exit(0));   // stop accepting requests, then leave
+});
+```
+
+Add this to `hello-server.mjs` and `Ctrl+C` now prints the message and exits with code `0`. Without a handler Node just dies on the spot.
+
+### Environment variables
+
+An **environment variable** is a named setting that the operating system passes to every program it starts. Node exposes them as `process.env`.
+
+```js
+// env-demo.mjs
+console.log(process.env.PORT, typeof process.env.PORT);
+const port = Number(process.env.PORT ?? 3000);
+console.log(port + 1);
+```
+
+```bash
+node env-demo.mjs              # undefined undefined, then 3001
+PORT=8080 node env-demo.mjs    # 8080 string, then 8081
+```
+
+Two rules matter. A missing variable is `undefined`, so give it a default with `??`. And every value is a **string**, even if it looks like a number or `false`. `process.env.DEBUG = "false"` is a non-empty string, so `if (process.env.DEBUG)` is true. Convert on purpose: `Number(...)`, or `=== "true"` for flags.
+
+Why use them at all? The same code must run on your laptop, on a test server and in production with different ports, database addresses and passwords. Putting those values in the code means editing and committing secrets. Putting them in the environment keeps the code identical everywhere.
+
+### `.env` files
+
+Typing `PORT=8080 DATABASE_URL=... node app.js` every time is painful, so developers keep the values in a file named `.env`:
+
+```text
+# .env
+PORT=4000
+GREETING="Hello from .env"
+```
+
+Node can load it with a flag, with no library needed (Node 20.6+):
+
+```bash
+node --env-file=.env env-demo.mjs         # 4000 Hello from .env
+PORT=9 node --env-file=.env env-demo.mjs  # 9 Hello from .env  (the shell wins)
+node --env-file-if-exists=.env.local app.mjs   # no error if the file is missing
+```
+
+You can also load it from code with `process.loadEnvFile()`. A variable that is already set in the real environment wins over the file, which lets a hosting platform override your defaults. In `package.json` put the flag in your scripts: `"dev": "node --watch --env-file=.env src/server.js"`.
+
+<Callout type="warning" title="Never commit .env">
+`.env` usually holds passwords and API keys, so add it to `.gitignore` from the first commit. Commit a `.env.example` with fake values instead, so teammates know which variables the app needs. A secret that reaches GitHub, even for a minute, must be treated as stolen and replaced.
+</Callout>
+
+## Common mistakes
+
+- Treating `process.env` values as numbers or booleans. `"3000" + 1` is `"30001"`, and `"false"` is truthy.
+- Forgetting the `.js` extension in ESM imports, or using `__dirname` in an ES module.
+- Committing `.env`, or putting a secret in code "just for now".
+- Calling `process.exit()` from the middle of a program, which cuts off pending work. Set `process.exitCode` or close things gracefully.
+
+<Exercise title="Fix the environment bugs">
+This script is meant to print "debug is off" and then the next port number (3001). Run it with `PORT=3000 DEBUG=false node buggy-env.mjs`. It prints the wrong things. Find out why and fix it.
+
+```js
+// buggy-env.mjs
+const port = process.env.PORT + 1;
+const debug = process.env.DEBUG ?? false;
+if (debug === false) console.log("debug is off");
+console.log("next port:", port);
+```
+
+<Solution>
+Environment variables are strings. `"3000" + 1` joins them into `"30001"`, and `"false" === false` is never true, so the first line never prints.
+
+```js
+// fixed-env.mjs
+const port = Number(process.env.PORT ?? 3000) + 1;
+const debug = process.env.DEBUG === "true";
+if (!debug) console.log("debug is off");
+console.log("next port:", port);
+```
+
+Convert numbers with `Number(...)` and compare flags against the exact string you expect.
+</Solution>
+</Exercise>
+
+<Exercise title="A command line greeter">
+Write `greet.mjs` so that `node greet.mjs --name Ada` prints `Hello, Ada!` and exits with code 0. If `--name` is missing, print a usage message to the error stream and exit with code 1.
+
+<Solution>
+```js
+// greet.mjs
+const args = process.argv.slice(2);
+const i = args.indexOf("--name");
+const name = i === -1 ? undefined : args[i + 1];
+
+if (!name) {
+  console.error("Usage: node greet.mjs --name <name>");
+  process.exitCode = 1;
+} else {
+  console.log(`Hello, ${name}!`);
+}
+```
+
+Check the code with `node greet.mjs; echo $?`, which prints the usage line and then `1`.
+</Solution>
+</Exercise>
+
+<Exercise title="Convert CommonJS to ESM">
+Convert this CommonJS file, which reads `note.txt` next to it and shouts it, into an ES module named `convert.mjs`. Also write the ESM version of `util.cjs`.
+
+```js
+// convert.cjs
+const fs = require("node:fs");
+const path = require("node:path");
+const { shout } = require("./util.cjs");
+
+const text = fs.readFileSync(path.join(__dirname, "note.txt"), "utf8");
+console.log(shout(text.trim()));
+module.exports = { text };
+```
+
+```js
+// util.cjs
+module.exports = { shout: (s) => s.toUpperCase() + "!" };
+```
+
+<Solution>
+```js
+// util.mjs
+export const shout = (s) => s.toUpperCase() + "!";
+```
+
+```js
+// convert.mjs
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { shout } from "./util.mjs";
+
+const text = (await readFile(path.join(import.meta.dirname, "note.txt"), "utf8")).trim();
+console.log(shout(text));
+export { text };
+```
+
+The changes: `require` becomes `import`, `__dirname` becomes `import.meta.dirname`, the file extension is written out, `module.exports` becomes `export`, and top-level `await` lets us use the non-blocking `readFile` without a wrapper function.
+</Solution>
+</Exercise>

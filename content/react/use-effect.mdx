@@ -1,0 +1,399 @@
+---
+title: useEffect & Synchronizing
+summary: Use `useEffect` to keep a component in sync with the outside world, clean up after it, and recognise the many cases where you don't need an effect at all.
+order: 6
+takeaways:
+  - A component's render must be a pure calculation, so anything that reaches outside React (timers, subscriptions, the document title, network requests) belongs in an effect.
+  - An effect runs after React has put the result on screen, and the dependency array decides when it runs again - every render, only once, or when listed values change.
+  - Every value from the component that the effect reads must be in the dependency array; the linter checks this, so fix the code instead of silencing the warning.
+  - A cleanup function undoes what the effect set up, and React runs it before the next run and when the component disappears; Strict Mode runs setup, cleanup, setup on mount to prove yours works.
+  - An effect that fetches data can finish out of order, so guard it with an `ignore` flag or an `AbortController`, or use a library such as TanStack Query.
+  - If you are only transforming props and state, or reacting to a click, you don't need an effect - calculate during render or use an event handler.
+videos:
+  - title: "useEffect React Hook Tutorial (2024) - What YOU need to know"
+    channel: "Lukas | Web Development & Design"
+    duration: "10:14"
+    url: https://www.youtube.com/watch?v=vpPkUr86IG8
+  - title: "Mastering React's useEffect"
+    channel: "Jack Herrington"
+    duration: "25:19"
+    url: https://www.youtube.com/watch?v=dH6i3GurZW8
+docs:
+  - title: "react.dev — useEffect"
+    url: https://react.dev/reference/react/useEffect
+  - title: "react.dev — Synchronizing with Effects"
+    url: https://react.dev/learn/synchronizing-with-effects
+  - title: "react.dev — You Might Not Need an Effect"
+    url: https://react.dev/learn/you-might-not-need-an-effect
+  - title: "react.dev — Lifecycle of Reactive Effects"
+    url: https://react.dev/learn/lifecycle-of-reactive-effects
+  - title: "MDN — AbortController"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/AbortController
+---
+
+`useEffect` is the most used and the most misused hook in React. Interviewers ask about it because it exposes whether you understand rendering: dependency arrays, cleanup, stale closures and race conditions all live here, and so does the bigger skill of knowing when _not_ to use an effect. It was written for React 19 and the Vite + TypeScript setup from lesson 1. You need `useState` from lesson 3.
+
+## What is a side effect?
+
+Rendering a component should only calculate what the screen looks like: the same props and state give the same JSX, and nothing else changes. That is called being **pure**. Some jobs touch the world outside React, such as starting a timer, listening to `resize`, changing `document.title`, fetching data or opening a WebSocket. These are **side effects**, and you write them inside `useEffect`, which React runs _after_ the component is on screen.
+
+An effect is a way to **synchronize your component with something outside React**. If no outside system is involved, you probably don't need an effect (more on that below).
+
+## Your first effect
+
+This button counts clicks and also writes the count into the browser tab's title:
+
+```tsx
+import { useEffect, useState } from "react";
+
+export function DocumentTitle() {
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    document.title = `Clicked ${count} times`;
+  }, [count]);
+
+  return (
+    <button type="button" onClick={() => setCount(count + 1)}>
+      Clicked {count} times
+    </button>
+  );
+}
+```
+
+`useEffect` takes a function (the **setup**) and an array of **dependencies**. On each click: `setCount` schedules a re-render, React calls the component again, updates the screen, and only then runs your effect. The tab title reads "Clicked 1 times" after the first click. Writing `document.title = ...` straight in the component body would run it during rendering, which React asks you not to do.
+
+### The three forms of the dependency array
+
+The second argument controls **when** the effect runs again:
+
+```tsx
+useEffect(() => {
+  // 1. no array: runs after every render
+});
+
+useEffect(() => {
+  // 2. empty array: runs once, after the first render
+}, []);
+
+useEffect(() => {
+  // 3. with values: after the first render, and again whenever `a` or `b` changed
+}, [a, b]);
+```
+
+Form 3 is the one you will write most. React compares each value with the previous one using `Object.is` (like `===`) and skips the effect if nothing changed. Form 1 is rarely what you want. Don't think of the array as "when I want it to run"; think of it as a description: "this effect depends on these values".
+
+## The dependency rules
+
+Every value the effect uses that comes from the component must be in the array: props, state, and any variable or function declared inside the component.
+
+```tsx
+function Greeting({ name }: { name: string }) {
+  useEffect(() => {
+    document.title = `Hello, ${name}`;
+  }, []); // Wrong: `name` is used inside, but missing from the array
+}
+```
+
+With `[]` the effect runs once, so when `name` changes the title keeps the old name. The lint rule `react-hooks/exhaustive-deps` warns: _React Hook useEffect has a missing dependency: 'name'_. The fix is `[name]`.
+
+<Callout type="warning" title="Never silence the dependency warning">
+It is tempting to disable the lint rule when an effect "runs too often". Don't: the warning means the effect reads a value it doesn't re-run for, which is a bug waiting to happen. Change the code so the dependency isn't needed instead (the sections below show how).
+</Callout>
+
+**Objects and functions as dependencies.** Objects, arrays and functions created inside the component are **new on every render**, so `Object.is` sees them as changed and an effect depending on one runs every time. Depend on the primitive values you use instead: move the object inside the effect, so `runSearch({ query, limit: 10 })` has the dependencies `[query]`.
+
+## Cleanup
+
+Many effects start something that keeps running: a timer, a listener, a connection. An effect can return a **cleanup function** that stops it:
+
+```tsx
+import { useEffect, useState } from "react";
+
+export function Timer() {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    console.log("timer: start");
+    const id = setInterval(() => {
+      setSeconds((s) => s + 1);
+    }, 1000);
+
+    return () => {
+      console.log("timer: stop");
+      clearInterval(id);
+    };
+  }, []);
+
+  return <p>Seconds: {seconds}</p>;
+}
+```
+
+React calls the cleanup in two situations: **before running the effect again** (with the old values), and **when the component is removed** from the screen. The pattern is always the same: setup starts something, cleanup stops it. Other pairs follow the same shape: `addEventListener` with `removeEventListener`, `socket.connect()` with `socket.disconnect()`, and `fetch` with `controller.abort()`. Without cleanup, every time the component appeared it would add another listener or timer that never goes away.
+
+### Why your effect runs twice in development
+
+In development, `main.tsx` wraps the app in `<StrictMode>`. On mount it runs **setup, cleanup, setup** to test that your cleanup works. Showing the `Timer` above logs:
+
+```text
+timer: start
+timer: stop
+timer: start
+```
+
+This only happens in development, never in your production build. It is a feature: if the second run behaves differently from the first, your cleanup is incomplete. A chat-room effect shows the same idea with a changing dependency:
+
+```tsx
+useEffect(() => {
+  const connection = createConnection(roomId);
+  connection.connect();
+  return () => connection.disconnect();
+}, [roomId]);
+```
+
+Changing `roomId` from `"general"` to `"random"` logs `disconnect from general` and then `connect to random`: the cleanup runs with the **old** value first, then the setup with the new one. Forget the `disconnect` and Strict Mode leaves you with two live connections, so you notice at once.
+
+<Callout type="tip" title="Don't try to stop the double run">
+Beginners add a `useRef` flag so the effect runs only once. That hides the bug instead of fixing it. Write the cleanup so that setup, cleanup, setup looks the same to the user as a single setup.
+</Callout>
+
+## Fetching data in an effect
+
+The server is the "outside" here, and the component should show data for the current `userId`:
+
+```tsx
+import { useEffect, useState } from "react";
+
+type User = { id: number; name: string; email: string };
+type Result = { userId: number; user?: User; error?: string };
+
+export function UserProfile({ userId }: { userId: number }) {
+  const [result, setResult] = useState<Result | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    fetch(`https://jsonplaceholder.typicode.com/users/${userId}`, {
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json() as Promise<User>;
+      })
+      .then((user) => setResult({ userId, user }))
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setResult({ userId, error: err instanceof Error ? err.message : "Failed" });
+      });
+
+    return () => controller.abort();
+  }, [userId]);
+
+  // A result for a previous userId means we are still loading the new one.
+  const current = result?.userId === userId ? result : null;
+
+  if (!current) return <p>Loading…</p>;
+  if (current.error) return <p role="alert">Error: {current.error}</p>;
+  return (
+    <p>
+      {current.user?.name} ({current.user?.email})
+    </p>
+  );
+}
+```
+
+`<UserProfile userId={1} />` shows "Loading…" and then `Leanne Graham (Sincere@april.biz)`; `userId={9999}` gives `Error: HTTP 404`. Three details: `fetch` doesn't reject on a 404, so the code checks `response.ok` itself; the result is stored together with the `userId` it belongs to, so when the id changes the old result no longer matches and "Loading…" shows without resetting state inside the effect; and the `AbortError` is not a real failure, it is our own cleanup cancelling the request.
+
+### Race conditions
+
+Why the `AbortController`? Say the user clicks from user 1 to user 2 quickly. Two requests are in flight, and the network doesn't promise they finish in order. If user 1's slow response arrives last, it overwrites the screen: the page says user 2 but shows user 1's data. That is a **race condition**.
+
+The cleanup is the fix: when `userId` changes, React runs the old effect's cleanup first, which cancels the old request. For promises that can't be aborted, use an `ignore` flag. It works because each effect run has its own `ignore` variable (a closure, from the scope lesson):
+
+```tsx
+useEffect(() => {
+  let ignore = false;
+
+  fakeFetchName(userId).then((name) => {
+    if (!ignore) setName(name); // skip results from an outdated run
+  });
+
+  return () => {
+    ignore = true; // runs when userId changes or the component unmounts
+  };
+}, [userId]);
+```
+
+When tested with a slow response for user 1 and a fast one for user 2, the version without `ignore` ended up showing "User 1" while user 2 was selected; this version correctly shows "User 2".
+
+Writing this by hand misses caching, retries, shared loading states and refetching. The React docs recommend your framework's data fetching or a library such as TanStack Query, which lesson 15 teaches. Effects are still worth understanding, because those libraries are built from the same ideas and interviewers ask about this exact bug.
+
+## You might not need an effect
+
+The most common mistake is not a wrong dependency array but using an effect where none is needed. It makes the component render twice (once with stale data, then again after the effect updates state) and is harder to read. Four patterns to recognise:
+
+**1. Values you can calculate during render.** Don't copy props or state into more state with an effect:
+
+```tsx
+// Wrong: an extra state variable and an extra render
+const [fullName, setFullName] = useState("");
+useEffect(() => {
+  setFullName(`${firstName} ${lastName}`);
+}, [firstName, lastName]);
+
+// Right: derived on every render
+const fullName = `${firstName} ${lastName}`;
+const visible = showDone ? todos : todos.filter((t) => !t.done);
+```
+
+Rule of thumb: if you can compute it from existing props and state, don't store it.
+
+**2. Work that happens because the user did something.** If the code runs because of a click or a submit, put it in the event handler. An effect would run it whenever some state changed for any other reason:
+
+```tsx
+// Wrong: re-sends if `submitted` changes again for any reason
+useEffect(() => {
+  if (submitted) sendForm();
+}, [submitted]);
+
+// Right: a handler runs exactly once per submit
+function handleSubmit(event: React.SubmitEvent<HTMLFormElement>) {
+  event.preventDefault();
+  sendForm();
+}
+```
+
+Ask: _why_ does this code need to run? "Because the user did X" means a handler. "Because this component is shown" means an effect (for example, recording that a page was viewed).
+
+**3. Resetting state when a prop changes.** Suppose a comment box should start empty when you move to a different post. Don't write an effect that calls `setText("")` when `postId` changes. Give the box a different **`key`**: React treats a component with a new key as a brand-new one with fresh state.
+
+```tsx
+export function PostPage({ postId }: { postId: number }) {
+  return <CommentBox key={postId} postId={postId} />; // new key, new state
+}
+```
+
+**4. Telling the parent about a change.** Don't call `onChange(value)` from an effect after a state update. Call it in the same event handler that updates the state, so both updates happen in one render (lesson 4).
+
+<Callout type="tip" title="A quick test">
+Before writing `useEffect`, ask: is an external system involved? Timers, listeners, connections and the document are external. Your own props and state are not. Without an external system, derive during render or use a handler.
+</Callout>
+
+## Common mistakes
+
+**Stale closures.** A function inside an effect sees the values from the render it was created in. This counter gets stuck at 1:
+
+```tsx
+useEffect(() => {
+  const id = setInterval(() => {
+    setCount(count + 1); // `count` is always 0 here
+  }, 500);
+  return () => clearInterval(id);
+}, []); // the linter warns: `count` is missing
+```
+
+It runs `setCount(0 + 1)` every half second forever. Either add `count` to the array (which restarts the interval on every tick), or better, use the updater form `setCount((c) => c + 1)`, which doesn't read `count` at all. React 19 also has `useEffectEvent` for reading the latest value without re-running the effect; read its docs page once you are comfortable with the basics.
+
+**Infinite loops.** An effect with no array that sets state to a new object or array every time causes an endless chain of render, effect, state change, render. React stops it with _Maximum update depth exceeded_. Look for a missing `[]` or an object dependency rebuilt on every render.
+
+**An async function as the effect.** `useEffect(async () => {...})` is wrong: it returns a Promise, but React expects nothing or a cleanup function. Use `.then`, or define an inner `async` function and call it.
+
+<Exercise title="Predict the output">
+What does this component log when it mounts in development with Strict Mode? What is logged after the button is clicked once?
+
+```tsx
+function Demo() {
+  const [n, setN] = useState(0);
+
+  useEffect(() => {
+    console.log("setup", n);
+    return () => console.log("cleanup", n);
+  }, [n]);
+
+  return <button onClick={() => setN(n + 1)}>{n}</button>;
+}
+```
+
+<Solution>
+On mount: `setup 0`, `cleanup 0`, `setup 0` (Strict Mode's extra test cycle, development only). After one click `n` is 1, so React runs the **old** effect's cleanup, which still sees `n` as 0, and then the new setup:
+
+```text
+cleanup 0
+setup 1
+```
+
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the leak: the clock">
+This clock updates every second, but when the component is removed the interval keeps running, and in Strict Mode two intervals tick at once. Fix it.
+
+```tsx
+function Clock() {
+  const [time, setTime] = useState(new Date());
+
+  useEffect(() => {
+    setInterval(() => setTime(new Date()), 1000);
+  }, []);
+
+  return <p>{time.toLocaleTimeString()}</p>;
+}
+```
+
+<Solution>
+The interval is never cleared. Keep its id and return a cleanup:
+
+```tsx
+useEffect(() => {
+  const id = setInterval(() => setTime(new Date()), 1000);
+  return () => clearInterval(id);
+}, []);
+```
+
+`setTime(new Date())` doesn't read the old state, so the empty array is correct here.
+</Solution>
+</Exercise>
+
+<Exercise title="Remove the unnecessary effects">
+This component has two effects it doesn't need. Rewrite it with none.
+
+```tsx
+function Cart({ items }: { items: { price: number; qty: number }[] }) {
+  const [total, setTotal] = useState(0);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    setTotal(items.reduce((sum, i) => sum + i.price * i.qty, 0));
+  }, [items]);
+
+  useEffect(() => {
+    setMessage(total > 100 ? "Free shipping!" : "");
+  }, [total]);
+
+  return (
+    <p>
+      {total} {message}
+    </p>
+  );
+}
+```
+
+<Solution>
+Both values can be calculated from `items`, so they don't need state:
+
+```tsx
+function Cart({ items }: { items: { price: number; qty: number }[] }) {
+  const total = items.reduce((sum, i) => sum + i.price * i.qty, 0);
+  const message = total > 100 ? "Free shipping!" : "";
+
+  return (
+    <p>
+      {total} {message}
+    </p>
+  );
+}
+```
+
+The original rendered three times per change and briefly showed a stale total. The new version renders once and is always consistent.
+</Solution>
+</Exercise>

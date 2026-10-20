@@ -1,0 +1,311 @@
+---
+title: Generics & Utility Types
+summary: Write reusable, type-safe code with generics, constraints, and the built-in utility types you will use every day in React and Node.
+order: 2
+takeaways:
+  - A generic is a type parameter - a placeholder like T resolved at the call site - that keeps relationships between inputs and outputs.
+  - "Constrain generics with extends (T extends { id: string }) to allow safe property access."
+  - Generic interfaces and functions model containers, API responses, and hooks (useState is generic).
+  - Utility types Partial, Required, Pick, Omit, Record, ReturnType and Awaited derive new types from existing ones - no duplication.
+  - Typing React props, Express handlers and API clients will lean on exactly these tools.
+videos:
+  - title: "Typescript Generics Tutorial"
+    channel: "Ben Awad"
+    duration: "21:56"
+    url: https://www.youtube.com/watch?v=nViEqpgwxHE
+docs:
+  - title: "TypeScript handbook: generics"
+    url: https://www.typescriptlang.org/docs/handbook/2/generics.html
+  - title: "TypeScript handbook: utility types"
+    url: https://www.typescriptlang.org/docs/handbook/utility-types.html
+  - title: "TypeScript handbook: keyof types"
+    url: https://www.typescriptlang.org/docs/handbook/2/keyof-types.html
+---
+
+Suppose you write an `identity` function that returns whatever it's given. How do you type it? `any` loses information; one overload per type is silly. **Generics** let you say: "whatever type goes in is the type that comes out."
+
+## Why generics?
+
+```ts
+function firstAny(items: any[]): any {
+  return items[0];
+}
+const x = firstAny([1, 2, 3]);   // any — we lost the information
+x.toUpperCase();                  // compiles, crashes at runtime
+```
+
+With a **type parameter** `T`:
+
+```ts
+function first<T>(items: T[]): T | undefined {
+  return items[0];
+}
+
+const n = first([1, 2, 3]);          // T inferred as number → number | undefined
+const s = first(["a", "b"]);         // string | undefined
+const u = first<boolean>([true]);    // explicit type argument (rarely needed)
+```
+
+`T` is just a name (conventions: `T`, `U`, `K`, `V`, or descriptive like `TItem`). TypeScript infers it from the arguments, and the return type stays precisely linked to the input.
+
+### Multiple type parameters
+
+```ts
+function pair<A, B>(a: A, b: B): [A, B] {
+  return [a, b];
+}
+const p = pair("age", 36);   // [string, number]
+
+function map<T, U>(items: T[], fn: (item: T) => U): U[] {
+  return items.map(fn);
+}
+const lengths = map(["a", "bb"], (s) => s.length);   // number[] — U inferred from the callback
+```
+
+## Constraints with `extends`
+
+Unconstrained, `T` could be anything, so you can't touch its properties. Constrain it:
+
+```ts
+function longest<T extends { length: number }>(a: T, b: T): T {
+  return a.length >= b.length ? a : b;
+}
+longest("hello", "hi");        // string
+longest([1, 2, 3], [1]);       // number[]
+longest(10, 5);                // ❌ number has no length
+
+interface HasId { id: string }
+function byId<T extends HasId>(items: T[], id: string): T | undefined {
+  return items.find((item) => item.id === id);   // item.id is allowed
+}
+```
+
+The constraint says "T must be at least this shape", while the returned type stays as specific as the argument (a `User[]` in gives a `User` out, not a bare `HasId`).
+
+### `keyof` and indexed access
+
+```ts
+function getProp<T, K extends keyof T>(obj: T, key: K): T[K] {
+  return obj[key];
+}
+
+const user = { id: 1, name: "Ada" };
+getProp(user, "name");    // string
+getProp(user, "email");   // ❌ "email" is not a key of the object
+```
+
+`keyof T` is the union of property names; `T[K]` looks up the property's type. This pair underlies many utility types.
+
+## Generic interfaces, types and classes
+
+```ts
+interface ApiResponse<T> {
+  data: T;
+  error: string | null;
+  status: number;
+}
+
+const res: ApiResponse<User[]> = { data: [], error: null, status: 200 };
+
+type Result<T, E = Error> =
+  | { ok: true; value: T }
+  | { ok: false; error: E };
+
+function safeParse(json: string): Result<unknown> {
+  try {
+    return { ok: true, value: JSON.parse(json) };
+  } catch (e) {
+    return { ok: false, error: e as Error };
+  }
+}
+
+class Stack<T> {
+  private items: T[] = [];
+  push(item: T) { this.items.push(item); }
+  pop(): T | undefined { return this.items.pop(); }
+  peek(): T | undefined { return this.items.at(-1); }
+}
+
+const numbers = new Stack<number>();
+numbers.push(1);
+numbers.push("2");   // ❌
+```
+
+Generic types accept **default** type arguments (`E = Error`) just like function parameters accept defaults.
+
+### Generics in the wild
+
+You've already used generics without noticing:
+
+```ts
+const items: Array<string> = [];                       // Array<T>
+const lookup = new Map<string, number>();              // Map<K, V>
+const ready: Promise<number> = Promise.resolve(1);    // Promise<T>
+const [count, setCount] = useState<number>(0);         // React: useState<T>
+const el = document.querySelector<HTMLInputElement>("input");
+```
+
+A typed `fetch` wrapper:
+
+```ts
+async function getJson<T>(url: string): Promise<T> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as T;   // T is trusted, not verified — validate with Zod for untrusted data
+}
+
+const todos = await getJson<Todo[]>("/api/todos");
+```
+
+## Utility types
+
+TypeScript ships helpers that **derive** new types from existing ones, so you never copy-paste a shape.
+
+```ts
+interface User {
+  id: number;
+  name: string;
+  email: string;
+  password: string;
+}
+```
+
+| Utility                | Result                                                    | Example                                  |
+| ---------------------- | --------------------------------------------------------- | ---------------------------------------- |
+| `Partial<T>`           | every property optional                                   | `Partial<User>` for a PATCH body         |
+| `Required<T>`          | every property required                                   |                                          |
+| `Readonly<T>`          | every property readonly                                   |                                          |
+| `Pick<T, K>`           | keep only the listed keys                                 | `Pick<User, "id" \| "name">`             |
+| `Omit<T, K>`           | drop the listed keys                                      | `Omit<User, "password">` for API output  |
+| `Record<K, V>`         | object with keys K and values V                           | `Record<string, number>`                 |
+| `Exclude<U, X>`        | remove members from a union                               | `Exclude<"a" \| "b", "a">` → `"b"`       |
+| `Extract<U, X>`        | keep members assignable to X                              |                                          |
+| `NonNullable<T>`       | remove `null` and `undefined`                             |                                          |
+| `ReturnType<F>`        | the return type of a function type                        | `ReturnType<typeof setTimeout>`          |
+| `Parameters<F>`        | tuple of a function's parameter types                     |                                          |
+| `Awaited<T>`           | what a Promise resolves to                                | `Awaited<Promise<string>>` → `string`    |
+
+```ts
+type PublicUser = Omit<User, "password">;
+type UserUpdate = Partial<Omit<User, "id">>;        // can't change the id; every other field optional
+type UserPreview = Pick<User, "id" | "name">;
+
+function updateUser(id: number, changes: UserUpdate) { /* ... */ }
+updateUser(1, { name: "New Name" });                 // ✅
+updateUser(1, { id: 2 });                            // ❌
+
+const roleLabels: Record<"admin" | "user", string> = {   // every key required!
+  admin: "Administrator",
+  user: "Regular user",
+};
+
+async function loadUsers() { return [{ id: 1, name: "Ada" }]; }
+type Users = Awaited<ReturnType<typeof loadUsers>>;  // { id: number; name: string }[]
+```
+
+### Mapped and conditional types (a peek)
+
+Utility types are built from two features you can use yourself:
+
+```ts
+// Mapped type: transform every property
+type Nullable<T> = { [K in keyof T]: T[K] | null };
+
+// Conditional type: choose a type with a condition
+type ElementOf<T> = T extends (infer U)[] ? U : never;
+type N = ElementOf<number[]>;   // number
+
+// Template literal types
+type EventName = "click" | "focus";
+type Handler = `on${Capitalize<EventName>}`;   // "onClick" | "onFocus"
+```
+
+You won't write these daily, but recognising them will help you read library types.
+
+## The real-world connection
+
+These tools show up everywhere in the rest of the course:
+
+```tsx
+// React: typing props and children
+interface ButtonProps extends React.ComponentPropsWithoutRef<"button"> {
+  variant?: "primary" | "ghost";
+}
+function Button({ variant = "primary", ...rest }: ButtonProps) {
+  return <button data-variant={variant} {...rest} />;
+}
+
+// Express: typing request bodies
+interface CreateTodoBody { title: string }
+app.post("/todos", (req: Request<{}, {}, CreateTodoBody>, res: Response) => { /* ... */ });
+
+// Next.js: typed route params
+export default async function Page({ params }: { params: Promise<{ slug: string }> }) { /* ... */ }
+```
+
+<Callout type="tip" title="Don't over-engineer types">
+Complex generic gymnastics are a smell in application code. Reach for them in shared libraries and utilities; in feature code, simple interfaces, unions and a few utility types are almost always enough.
+</Callout>
+
+<Exercise title="Type-safe helpers">
+Write generic functions: `pluck(items, key)` returning an array of that property's values, and `groupBy(items, keyFn)` returning `Record<string, T[]>`. Make sure `pluck(users, "nam")` is a compile error.
+
+<Solution>
+```ts
+function pluck<T, K extends keyof T>(items: T[], key: K): T[K][] {
+  return items.map((item) => item[key]);
+}
+
+function groupBy<T>(items: T[], keyFn: (item: T) => string): Record<string, T[]> {
+  const result: Record<string, T[]> = {};
+  for (const item of items) {
+    (result[keyFn(item)] ??= []).push(item);
+  }
+  return result;
+}
+
+const users = [{ name: "Ada", role: "admin" }, { name: "Linus", role: "user" }];
+pluck(users, "name");              // string[]
+pluck(users, "nam");               // ❌ compile error
+groupBy(users, (u) => u.role);     // { admin: [...], user: [...] }
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Derive the API types">
+From `interface Product { id: string; title: string; price: number; description: string; createdAt: Date }`, derive using only utility types: `ProductCard` (id, title, price), `CreateProductInput` (everything except id and createdAt), and `UpdateProductInput` (any subset of `CreateProductInput`).
+
+<Solution>
+```ts
+type ProductCard = Pick<Product, "id" | "title" | "price">;
+type CreateProductInput = Omit<Product, "id" | "createdAt">;
+type UpdateProductInput = Partial<CreateProductInput>;
+```
+If you later add a field to `Product`, all three types update automatically — that's the payoff of deriving instead of duplicating.
+</Solution>
+</Exercise>
+
+<Exercise title="A generic Result type">
+Using the `Result<T, E>` type from the lesson, write `tryAsync<T>(fn: () => Promise<T>): Promise<Result<T>>` that never throws, and use it to call `fetch` and branch on `result.ok`.
+
+<Solution>
+```ts
+type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
+
+async function tryAsync<T>(fn: () => Promise<T>): Promise<Result<T>> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e : new Error(String(e)) };
+  }
+}
+
+const result = await tryAsync(() => fetch("/api/todos").then((r) => r.json()));
+if (result.ok) {
+  console.log(result.value);   // typed value
+} else {
+  console.error(result.error.message);
+}
+```
+</Solution>
+</Exercise>

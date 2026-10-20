@@ -1,0 +1,104 @@
+---
+title: "Browser JavaScript Quiz"
+summary: "Check that you can select and change the DOM, handle events safely, fetch data with proper error handling, and choose the right browser storage."
+order: 99
+quiz:
+  - question: "What does `document.querySelectorAll('.item')` return?"
+    options:
+      - "A live HTMLCollection"
+      - "A static NodeList of all matching elements"
+      - "An array"
+      - "The first matching element"
+    answer: 1
+    explanation: "It returns a NodeList, which is iterable and has `forEach` but not `map` or `filter`. Convert with `[...list]` when you need array methods."
+  - question: "A page puts text from the URL straight into `element.innerHTML`. What is the risk?"
+    options:
+      - "Cross-site scripting (XSS): an attacker can inject HTML and script"
+      - "It is slower"
+      - "It breaks the layout"
+      - "`innerHTML` is deprecated"
+    answer: 0
+    explanation: "Use `textContent` for text. If you must render HTML from an untrusted source, sanitise it first, for example with DOMPurify."
+  - question: "What does `el.classList.toggle('open', isOpen)` do?"
+    options:
+      - "Replaces all classes with `open`"
+      - "Adds `open` when `isOpen` is true and removes it when false"
+      - "Toggles `open` and ignores `isOpen`"
+      - "Always adds `open`"
+    answer: 1
+    explanation: "The optional second argument forces the class on or off, which makes toggling driven by state easy to read."
+  - question: "A list has hundreds of items added dynamically. What is the best way to handle clicks on their delete buttons?"
+    options:
+      - "Add one listener to the parent and use `event.target.closest(...)`"
+      - "Add a listener to every button as it is created"
+      - "Poll the DOM every second"
+      - "Use `onclick` attributes in HTML"
+    answer: 0
+    explanation: "Event delegation uses bubbling: one listener on the parent handles current and future children, with less memory and less code."
+  - question: "You click a button inside a div inside the body, and all three have normal (bubble phase) click listeners. In what order do they run?"
+    options:
+      - "button, div, body"
+      - "div, button, body"
+      - "body, div, button"
+      - "button only"
+    answer: 0
+    explanation: "By default events fire at the target first and then bubble up through ancestors. Capture listeners run on the way down, before the target."
+  - question: "What does `fetch('/api/missing')` do when the server responds with `404`?"
+    options:
+      - "Retries automatically"
+      - "Returns `null`"
+      - "Rejects the promise with an error"
+      - "Resolves with a Response where `ok` is false"
+    answer: 3
+    explanation: "`fetch` only rejects on network failures. Always check `response.ok` or `response.status` yourself and throw if needed."
+  - question: "How do you send JSON in a `POST` request with `fetch`?"
+    options:
+      - "Use `method: 'JSON'`"
+      - "Append the data to the URL hash"
+      - "Set the header `Content-Type: application/json` and use `body: JSON.stringify(data)`"
+      - "`body: data` only"
+    answer: 2
+    explanation: "The server needs to know the format, so set the header, and the body must be a string (or other supported body type)."
+  - question: "Which tool lets you cancel a `fetch` or apply a timeout?"
+    options:
+      - "`response.stop()`"
+      - "`AbortController` and its `signal`"
+      - "`Promise.cancel()`"
+      - "`clearTimeout`"
+    answer: 1
+    explanation: "Pass `signal` to `fetch`, then call `controller.abort()`. `AbortSignal.timeout(ms)` is a built-in shortcut for timeouts."
+  - question: "Your page gets a CORS error calling another origin's API. Where is it fixed?"
+    options:
+      - "In your frontend `fetch` options"
+      - "By switching to `XMLHttpRequest`"
+      - "On the server, by sending the correct `Access-Control-Allow-*` headers"
+      - "In the browser settings of every user"
+    answer: 2
+    explanation: "CORS is enforced by the browser but configured by the server that owns the resource. During development a proxy can sidestep it."
+  - question: "Which of these should you NOT store in `localStorage`?"
+    options:
+      - "The user's chosen theme"
+      - "A draft of a form"
+      - "A list of recent searches"
+      - "A long-lived authentication token"
+    answer: 3
+    explanation: "Any script on the page can read `localStorage`, so one XSS bug exposes everything stored there. Prefer `httpOnly` cookies for session tokens."
+---
+
+You have finished the Browser JavaScript module. These skills are what every UI framework wraps for you, so knowing the raw versions makes React and Next.js much easier to debug.
+
+## Ready to move on?
+
+Tick these off in your head. If you hesitate on one, reopen that lesson before moving on.
+
+- [ ] I can select elements with `querySelector` and `querySelectorAll` and turn a `NodeList` into an array
+- [ ] I can choose between `textContent` and `innerHTML` and explain the XSS risk
+- [ ] I can create, insert and remove elements, and toggle classes
+- [ ] I can explain capturing, the target phase and bubbling, and use event delegation
+- [ ] I can read a form with `FormData` and stop a submit with `preventDefault`
+- [ ] I can write a `fetch` call that checks `response.ok`, parses JSON and handles errors
+- [ ] I can cancel a request with `AbortController`
+- [ ] I can explain why a CORS error is fixed on the server, not in client code
+- [ ] I can pick `localStorage`, `sessionStorage` or a cookie, and say what must never be stored there
+
+When the list feels solid, take the quiz below. It saves your best score in this browser, and you can retake it as often as you like.

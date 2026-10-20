@@ -1,0 +1,398 @@
+---
+title: Testing React with Vitest, Testing Library and MSW
+summary: "Write fast tests that click, type and read your components like a user, and fake the network with Mock Service Worker."
+order: 18
+takeaways:
+  - A good test does what a user does, such as finding a button by its name and clicking it, and then checks what the user would see.
+  - Vitest runs the tests, React Testing Library renders components into a fake browser, and user-event sends realistic clicks and typing.
+  - Queries are chosen by how users find things, so prefer getByRole and getByLabelText, and use test ids only as a last resort.
+  - Use getBy for things that must be there, queryBy to check that something is absent, and findBy to wait for something that appears later.
+  - Mock Service Worker answers real fetch calls with fake responses, so the component code stays unchanged and one test can simulate an empty list or a server error.
+  - Give each test its own QueryClient with retries off, and reset handlers after every test, or tests will leak into each other and time out.
+videos:
+  - title: "React Testing Full Course 2026 | Vitest and React Testing Library Tutorial"
+    channel: "RoadsideCoder"
+    duration: "48:22"
+    url: https://www.youtube.com/watch?v=6dOpQIwyV6g
+  - title: "React Vite Testing Tutorial For Beginners - Vitest Testing Crash Course"
+    channel: "PedroTech"
+    duration: "38:45"
+    url: https://www.youtube.com/watch?v=CxSL0knFxAs
+docs:
+  - title: "Vitest — Getting started"
+    url: https://vitest.dev/guide/
+  - title: "Testing Library — React Testing Library"
+    url: https://testing-library.com/docs/react-testing-library/intro/
+  - title: "Testing Library — About queries"
+    url: https://testing-library.com/docs/queries/about/
+  - title: "Testing Library — user-event"
+    url: https://testing-library.com/docs/user-event/intro/
+  - title: "MSW — Quick start"
+    url: https://mswjs.io/docs/quick-start
+---
+
+Tests are what let you change code without being afraid of it. A form that passed yesterday and quietly broke today is exactly what a test catches in two seconds, before a user does. Testing is also a standard part of job interviews and pull requests, and the Todo project in lessons 19 and 20 ships with tests, so this is the lesson that sets up the tools it uses.
+
+Written for Vitest 5.0, React Testing Library 16.3, user-event 14.6, jest-dom 7 and MSW 3.0 (which needs Node 22.12 or newer), in the Vite + TypeScript app from lesson 1. The component that fetches data uses TanStack Query from lesson 15.
+
+## What to test
+
+Test **behavior**, not code. Ask "what can a user do here, and what do they see?" and write that down: "when I click Increment twice, the page says `Count: 2`", or "when I submit a bad email I see an error and nothing is sent".
+
+A test like this survives a refactor. If you rename a state variable or switch from `useState` to `useReducer`, the behavior is the same and the test still passes. A test that checks which state variable holds what breaks on every refactor and tells you nothing about users. This is the idea behind **React Testing Library**: it deliberately gives you no way to reach into a component's state.
+
+Spend most of your tests on **components** (this lesson), some on pure functions and hooks, and a few **end-to-end** tests that drive a real browser through key flows (Playwright, in a later module).
+
+## Set up Vitest
+
+**Vitest** is a test runner made for Vite projects. It reuses your `vite.config.ts`, so it understands TypeScript and JSX without extra setup, and it runs tests in parallel.
+
+```bash
+npm install -D vitest jsdom @testing-library/react @testing-library/dom @testing-library/jest-dom @testing-library/user-event msw
+```
+
+Each tool has one job. `vitest` finds and runs `*.test.ts(x)` files and gives you `test`, `expect` and `vi`. `jsdom` is a pretend browser (`document`, `window`) that runs inside Node. `@testing-library/react` renders a component and queries what it shows, `user-event` clicks and types like a person, and `jest-dom` adds readable checks such as `toBeInTheDocument()`. `msw` fakes server responses (later in this lesson).
+
+```ts
+// vite.config.ts
+/// <reference types="vitest/config" />
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [react()],
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./src/test/setup.ts"],
+  },
+});
+```
+
+```ts
+// src/test/setup.ts - runs before every test file
+import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterAll, afterEach, beforeAll } from "vitest";
+import { server } from "../mocks/server";
+
+beforeAll(() => server.listen({ onUnhandledFrame: "error" }));
+afterEach(() => {
+  cleanup(); // remove rendered components after each test
+  server.resetHandlers(); // forget per-test fake responses
+});
+afterAll(() => server.close());
+```
+
+The `server` lines come from the MSW section below. Add `"vitest/jsdom"` to `types` in `tsconfig.app.json` so TypeScript knows the test environment, and add the script `"test": "vitest"` to `package.json`.
+
+```bash
+npm test            # watch mode: re-runs the affected tests whenever you save
+npx vitest run      # run once and exit (what CI uses)
+npx vitest run -t "increments"   # only tests whose name contains this text
+```
+
+<Callout type="warning" title="Without cleanup, tests see each other's components">
+Testing Library only removes rendered components automatically when the test runner exposes global functions, and Vitest does not by default. We left `cleanup()` out as an experiment: the second test in a file failed with `Found multiple elements with the role "button" and name "Increment"`, because the first test's component was still on the page. Keep the `afterEach(cleanup)` line, or set `globals: true` in the config.
+</Callout>
+
+## Your first tests
+
+A test file sits next to the code it checks, named `something.test.ts`. Start with a plain function, which needs no React. Here `formatPrice(cents)` returns `$${(cents / 100).toFixed(2)}`:
+
+```ts
+// src/format.test.ts
+import { describe, expect, test } from "vitest";
+import { formatPrice } from "./format";
+
+describe("formatPrice", () => {
+  test("formats cents as dollars", () => {
+    expect(formatPrice(1999)).toBe("$19.99");
+  });
+});
+```
+
+`test("name", fn)` defines one test, and `describe` groups related ones. `expect(value)` plus a **matcher** such as `toBe` (same value), `toEqual` (same contents, for objects and arrays) or `toHaveBeenCalledWith` is the check. A test passes if it finishes without a thrown error, and a failing `expect` throws. Write the test name as a sentence that says what should happen.
+
+## Testing a component
+
+```tsx
+// src/Counter.tsx
+export function Counter({ initial = 0 }: { initial?: number }) {
+  const [count, setCount] = useState(initial);
+  return (
+    <div>
+      <p>Count: {count}</p>
+      <button onClick={() => setCount(count + 1)}>Increment</button>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/Counter.test.tsx
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { expect, test } from "vitest";
+import { Counter } from "./Counter";
+
+test("starts at the initial value", () => {
+  render(<Counter initial={5} />);
+  expect(screen.getByText("Count: 5")).toBeInTheDocument();
+});
+
+test("increments when the button is clicked", async () => {
+  const user = userEvent.setup();
+  render(<Counter />);
+
+  await user.click(screen.getByRole("button", { name: "Increment" }));
+  await user.click(screen.getByRole("button", { name: "Increment" }));
+
+  expect(screen.getByText("Count: 2")).toBeInTheDocument();
+});
+```
+
+The three steps of almost every component test:
+
+1. **Render** the component with `render(...)`.
+2. **Act** like a user: `await user.click(...)`, `await user.type(...)`. `userEvent.setup()` creates a fake user, and its methods return promises, so always `await` them.
+3. **Assert** on what is on the screen with `screen` queries and jest-dom matchers like `toBeInTheDocument()`, `toHaveTextContent()`, `toBeDisabled()`.
+
+### Choosing a query
+
+`screen.getBy...` looks through the page the way a user (or a screen reader) would. Use the first one that fits:
+
+| Query | Finds | Typical use |
+| --- | --- | --- |
+| `getByRole("button", { name: "Save" })` | by accessibility role and name | buttons, links, headings, checkboxes. Your first choice |
+| `getByLabelText("Email")` | a form field by its `label` | inputs |
+| `getByText("Count: 2")` | visible text | paragraphs and messages |
+| `getByPlaceholderText`, `getByAltText` | placeholder or `alt` text | when there is no label |
+| `getByTestId("row-1")` | a `data-testid` attribute | last resort, when nothing a user sees works |
+
+Roles are the same ones from your HTML experience: `button`, `link`, `heading`, `textbox`, `alert` (an element with `role="alert"`), and so on. Querying by role also checks that your page is accessible, since a clickable `div` has no role `button` and the test will not find it.
+
+Each query comes in three families, depending on what you expect:
+
+| Family | If found | If missing | Use for |
+| --- | --- | --- | --- |
+| `getBy...` | the element | **throws** | something that must be on screen now |
+| `queryBy...` | the element | `null` | checking that something is **not** there |
+| `findBy...` | a promise for the element | rejects after 1 second | something that appears **later** (after a fetch) |
+
+```tsx
+expect(screen.queryByText("Loading users...")).not.toBeInTheDocument();
+```
+
+### Reading a failure
+
+When a query fails, Testing Library prints what is really on the page. Asking for `getByRole("button", { name: "Decrement" })` on the counter said `Unable to find an accessible element with the role "button" and name "Decrement"`, followed by a list of the accessible roles it did find (`button` with the name `Increment`). Read that list before you change anything: a typo in the name, a missing label or a wrong role is usually visible at once. `screen.debug()` prints the whole page's HTML.
+
+## Forms and callbacks
+
+Components often receive a function in a prop, such as `onSubmit`. In the test, pass a **mock function** from `vi.fn()`, which records every call:
+
+```tsx
+test("submits the typed credentials", async () => {
+  const user = userEvent.setup();
+  const onSubmit = vi.fn();
+  render(<LoginForm onSubmit={onSubmit} />);
+
+  await user.type(screen.getByLabelText("Email"), "ada@example.com");
+  await user.type(screen.getByLabelText("Password"), "secret");
+  await user.click(screen.getByRole("button", { name: "Log in" }));
+
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+  expect(onSubmit).toHaveBeenCalledWith({ email: "ada@example.com", password: "secret" });
+});
+```
+
+A second test types `not-an-email`, submits, and checks `expect(screen.getByRole("alert")).toHaveTextContent("Enter a valid email")` and `expect(onSubmit).not.toHaveBeenCalled()`. It checks both what the user sees and what must **not** happen.
+
+`LoginForm` wraps each `input` in a `label`, which is why `getByLabelText` works. If a test cannot find a field by label, a real user with a screen reader cannot either, so fix the form and not the test.
+
+<Callout type="warning" title="Forgetting await">
+`user.click(...)` returns a promise. Without `await`, the assertion runs before the click has been processed. In a test, `user.click(...)` without `await` followed by `getByText("Count: 1")` failed with "Unable to find an element with the text: Count: 1" and the page still showed `0`. If a test fails right after an interaction, check the `await` first.
+</Callout>
+
+## Mocking the network with MSW
+
+A component that fetches data should not call a real server in tests, because that is slow, flaky and needs the internet. You could replace `fetch` with a fake, but then you are testing your fake. **Mock Service Worker (MSW)** instead answers real `fetch` calls at the network level, so the component and TanStack Query run exactly as in production.
+
+Define the default responses once, and start a server in the test setup (the `setup.ts` file above):
+
+```ts
+// src/mocks/server.ts
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
+
+export const server = setupServer(
+  http.get("/api/users", () =>
+    HttpResponse.json([
+      { id: 1, name: "Ada Lovelace" },
+      { id: 2, name: "Alan Turing" },
+    ]),
+  ),
+);
+```
+
+`server.listen({ onUnhandledFrame: "error" })` makes a request with no handler fail loudly. We fetched `/api/other` with no handler, and MSW printed `intercepted a request without a matching request handler: GET /api/other` while `fetch` rejected with "fetch failed". Without that option MSW only warns and lets the request through. (Versions before 3 spelled it `onUnhandledRequest`.)
+
+### A component that fetches
+
+`UserList` (in the sandbox) calls `useQuery` with a `fetch("/api/users")` and shows `Loading users...`, then either the names, `No users yet.`, or an error in an element with `role="alert"`. It needs a `QueryClientProvider` around it, so write a helper once and use it in every test:
+
+```tsx
+// src/test/render.tsx
+export function renderWithQuery(ui: ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+}
+```
+
+The helper creates a **new client for each test**, so cached data cannot leak from one test to the next, and sets `retry: false`. Lesson 15 explained that a failed query is tried 3 more times with growing delays. Without `retry: false`, the error test waited for `findByRole` for its 1 second limit and failed with `Unable to find role="alert"` while the page still said "Loading users...".
+
+### One test per state
+
+```tsx
+test("shows a loading message, then the users", async () => {
+  renderWithQuery(<UserList />);
+
+  expect(screen.getByText("Loading users...")).toBeInTheDocument();
+  expect(await screen.findByText("Ada Lovelace")).toBeInTheDocument();
+  expect(screen.queryByText("Loading users...")).not.toBeInTheDocument();
+});
+
+test("shows an empty message", async () => {
+  server.use(http.get("/api/users", () => HttpResponse.json([])));
+  renderWithQuery(<UserList />);
+
+  expect(await screen.findByText("No users yet.")).toBeInTheDocument();
+});
+
+test("shows an error when the server fails", async () => {
+  server.use(http.get("/api/users", () => new HttpResponse(null, { status: 500 })));
+  renderWithQuery(<UserList />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not load users: Request failed: 500");
+});
+```
+
+`server.use(...)` replaces a handler for **this test only**, and `resetHandlers()` in `afterEach` puts the defaults back. This is the main reason to use MSW: an empty list, a 500 error and a slow response are one line each, where reproducing them against a real server is hard. The first test uses `getBy` for the loading message because it is there immediately, `findBy` for the names because they arrive after the fetch, and `queryBy` to check that the loading message is gone.
+
+### Checking what was sent
+
+A handler can read the request, so a test can check what the component sent to the server:
+
+```tsx
+test("sends the name to the API and shows a confirmation", async () => {
+  let body: unknown;
+  server.use(
+    http.post("/api/users", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ id: 3, name: "Grace Hopper" }, { status: 201 });
+    }),
+  );
+  const user = userEvent.setup();
+  render(<AddUser />);
+
+  await user.type(screen.getByLabelText("Name"), "Grace Hopper");
+  await user.click(screen.getByRole("button", { name: "Add user" }));
+
+  expect(await screen.findByText("Saved Grace Hopper")).toBeInTheDocument();
+  expect(body).toEqual({ name: "Grace Hopper" });
+});
+```
+
+## Testing a custom hook
+
+A hook can only run inside a component, so `renderHook` renders a tiny one for you. State changes go inside `act(...)`, which makes React finish its updates before the next line:
+
+```ts
+import { act, renderHook } from "@testing-library/react";
+
+test("increments and resets", () => {
+  const { result } = renderHook(() => useCounter(10));
+  expect(result.current.count).toBe(10);
+
+  act(() => result.current.increment());
+  expect(result.current.count).toBe(11);
+
+  act(() => result.current.reset());
+  expect(result.current.count).toBe(10);
+});
+```
+
+`result.current` always holds the hook's latest return value. Prefer testing a hook through a component that uses it, and keep `renderHook` for shared hooks like the ones from lesson 9. You rarely write `act` yourself, because `render`, `user` and `findBy` already wrap their work in it.
+
+## Habits that keep tests healthy
+
+- **Test what the user sees,** not state, props of children, or CSS class names.
+- **Make a test fail once.** After writing a new test, change the code so the behavior breaks and see the test go red. A test that cannot fail proves nothing.
+- **Avoid big snapshots.** They fail on every harmless change, so people stop reading the diffs.
+- **Run tests in CI** on every pull request (the production module covers this).
+
+<Exercise title="Which line throws?">
+Given the page below, say which of the lines (a) to (d) throw an error, and which return `null`.
+
+```tsx
+render(<button>Save</button>);
+
+screen.getByRole("button", { name: "Save" }); // (a)
+screen.getByRole("link", { name: "Save" }); // (b)
+screen.queryByText("Cancel"); // (c)
+screen.getByText("Cancel"); // (d)
+```
+
+<Solution>
+(a) returns the button. (b) throws, because there is no element with the role `link` (the list of accessible roles in the error message would show only `button`). (c) returns `null` and does not throw, since `queryBy` is for checking absence. (d) throws, because `getBy` fails when nothing matches.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the failing test">
+This test fails with "Unable to find an element with the text: Saved". The app is correct and the message does appear a moment after the click. Fix the test.
+
+```tsx
+test("shows a confirmation", async () => {
+  server.use(http.post("/api/users", () => HttpResponse.json({ id: 3 }, { status: 201 })));
+  const user = userEvent.setup();
+  render(<AddUser />);
+
+  user.type(screen.getByLabelText("Name"), "Grace");
+  user.click(screen.getByRole("button", { name: "Add user" }));
+
+  expect(screen.getByText("Saved Grace")).toBeInTheDocument();
+});
+```
+
+<Solution>
+There are two mistakes. The `user` calls need `await`, or the assertion runs before the typing is done. And the confirmation shows up after a network call, so `getByText` is too early; use `findByText`, which waits:
+
+```tsx
+await user.type(screen.getByLabelText("Name"), "Grace");
+await user.click(screen.getByRole("button", { name: "Add user" }));
+
+expect(await screen.findByText("Saved Grace")).toBeInTheDocument();
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Test the failure path">
+`AddUser` shows "Could not save" in an element with `role="alert"` when the API answers with an error. Write a test that makes `POST /api/users` return status 400 and checks the message.
+
+<Solution>
+```tsx
+test("shows an error when the API rejects the request", async () => {
+  server.use(http.post("/api/users", () => new HttpResponse(null, { status: 400 })));
+  const user = userEvent.setup();
+  render(<AddUser />);
+
+  await user.type(screen.getByLabelText("Name"), "x");
+  await user.click(screen.getByRole("button", { name: "Add user" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Could not save");
+});
+```
+
+The override with `server.use` only lasts for this test, thanks to `resetHandlers()` in `afterEach`.
+</Solution>
+</Exercise>

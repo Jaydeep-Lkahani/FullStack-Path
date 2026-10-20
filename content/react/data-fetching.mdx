@@ -1,0 +1,396 @@
+---
+title: Data Fetching with TanStack Query
+summary: "Fetch, cache and update server data in React with TanStack Query: useQuery, query keys, stale data, useMutation, invalidation and optimistic updates."
+order: 15
+takeaways:
+  - Server state is data that lives on a server and can change without you, so it needs caching, refetching and error handling that plain useState does not give you.
+  - useQuery takes a queryKey that identifies the data and a queryFn that returns a promise, and gives back data, isPending, isError and error.
+  - Every variable the queryFn uses belongs in the queryKey, and a changed key means a different cache entry and a new fetch.
+  - By default cached data is stale at once, so it is shown instantly and refetched in the background when a component mounts, the tab regains focus or the network reconnects.
+  - useMutation changes data on the server, and invalidateQueries then marks the affected queries stale so they refetch.
+  - An optimistic update changes the cache before the server answers, so onMutate saves a snapshot and onError puts it back.
+videos:
+  - title: "Simple As Possible TanStack Query Tutorial (React Query)"
+    channel: "LearnWebCode"
+    duration: "13:29"
+    url: https://www.youtube.com/watch?v=w9r55wd2CAk
+  - title: "TanStack Query Full Course 2026 | useQuery, useMutation, Caching, Infinite Queries, Pagination..."
+    channel: "PedroTech"
+    duration: "41:29"
+    url: https://www.youtube.com/watch?v=mqV5OvbyXcM
+docs:
+  - title: "TanStack Query — Overview"
+    url: https://tanstack.com/query/latest/docs/framework/react/overview
+  - title: "TanStack Query — Queries"
+    url: https://tanstack.com/query/latest/docs/framework/react/guides/queries
+  - title: "TanStack Query — Query keys"
+    url: https://tanstack.com/query/latest/docs/framework/react/guides/query-keys
+  - title: "TanStack Query — Important defaults"
+    url: https://tanstack.com/query/latest/docs/framework/react/guides/important-defaults
+  - title: "TanStack Query — Mutations"
+    url: https://tanstack.com/query/latest/docs/framework/react/guides/mutations
+  - title: "TanStack Query — Optimistic updates"
+    url: https://tanstack.com/query/latest/docs/framework/react/guides/optimistic-updates
+  - title: "MDN — Using the Fetch API"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch
+---
+
+Almost every real React app shows data from a server: a feed, a cart, a profile. Doing that well is the biggest difference between a demo and a job-ready app, and it is a standard interview topic ("why not just `useEffect` and `fetch`?"). The projects in this module, the weather app and the expense tracker, are built on this lesson.
+
+Written for TanStack Query 5.104 (also called React Query), in the Vite + TypeScript app from lesson 1.
+
+## Server state is not client state
+
+**Client state** is owned by your app: whether a menu is open, what is typed in a field. `useState` is perfect for it. **Server state** lives on a server, so it is fetched asynchronously, it is shared by many components, and it can become **stale**, meaning out of date, because someone else changed it. Doing it by hand with `useEffect` looks easy:
+
+```tsx
+useEffect(() => {
+  fetch("/api/todos").then((res) => res.json()).then(setTodos);
+}, []);
+```
+
+Then the real requirements arrive: a loading state, an error state, ignoring a slow old response that arrives after a newer one (a race condition), not fetching the same list again for every component that shows it, refreshing after a change, and retrying. Writing that once is annoying, and writing it in every component is a bug farm. **TanStack Query** is a library that does it all, and you keep `useState` for client state.
+
+## Setup
+
+```bash
+npm install @tanstack/react-query @tanstack/react-query-devtools
+```
+
+The **query client** holds the cache. Create one, outside any component, and provide it to the app:
+
+```tsx
+// src/main.tsx
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+
+const queryClient = new QueryClient();
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <App />
+      <ReactQueryDevtools initialIsOpen={false} />
+    </QueryClientProvider>
+  </StrictMode>,
+);
+```
+
+The devtools add a floating button that shows every cached query, its status and its data, and they are left out of production builds automatically.
+
+We need a server to talk to. To keep the examples runnable and to be able to break the "server" on purpose, this lesson uses a fake one that lives in memory and answers after 400 ms:
+
+```ts
+// src/api.ts
+export type Todo = { id: number; title: string; done: boolean };
+
+let todos: Todo[] = [
+  { id: 1, title: "Learn React", done: true },
+  { id: 2, title: "Learn TanStack Query", done: false },
+];
+let nextId = 3;
+
+export const server = { fail: false, delayMs: 400 }; // switches for experiments
+
+async function request<T>(handler: () => T): Promise<T> {
+  await new Promise((resolve) => setTimeout(resolve, server.delayMs));
+  if (server.fail) throw new Error("The server is down");
+  return structuredClone(handler());
+}
+
+export const fetchTodos = () => request(() => todos);
+
+export const fetchTodo = (id: number) =>
+  request(() => {
+    const todo = todos.find((t) => t.id === id);
+    if (!todo) throw new Error(`Todo ${id} not found`);
+    return todo;
+  });
+
+export const addTodo = (title: string) =>
+  request(() => {
+    const todo = { id: nextId++, title, done: false };
+    todos = [...todos, todo];
+    return todo;
+  });
+
+export const toggleTodo = (id: number) =>
+  request(() => {
+    todos = todos.map((t) => (t.id === id ? { ...t, done: !t.done } : t));
+    return todos.find((t) => t.id === id)!;
+  });
+```
+
+With a real API, each function would call `fetch`, and the Node.js module builds that API. One thing to get right in that case:
+
+<Callout type="warning" title="fetch does not reject on 404 or 500">
+`fetch` only rejects when the network fails. A `404` or `500` response is a success as far as `fetch` is concerned, and TanStack Query would cache the error body as data. Check `res.ok` yourself and throw. A request for a missing todo on a real test API resolved normally with `status 404` and `ok false`, and the check below turns that into an error.
+</Callout>
+
+```ts
+async function fetchJson<T>(url: string): Promise<T> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+  return res.json();
+}
+```
+
+## Reading data with useQuery
+
+`useQuery` needs two things: a **query key**, which names the data in the cache, and a **query function**, which returns a promise of the data.
+
+```tsx
+// src/components/TodoList.tsx
+import { useQuery } from "@tanstack/react-query";
+import { fetchTodos } from "../api";
+
+export function TodoList() {
+  const { data, isPending, isError, error } = useQuery({
+    queryKey: ["todos"],
+    queryFn: fetchTodos,
+  });
+
+  if (isPending) return <p>Loading…</p>;
+  if (isError) return <p role="alert">Could not load todos: {error.message}</p>;
+
+  return (
+    <ul>
+      {data.map((todo) => (
+        <li key={todo.id}>{todo.title}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+On the first render the page showed "Loading…", and about 400 ms later the two todos. There is no `useState` and no `useEffect`. Three states cover every case: **pending** (no data yet), **error**, and **success**. TypeScript narrows for you: after the two early returns `data` is `Todo[]`, not `Todo[] | undefined`.
+
+<Callout type="note" title="isPending is not isLoading">
+Older tutorials use `isLoading` for "no data yet". In version 5 that is `isPending`. `isLoading` still exists but means "pending and currently fetching", which is a different thing for a query that is paused or disabled.
+</Callout>
+
+Besides the status there is also `isFetching`, which is `true` whenever a request is running, even if you already have data to show. That gives you a small "Refreshing…" hint without hiding the list. Remember it as: **`isPending` asks "do I have data?", `isFetching` asks "is a request running?"**
+
+**Duplicate requests.** Rendering `<TodoList />` in two places does not send two requests. Both use the key `["todos"]`, so TanStack Query **deduplicates** them into one request and shares the result. In the sandbox with StrictMode (which renders everything twice in development) the first load was exactly one request.
+
+## Query keys
+
+The key is the identity of the data, and it is an array. Put every variable that the query function uses into it:
+
+```tsx
+import { queryOptions, useQuery } from "@tanstack/react-query";
+import { fetchTodo, fetchTodos } from "./api";
+
+export const todosQuery = () => queryOptions({ queryKey: ["todos"], queryFn: fetchTodos });
+
+export const todoQuery = (id: number) =>
+  queryOptions({ queryKey: ["todos", id], queryFn: () => fetchTodo(id) });
+
+export function TodoDetail({ id }: { id: number }) {
+  const { data, isPending, isError, error } = useQuery(todoQuery(id));
+
+  if (isPending) return <p>Loading todo {id}…</p>;
+  if (isError) return <p role="alert">{error.message}</p>;
+  return <p>#{data.id}: {data.title} ({data.done ? "done" : "open"})</p>;
+}
+```
+
+`queryOptions` is a helper that keeps the key and the function together, so any component, and later any `invalidateQueries` call, can reuse them without the key drifting apart and without retyping it. When `id` changes, the key changes, which is a different cache entry, so the query fetches the new todo automatically. That is the same idea as a dependency array: **the key is the dependency list**.
+
+The cache is shared by key. In the sandbox, opening the details of todo 1, then todo 2, then todo 1 again showed todo 1 **instantly** from the cache, and a refetch ran quietly in the background to check for changes.
+
+<Callout type="warning" title="A missing variable in the key means stale data">
+If the query function uses a filter but the key does not, changing the filter reuses the old cache entry. In a test with an observer, changing the filter from `"all"` to `"done"` under the constant key `["todos"]` made no new request and kept showing `list(all)`. With the keys `["todos", "all"]` and `["todos", "done"]` the second call went out and returned `list(done)`.
+</Callout>
+
+Keys also match by prefix, which is why `["todos", id]` sits under `["todos"]`: one call can refresh a whole family, as the mutation section shows. Object order inside a key does not matter (`{ a, b }` and `{ b, a }` are the same key), but array order does.
+
+## Fresh, stale and cached
+
+Three timers explain nearly all of the behaviour you will see:
+
+- **`staleTime`** is how long data counts as fresh. The default is `0`, so data is stale the moment it arrives.
+- **Stale data is shown first, then refetched** in the background when a new component using the query mounts, when the browser tab regains focus (`refetchOnWindowFocus`), and when the network reconnects. Fresh data is never refetched for those reasons.
+- **`gcTime`** (garbage collection) is how long unused data stays in the cache, 5 minutes by default, so going back to a page is instant.
+
+In the sandbox, returning to the tab sent two requests (the list and the open detail), and `isFetching` showed "Refreshing…" for 400 ms while the old list stayed on screen. With `staleTime: 30_000` on the list query, the same tab switch left the list's `dataUpdatedAt` unchanged: no request. A bigger `staleTime` is how you cut traffic for data that rarely changes, such as a user's profile.
+
+**Retries.** A failed query is retried 3 times with growing delays before the error state appears. With the fake server switched off (`server.fail = true`), the error message showed after about 7.5 seconds and 4 requests were made (the first try plus 3 retries). That is right for flaky networks and wrong for errors that will never go away, so for a `404` you usually set `retry: false`, or a function `retry: (count, error) => ...`. You can also set defaults for every query: `new QueryClient({ defaultOptions: { queries: { staleTime: 60_000 } } })`.
+
+## Changing data with useMutation
+
+Queries read; **mutations** write (create, update, delete). `useMutation` gives you a `mutate` function and the state of the request:
+
+```tsx
+// src/components/AddTodo.tsx
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useState, type SubmitEvent } from "react";
+import { addTodo } from "../api";
+
+export function AddTodo() {
+  const [title, setTitle] = useState("");
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: addTodo,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["todos"] }),
+  });
+
+  function handleSubmit(event: SubmitEvent<HTMLFormElement>) {
+    event.preventDefault();
+    mutation.mutate(title, { onSuccess: () => setTitle("") });
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="New todo" />
+      <button type="submit" disabled={mutation.isPending || !title}>
+        {mutation.isPending ? "Adding…" : "Add"}
+      </button>
+      {mutation.isError && <span role="alert"> {mutation.error.message}</span>}
+    </form>
+  );
+}
+```
+
+Typing "Write tests" and pressing Add changed the button to "Adding…" for 400 ms, after which the list showed three todos and the input was empty. The pieces:
+
+- `mutationFn` is the function that talks to the server. Its argument is what you pass to `mutate`.
+- **`invalidateQueries`** marks every query whose key starts with `["todos"]` as stale, and refetches the ones on screen. Returning its promise from `onSuccess` keeps `isPending` true until the list is fresh, so the button does not re-enable early. The server stays the single source of truth.
+- `mutate(variables, { onSuccess })` takes callbacks for that one call, which suits things that belong to the component, such as clearing the form. `mutate` returns nothing and never throws. `mutateAsync` returns a promise that you can `await` in a `try/catch` when you need to chain steps.
+
+Because the list key is a prefix of every detail key, `invalidateQueries({ queryKey: ["todos"] })` refreshes the detail views too. In a cache with `["todos"]`, `["todos", 1]`, `["todos", { done: true }]` and `["users"]`, invalidating `["todos"]` marked the first three stale and left `["users"]` alone. Passing `exact: true` marked only `["todos"]`.
+
+## Optimistic updates
+
+The app above waits for the server before the list changes, so a checkbox feels slow. An **optimistic update** changes the screen first and corrects it if the server then disagrees. With the cache, there are three steps: save a **snapshot**, apply the change, and restore the snapshot on error.
+
+```tsx
+// src/components/ToggleTodo.tsx
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { toggleTodo, type Todo } from "../api";
+
+export function ToggleTodo({ todo }: { todo: Todo }) {
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: toggleTodo,
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: ["todos"] });
+      const previous = queryClient.getQueryData<Todo[]>(["todos"]);
+      queryClient.setQueryData<Todo[]>(["todos"], (old) =>
+        old?.map((t) => (t.id === id ? { ...t, done: !t.done } : t)),
+      );
+      return { previous };
+    },
+    onError: (_error, _id, result) => {
+      queryClient.setQueryData(["todos"], result?.previous);
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["todos"] }),
+  });
+
+  return (
+    <label>
+      <input type="checkbox" checked={todo.done} onChange={() => mutation.mutate(todo.id)} />
+      {todo.title}
+    </label>
+  );
+}
+```
+
+`onMutate` runs before the request. It cancels in-flight refetches (otherwise an old response could overwrite the optimistic value), takes the snapshot, writes the new list with `setQueryData`, and returns the snapshot, which TanStack Query hands to `onError` as the third argument. `onSettled` runs either way and refetches, so the screen ends up matching the server.
+
+In the sandbox, with the server slowed to 1.5 seconds, the checkbox flipped 60 ms after the click, long before the answer. With `server.fail = true`, the box flipped, and about a second later flipped back when the request failed. In a real app you would also show a message in `onError`.
+
+If only one component needs to show the pending item, there is a simpler approach that skips the cache: render `mutation.variables` while `mutation.isPending` is true, and nothing needs rolling back.
+
+## Where does each kind of state go?
+
+Server data goes into TanStack Query, and you do not copy it into `useState` or a global store, because then you own the staleness problem again. The UI details, such as which tab is open or what is typed in a box, stay in `useState`. State that many unrelated components share, but that does not come from a server, such as a theme or a shopping cart before checkout, is what the next lesson's Zustand is for. Most apps end up with far less global state once the server data lives in the query cache.
+
+<Exercise title="Predict the output">
+The cache holds these queries: `["todos"]`, `["todos", 1]`, `["todos", { done: false }]` and `["users"]`. For each call, which queries are marked stale?
+
+```ts
+queryClient.invalidateQueries({ queryKey: ["todos", { done: false }] });
+queryClient.invalidateQueries({ queryKey: ["todos"] });
+queryClient.invalidateQueries({ queryKey: ["todos"], exact: true });
+```
+
+<Solution>
+Each call is considered on its own, on a fresh cache. The first marks only `["todos", { done: false }]`, because a longer key does not match shorter ones. The second marks the first three queries (every key that starts with `"todos"`) and not `["users"]`. The third marks only `["todos"]`, because `exact: true` forbids prefix matches. This was checked against a real `QueryClient`.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+A list should show the todos of the selected status, but nothing changes when the user picks another status. Why?
+
+```tsx
+function Todos({ status }: { status: "open" | "done" }) {
+  const { data } = useQuery({
+    queryKey: ["todos"],
+    queryFn: () => fetchTodosByStatus(status),
+  });
+  return <List items={data ?? []} />;
+}
+```
+
+<Solution>
+The query function uses `status`, but the key does not contain it, so every status shares the single cache entry `["todos"]`. Changing `status` does not change the key, so no new fetch starts and the old list stays. Put every variable of the function in the key:
+
+```tsx
+const { data } = useQuery({
+  queryKey: ["todos", status],
+  queryFn: () => fetchTodosByStatus(status),
+});
+```
+
+Now `"open"` and `"done"` are two cache entries, switching back is instant, and `invalidateQueries({ queryKey: ["todos"] })` still refreshes both.
+</Solution>
+</Exercise>
+
+<Exercise title="Delete a todo">
+Add `deleteTodo(id)` to `api.ts` and a Delete button next to each todo. The button is disabled while the request runs, and the list updates afterwards.
+
+<Solution>
+`deleteTodo` in `api.ts` follows the other functions: it throws `Todo ${id} not found` if the id is missing, otherwise filters the array and returns `{ id }`.
+
+```tsx
+// src/components/DeleteTodo.tsx
+export function DeleteTodo({ id }: { id: number }) {
+  const queryClient = useQueryClient();
+
+  const mutation = useMutation({
+    mutationFn: deleteTodo,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["todos"] }),
+  });
+
+  return (
+    <button type="button" disabled={mutation.isPending} onClick={() => mutation.mutate(id)}>
+      {mutation.isPending ? "Deleting…" : "Delete"}
+    </button>
+  );
+}
+```
+
+In the sandbox the button read "Deleting…" and was disabled, then the todo vanished from the list. One more effect: the prefix match also refetched `["todos", 1]` for the open detail view of the deleted todo, and after the 3 retries the view showed "Todo 1 not found". Setting `retry: false` on `todoQuery` would show it at once.
+</Solution>
+</Exercise>
+
+<Exercise title="Stop refetching so often">
+The todo list is refetched every time the tab regains focus, but this data changes rarely. Make it count as fresh for 30 seconds without breaking the add and delete buttons.
+
+<Solution>
+Add `staleTime` to the query options:
+
+```ts
+export const todosQuery = () =>
+  queryOptions({ queryKey: ["todos"], queryFn: fetchTodos, staleTime: 30_000 });
+```
+
+In the sandbox, switching away from the tab and back left `dataUpdatedAt` unchanged, so no request was sent. Add and delete still refreshed the list, because `invalidateQueries` marks data stale whatever its `staleTime` says.
+</Solution>
+</Exercise>

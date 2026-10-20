@@ -1,0 +1,460 @@
+---
+title: "Project: Expense Tracker, Part 1"
+summary: "Start an expense tracker with React, TypeScript, Zod and Zustand: store money as whole cents, validate a form's text with a schema, keep expenses in a persisted store that survives broken saved data, and test all of it before any screen exists."
+order: 24
+takeaways:
+  - Store money as whole cents in integers and format it only when you show it, because decimal sums in floating point drift, and 1.15 times 100 is not 115.
+  - Keep dates as plain YYYY-MM-DD strings, and build a Date from its parts when you must show one, because new Date on that string means midnight UTC and can show the previous day.
+  - Use two schemas for one record, one for what the form holds (every field is text) and one for what is stored, and let the form schema turn the text into the stored shape.
+  - A persisted store must not trust localStorage, so check each saved item with the schema and keep the valid ones.
+  - Test the logic that has no screen first, because schemas and stores are the cheapest tests to write and the ones that catch the most expensive bugs.
+videos: []
+docs:
+  - title: "Zod — Basic usage"
+    url: https://zod.dev/api
+  - title: "Zustand — Persisting store data"
+    url: https://zustand.docs.pmnd.rs/reference/middlewares/persist
+  - title: "MDN: Intl.NumberFormat"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat
+---
+
+An expense tracker is the project where forms, state and routing all meet, and it is one of the most common take-home tasks for React roles. It also hides two classic bugs, money that adds up to 0.30000000000000004 and dates that shift by a day, and knowing about them is what separates a tutorial project from one you can talk about in an interview. This project uses lesson 11 (forms with React Hook Form and Zod), lesson 16 (Zustand), lesson 14 (routing) and lesson 18 (testing).
+
+It is split in three parts. **Part 1** (this lesson) builds everything that has no screen: money and date helpers, the schemas, the store, and the tests for them. **Part 2** adds the pages, with routing, the add and edit form, and the list. **Part 3** adds filters kept in the URL, a dashboard with spending by category, and the tests for the screens. It was written for Vite 8, React 19.3, TypeScript 6, React Router 8.5, Zustand 5.0, Zod 4.6, React Hook Form 7.90 and Vitest 5, and all the code was built and tested in a sandbox project and run in a browser.
+
+## What you will build
+
+An app with three pages: a dashboard with this month's spending, a list of expenses you can filter, and a form to add or edit one. Everything is saved in the browser, so there is no server and no account.
+
+```text
+┌────────────────────────────────────────────────┐
+│ Expense tracker   Dashboard Expenses Add expense│
+│ October 2026                                    │
+│ $792.50 spent in 3 expenses                     │
+│ Housing    ██████████████░  $750.00 (95%)       │
+│ Transport  █                $30.00 (4%)         │
+│ Food       ▏                $12.50 (2%)         │
+└────────────────────────────────────────────────┘
+```
+
+### Requirements for the whole project
+
+- [ ] Add an expense with a title, an amount, a category and a date, with a clear error under every field that is wrong
+- [ ] Money is stored in cents and always shown with two decimals
+- [ ] Edit and delete an expense, and show a message when the id in the URL does not exist
+- [ ] Expenses are saved in `localStorage`, and broken saved data never crashes the app
+- [ ] A list sorted newest first, filtered by category, month and a search word, with the filters kept in the URL
+- [ ] A dashboard with this month's total and the share of each category
+- [ ] The schemas, the store, the helpers and the main flows have tests
+
+<Callout type="tip" title="Write your own version first">
+Each stage ends with something you can run. Try each stage yourself before opening the solution, even if your version is rough, and then compare. Where your version differs, find out why before you copy anything.
+</Callout>
+
+## Stage 1: Set up the project
+
+Create the project and add the libraries:
+
+```bash
+npm create vite@latest expense-tracker -- --template react-ts
+cd expense-tracker
+npm install
+npm install react-router zustand zod react-hook-form @hookform/resolvers --legacy-peer-deps
+npm install -D vitest jsdom @testing-library/react @testing-library/dom @testing-library/jest-dom @testing-library/user-event
+```
+
+The `--legacy-peer-deps` flag is needed here: `@hookform/resolvers` 6 declares an optional peer dependency that makes npm stop with an `ERESOLVE` error, as lesson 11 mentioned. Clean up as in the todo project: delete `src/App.css` and `src/assets/`, and empty `src/index.css`. You will replace `src/App.tsx` and `src/main.tsx` in Part 2, so leave them for now.
+
+## Stage 2: Money and dates
+
+Two kinds of values go wrong in nearly every first expense tracker, so write small helpers for them before anything else.
+
+**Money.** JavaScript numbers are binary floating point, so `0.1 + 0.2` is `0.30000000000000004` and `1.15 * 100` is `114.99999999999999`. If you store `12.5` and add up a month of expenses, the total can be off by a fraction of a cent. The fix that real payment systems use is to store money as a whole number of the smallest unit, cents, and to convert only at the edges: text to cents when the user types, cents to text when you show it.
+
+**Dates.** The date input gives `"2026-10-20"`. Keep it as that string. It sorts correctly as text, it needs no timezone, and `date.slice(0, 7)` gives the month. The trap is turning it into a `Date`: `new Date("2026-10-20")` means midnight in UTC, so a user in New York sees the 19th.
+
+Write `src/money.ts` with `formatMoney(cents)` (use `Intl.NumberFormat`), `toCents(text)` and `centsToInput(cents)` (for filling the edit form, so 1250 becomes `"12.50"`). Write `src/dates.ts` with `todayISO()`, `monthOf(date)`, `formatDate(date)` and `formatMonth(month)`.
+
+<Solution>
+
+```ts
+// src/money.ts
+// Money is stored as whole cents, so 12.50 is 1250 and no sum ever shows 0.30000000000000004.
+const formatter = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+
+export function formatMoney(cents: number): string {
+  return formatter.format(cents / 100);
+}
+
+// "12.5" -> 1250. Math.round matters: 1.15 * 100 is 114.99999999999999 in floating point.
+export function toCents(text: string): number {
+  return Math.round(Number(text) * 100);
+}
+
+// 1250 -> "12.50", for filling an input when editing.
+export function centsToInput(cents: number): string {
+  return (cents / 100).toFixed(2);
+}
+```
+
+```ts
+// src/dates.ts
+// Dates are plain "YYYY-MM-DD" strings. That is what <input type="date"> gives you,
+// they sort correctly as text, and no timezone is involved.
+
+function pad(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+export function todayISO(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+// "2026-10-20" -> "2026-10"
+export function monthOf(date: string): string {
+  return date.slice(0, 7);
+}
+
+// new Date("2026-10-20") means midnight UTC, which is still the 19th in New York.
+// Building the date from its parts uses the local timezone, so the day never moves.
+function parse(date: string): Date {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+export function formatDate(date: string): string {
+  return parse(date).toLocaleDateString("en-US", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+export function formatMonth(month: string): string {
+  return parse(`${month}-01`).toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
+}
+```
+
+`Math.round` in `toCents` is the important part: without it `toCents("1.15")` returns `114.99999999999999`, which is not a whole number of cents, and the stored `amount` would fail the `.int()` check of `ExpenseSchema`. `todayISO` reads the year, month and day in the user's own timezone and pads them to two digits. `parse` builds the `Date` from three numbers, which uses the local timezone, so the day never moves. `formatDate` and `formatMonth` use `toLocaleDateString`, so you never write month names by hand.
+
+</Solution>
+
+## Stage 3: Two schemas for one expense
+
+The form and the store need different shapes of the same data. An input always gives text (`"12.50"`), but you want `1250` cents in the store. Writing one schema for each makes the conversion a visible step instead of something scattered through the components.
+
+In `src/schema.ts`:
+
+1. Export a `CATEGORIES` list `as const` and a `Category` type made from it.
+2. Write `ExpenseSchema` for what is stored: `id`, `title`, `amount` (a positive integer of cents), `category` and `date`. Export the types `Expense` and `ExpenseInput` (an expense without its `id`).
+3. Write `ExpenseFormSchema` for what the form holds. Every field is text, and the schema checks it and turns the amount into cents. Use clear messages: "Enter a title", "Enter an amount like 12.50", "The amount must be more than 0" and "Pick a date". Export `ExpenseFormInput` (the type before the schema runs).
+
+Do not use `z.coerce.number()` for the amount. Lesson 11 showed that it turns an empty field into `0`, and it also accepts `"1e3"` and `"0x10"`. Check the text with a pattern instead.
+
+<Solution>
+
+```ts
+// src/schema.ts
+import { z } from "zod";
+import { toCents } from "./money";
+
+export const CATEGORIES = [
+  "Food",
+  "Transport",
+  "Housing",
+  "Fun",
+  "Health",
+  "Other",
+] as const;
+export type Category = (typeof CATEGORIES)[number];
+
+// What is stored: the amount is a whole number of cents.
+export const ExpenseSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1),
+  amount: z.number().int().positive(),
+  category: z.enum(CATEGORIES),
+  date: z.iso.date(),
+});
+export type Expense = z.infer<typeof ExpenseSchema>;
+export type ExpenseInput = Omit<Expense, "id">;
+
+// What the form holds: every field is a string, because that is what inputs give you.
+// The schema checks the text, then turns the amount into cents.
+export const ExpenseFormSchema = z.object({
+  title: z.string().trim().min(1, "Enter a title").max(60, "Keep it under 60 characters"),
+  amount: z
+    .string()
+    .trim()
+    .regex(/^\d+(\.\d{1,2})?$/, "Enter an amount like 12.50")
+    .transform(toCents)
+    .refine((cents) => cents > 0, "The amount must be more than 0"),
+  category: z.enum(CATEGORIES),
+  date: z.iso.date({ error: "Pick a date" }),
+});
+export type ExpenseFormInput = z.input<typeof ExpenseFormSchema>;
+```
+
+`CATEGORIES` is written once. The `z.enum` calls and the `<select>` in Part 2 both use it, so a new category is added in one place. `(typeof CATEGORIES)[number]` is the union `"Food" | "Transport" | ...`.
+
+In `ExpenseFormSchema`, the pattern `^\d+(\.\d{1,2})?$` accepts `12`, `12.5` and `12.50` and rejects `""`, `abc`, `-5`, `1.234` and `1,50`. The checks run from top to bottom: `trim`, then the pattern, then `transform(toCents)`. Zod does not run a `transform` on text that failed an earlier check, so `toCents("abc")` is never called. The `refine` then rejects `0` and `0.00`, which pass the pattern but are not an expense. `z.iso.date()` checks that the text is a real calendar date, so `2026-02-31` fails, and its `error` option sets the message for an empty field. The two exported types matter because this schema changes the type: `z.input` is all text, and the output has `amount` as a number, which is the shape of `ExpenseInput`.
+
+</Solution>
+
+## Stage 4: The store
+
+Now the list of expenses. Put it in a Zustand store (lesson 16) with `add`, `update` and `remove`, saved to `localStorage` under the key `expenses-v1`, and saving only the `expenses` list, not the functions.
+
+The interesting part is **loading**. Lesson 16 warned that anything in `localStorage` can be edited or broken, and the todo project guarded against that with a schema. Here the same idea needs care: if one expense in a saved list is broken, throwing away all of them would lose the user's data over one bad row. Use the `merge` option of `persist`, which receives the saved state and the current state and returns the new state. Check that the saved value is an object with a list, then check each item with `ExpenseSchema` and keep the valid ones.
+
+Generate ids with `crypto.randomUUID()`, which every current browser has on `localhost` and on HTTPS pages, and Node 20+ has too.
+
+<Solution>
+
+```ts
+// src/store.ts
+import { create } from "zustand";
+import { z } from "zod";
+import { persist } from "zustand/middleware";
+import { ExpenseSchema } from "./schema";
+import type { Expense, ExpenseInput } from "./schema";
+
+type ExpenseState = {
+  expenses: Expense[];
+  add: (input: ExpenseInput) => void;
+  update: (id: string, input: ExpenseInput) => void;
+  remove: (id: string) => void;
+};
+
+// What we expect to find in localStorage: a list we will check item by item.
+const SavedSchema = z.object({ expenses: z.array(z.unknown()) });
+
+export const useExpenseStore = create<ExpenseState>()(
+  persist(
+    (set) => ({
+      expenses: [],
+      add: (input) =>
+        set((state) => ({
+          expenses: [...state.expenses, { id: crypto.randomUUID(), ...input }],
+        })),
+      update: (id, input) =>
+        set((state) => ({
+          expenses: state.expenses.map((e) => (e.id === id ? { id, ...input } : e)),
+        })),
+      remove: (id) =>
+        set((state) => ({ expenses: state.expenses.filter((e) => e.id !== id) })),
+    }),
+    {
+      name: "expenses-v1",
+      partialize: (state) => ({ expenses: state.expenses }),
+      // localStorage can hold anything, so check it. Keep the expenses that are valid
+      // and drop the rest, and ignore the whole thing if it is not even the right shape.
+      merge: (persisted, current) => {
+        const saved = SavedSchema.safeParse(persisted);
+        if (!saved.success) return current;
+        const expenses = saved.data.expenses.flatMap((item) => {
+          const result = ExpenseSchema.safeParse(item);
+          return result.success ? [result.data] : [];
+        });
+        return { ...current, expenses };
+      },
+    },
+  ),
+);
+```
+
+`add` and `update` always create new arrays with `map` and spread, because Zustand compares by reference (lesson 16). `update` replaces the whole expense, but keeps its `id`, so links to `/expenses/<id>/edit` keep working.
+
+`SavedSchema` only checks the outer shape: an object whose `expenses` is a list of anything (`z.unknown()`). Each item is then checked by itself, and `flatMap` returns `[item]` for a good one and `[]` for a bad one, so the bad ones simply disappear. If the saved value has the wrong shape altogether, `merge` returns `current`, which is the empty starting state. If the saved text is not even valid JSON, Zustand catches the parse error itself and starts empty, and a test below proves it.
+
+</Solution>
+
+## Stage 5: Test the logic
+
+There is no screen yet, and you can already test the part where the bugs are expensive. Set up Vitest as in lesson 18: add the `test` block to `vite.config.ts`, add `"vitest/jsdom"` to `types` in `tsconfig.app.json`, add the script `"test": "vitest"`, and create `src/test-setup.ts`. The store lives outside React, so it survives from one test to the next, and the setup file must empty it by hand, along with `localStorage`.
+
+Then write two test files:
+
+- `src/schema.test.ts`: the form schema trims the title and returns cents, rejects each bad amount (`""`, `abc`, `-5`, `1.234`, `1,50`, `0`, `0.00`), reports every problem at once on the right field, and rejects an unknown category and an impossible date. Also test `toCents("1.15")` and `formatMoney`.
+- `src/store.test.ts`: add, update and remove; the saved JSON has the versioned key and holds no functions; loading keeps valid expenses and drops broken ones; and a wrong shape or text that is not JSON gives an empty list instead of crashing. To simulate a page load, write to `localStorage` and call `await useExpenseStore.persist.rehydrate()`.
+
+<Solution>
+
+```ts
+// vite.config.ts
+/// <reference types="vitest/config" />
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [react()],
+  test: { environment: "jsdom", setupFiles: ["./src/test-setup.ts"] },
+});
+```
+
+```ts
+// src/test-setup.ts
+import "@testing-library/jest-dom/vitest";
+import { cleanup } from "@testing-library/react";
+import { afterEach, beforeEach } from "vitest";
+import { useExpenseStore } from "./store";
+
+beforeEach(() => {
+  localStorage.clear();
+  useExpenseStore.setState({ expenses: [] }); // the store lives outside React, so reset it by hand
+});
+afterEach(cleanup);
+```
+
+```ts
+// src/schema.test.ts
+import { describe, expect, test } from "vitest";
+import { ExpenseFormSchema } from "./schema";
+import { formatMoney, toCents } from "./money";
+
+const valid = { title: "Lunch", amount: "12.50", category: "Food", date: "2026-10-20" };
+
+function messages(input: unknown) {
+  const result = ExpenseFormSchema.safeParse(input);
+  return result.success
+    ? []
+    : result.error.issues.map((i) => `${String(i.path[0])}: ${i.message}`);
+}
+
+describe("ExpenseFormSchema", () => {
+  test("turns the text amount into cents and trims the title", () => {
+    const result = ExpenseFormSchema.parse({ ...valid, title: "  Lunch " });
+    expect(result).toEqual({
+      title: "Lunch",
+      amount: 1250,
+      category: "Food",
+      date: "2026-10-20",
+    });
+  });
+
+  test.each(["", "abc", "-5", "1.234", "1,50", "0", "0.00"])(
+    "rejects the amount %j",
+    (amount) => {
+      expect(messages({ ...valid, amount })).toHaveLength(1);
+    },
+  );
+
+  test("reports every problem at once, each on its own field", () => {
+    expect(messages({ title: " ", amount: "x", category: "Food", date: "" })).toEqual([
+      "title: Enter a title",
+      "amount: Enter an amount like 12.50",
+      "date: Pick a date",
+    ]);
+  });
+
+  test("rejects an unknown category and an impossible date", () => {
+    expect(messages({ ...valid, category: "Pets" })).toHaveLength(1);
+    expect(messages({ ...valid, date: "2026-02-31" })).toHaveLength(1);
+  });
+});
+
+describe("money", () => {
+  test("toCents rounds instead of truncating", () => {
+    expect(1.15 * 100).not.toBe(115); // the floating point trap
+    expect(toCents("1.15")).toBe(115);
+  });
+
+  test("formatMoney writes dollars and cents", () => {
+    expect(formatMoney(1250)).toBe("$12.50");
+    expect(formatMoney(100000)).toBe("$1,000.00");
+  });
+});
+```
+
+```ts
+// src/store.test.ts
+import { expect, test } from "vitest";
+import { useExpenseStore } from "./store";
+
+const lunch = {
+  title: "Lunch",
+  amount: 1250,
+  category: "Food",
+  date: "2026-10-20",
+} as const;
+
+test("add, update and remove", () => {
+  const { add, update, remove } = useExpenseStore.getState();
+
+  add(lunch);
+  const [created] = useExpenseStore.getState().expenses;
+  expect(created).toMatchObject(lunch);
+  expect(created.id).toBeTruthy();
+
+  update(created.id, { ...lunch, amount: 1500 });
+  expect(useExpenseStore.getState().expenses[0]).toMatchObject({
+    id: created.id,
+    amount: 1500,
+  });
+
+  remove(created.id);
+  expect(useExpenseStore.getState().expenses).toEqual([]);
+});
+
+test("expenses are saved to localStorage under a versioned key", () => {
+  useExpenseStore.getState().add(lunch);
+  const saved = JSON.parse(localStorage.getItem("expenses-v1")!);
+  expect(saved.state.expenses).toHaveLength(1);
+  expect(saved.state.add).toBeUndefined(); // functions are never saved
+});
+
+test("loading keeps valid expenses and drops broken ones", async () => {
+  const good = { id: "a", ...lunch };
+  localStorage.setItem(
+    "expenses-v1",
+    JSON.stringify({
+      state: { expenses: [good, { id: "b", title: "", amount: -5 }, 42] },
+      version: 0,
+    }),
+  );
+  await useExpenseStore.persist.rehydrate();
+  expect(useExpenseStore.getState().expenses).toEqual([good]);
+});
+
+test.each([
+  ["a wrong shape", JSON.stringify({ state: { expenses: "nope" }, version: 0 })],
+  ["text that is not JSON", "{oops"],
+])("loading %s gives an empty list instead of crashing", async (_name, raw) => {
+  localStorage.setItem("expenses-v1", raw);
+  await useExpenseStore.persist.rehydrate();
+  expect(useExpenseStore.getState().expenses).toEqual([]);
+});
+```
+
+Run `npx vitest run`: 17 tests pass here (12 in the schema file, 5 in the store file). `test.each` runs the same test once per bad amount, and Vitest shows each one by name, so a failure tells you which input got through. The `messages` helper turns Zod's issues into `"field: message"` lines, which makes the "every problem at once" test easy to read. The test that checks `1.15 * 100` is not `115` documents the bug that `toCents` exists to fix.
+
+</Solution>
+
+## Break it on purpose
+
+Before moving on, check that these tests can fail. Make each change, run `npx vitest run`, see which test goes red, and undo it. These are the results in the sandbox:
+
+| Break this | Result |
+| ---------- | ------ |
+| In `toCents`, remove `Math.round` | The `toCents rounds` test fails (it gets 114.99999999999999) |
+| In the form schema, change the pattern to `^\d+(\.\d+)?$` | The `rejects the amount "1.234"` test fails |
+| In `update`, return `{ ...e }` instead of `{ id, ...input }` | The `add, update and remove` test fails |
+| Delete the whole `merge` option from the store | 2 tests fail: the wrong-shape one and the one that keeps valid expenses |
+
+If a change does **not** make a test fail, you found a gap. Write the missing test before you move on.
+
+## Where you are
+
+Your project now has the whole data layer, tested, and nothing to look at yet. Check your work:
+
+```bash
+npx tsc -b
+npm run lint
+npx vitest run
+```
+
+All three should pass with 17 tests. Part 2 builds the pages on top of this: the layout and routes, the add and edit form with React Hook Form, the list with delete, and the tests for those flows.

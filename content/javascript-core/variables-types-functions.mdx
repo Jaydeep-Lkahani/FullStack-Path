@@ -1,0 +1,390 @@
+---
+title: Variables, Types & Functions
+summary: The building blocks of JavaScript — let/const, primitive and reference types, type coercion, equality, and the many ways to write a function.
+order: 1
+takeaways:
+  - Use const by default, let when you must reassign, and never var in new code.
+  - There are 7 primitive types (string, number, bigint, boolean, undefined, null, symbol); everything else is an object, stored and copied by reference.
+  - Prefer === over ==; know the falsy values (false, 0, "", null, undefined, NaN, 0n).
+  - Functions are values (first-class) - you can store them, pass them in, and return them.
+  - Arrow functions are shorter and do not have their own this or arguments.
+videos:
+  - title: "JavaScript Course for Beginners - Your First Step to Web Development"
+    channel: "Programming with Mosh"
+    duration: "48:17"
+    url: https://www.youtube.com/watch?v=W6NZfCO5SIk
+  - title: "Learn JavaScript ARROW FUNCTIONS in 8 minutes!"
+    channel: "Bro Code"
+    duration: "8:01"
+    url: https://www.youtube.com/watch?v=fRRRkognpOs
+docs:
+  - title: "MDN: JavaScript data types and data structures"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Data_structures
+  - title: "MDN: Equality comparisons and sameness"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Equality_comparisons_and_sameness
+  - title: "MDN: Functions"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Functions
+  - title: "MDN: let"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/let
+---
+
+JavaScript looks friendly, but it has sharp edges that trip up experienced developers and appear constantly in interviews. This lesson builds a precise mental model of values, variables, and functions so those edges stop being surprising.
+
+## Declaring variables
+
+JavaScript has three declaration keywords:
+
+```js
+const PI = 3.14159;   // cannot be reassigned
+let count = 0;        // can be reassigned
+count = count + 1;
+
+var legacy = "avoid"; // function-scoped, hoisted; do not use in new code
+```
+
+- `const` means the **binding** can't be reassigned. It does **not** make the value immutable:
+
+```js
+const user = { name: "Ada" };
+user.name = "Grace";   // allowed: we mutated the object
+user = {};             // TypeError: Assignment to constant variable
+```
+
+- `let` and `const` are **block scoped** (limited to the nearest `{ }`); `var` is function scoped. We cover this deeply in the scope lesson.
+
+<Callout type="tip" title="Rule of thumb">
+Start with `const`. Switch to `let` only when the compiler (or you) needs reassignment. Readers then know any `let` is going to change.
+</Callout>
+
+## Primitive types
+
+A **primitive** is an immutable, single value. JavaScript has seven:
+
+| Type        | Example                | Notes                                                  |
+| ----------- | ---------------------- | ------------------------------------------------------ |
+| `string`    | `"hi"`, `'hi'`, `` `hi` `` | Immutable sequence of UTF-16 code units            |
+| `number`    | `42`, `3.14`, `NaN`, `Infinity` | 64-bit floating point for ALL numbers         |
+| `bigint`    | `9007199254740993n`    | Arbitrary-size integers                                |
+| `boolean`   | `true`, `false`        |                                                        |
+| `undefined` | `undefined`            | "No value assigned"                                    |
+| `null`      | `null`                 | "Intentionally no value"                               |
+| `symbol`    | `Symbol("id")`         | Unique identifiers                                     |
+
+Use `typeof` to inspect a type:
+
+```js
+typeof "hi";        // "string"
+typeof 42;          // "number"
+typeof undefined;   // "undefined"
+typeof null;        // "object"  ← a historical bug, can't be fixed
+typeof [];          // "object"
+typeof function(){};// "function"
+Array.isArray([]);  // true — the right way to check for arrays
+```
+
+### Numbers are floating point
+
+```js
+0.1 + 0.2;                      // 0.30000000000000004
+0.1 + 0.2 === 0.3;              // false
+Math.abs(0.1 + 0.2 - 0.3) < Number.EPSILON;  // true — compare with a tolerance
+
+Number.MAX_SAFE_INTEGER;        // 9007199254740991 (2^53 - 1)
+9007199254740992 === 9007199254740993;  // true (!)  use BigInt beyond this
+```
+
+For money, store integer cents (`1999`) or use a decimal library — never floats.
+
+### Strings
+
+```js
+const name = "Ada";
+const greeting = `Hello, ${name}! 2 + 2 = ${2 + 2}`;   // template literal
+
+name.length;                 // 3
+name.toUpperCase();          // "ADA"
+"a,b,c".split(",");          // ["a", "b", "c"]
+"  pad ".trim();             // "pad"
+"hello".includes("ell");     // true
+"hello".slice(1, 3);         // "el"
+"abc".at(-1);                // "c"
+```
+
+Strings are immutable — methods return **new** strings and never change the original.
+
+### `null` vs `undefined`
+
+- `undefined`: a variable declared but not assigned, a missing property, or a function with no `return`.
+- `null`: you deliberately say "nothing here".
+
+```js
+let a;               // undefined
+const o = {};
+o.missing;           // undefined
+function f() {}
+f();                 // undefined
+```
+
+## Reference types
+
+Everything that isn't a primitive is an **object**: plain objects, arrays, functions, dates, maps, sets. Objects are stored by **reference** — a variable holds an address, not the data itself.
+
+```js
+const a = { x: 1 };
+const b = a;           // b points to the SAME object
+b.x = 99;
+console.log(a.x);      // 99
+
+const c = { x: 1 };
+const d = { x: 1 };
+c === d;               // false: different objects, even with equal contents
+```
+
+The same applies when you pass objects to functions — the function receives a copy of the *reference*, so mutating the object is visible to the caller:
+
+```js
+function rename(person) {
+  person.name = "Changed";   // mutates the caller's object
+}
+const p = { name: "Original" };
+rename(p);
+console.log(p.name);         // "Changed"
+```
+
+To copy:
+
+```js
+const shallow = { ...original };          // spread: shallow copy
+const deepCopy = structuredClone(original); // deep copy (dates, maps, nested objects)
+```
+
+A shallow copy duplicates only the top level; nested objects are still shared. Deep-vs-shallow is a very common interview question.
+
+## Equality and coercion
+
+JavaScript has two equality operators:
+
+- `===` **strict equality**: same type and value, no conversion.
+- `==` **loose equality**: converts types first, with surprising rules.
+
+```js
+1 == "1";            // true
+0 == false;          // true
+null == undefined;   // true
+"" == 0;             // true
+[] == false;         // true  (!)
+
+1 === "1";           // false
+NaN === NaN;         // false — use Number.isNaN(x)
+Object.is(NaN, NaN); // true
+```
+
+**Use `===` always.** The single accepted use of `==` is `x == null`, which is true for both `null` and `undefined`.
+
+### Truthy and falsy
+
+In conditions, values are coerced to booleans. There are exactly **seven falsy values**:
+
+```js
+false, 0, -0, 0n, "", null, undefined, NaN
+```
+
+Everything else is truthy — including `"0"`, `"false"`, `[]` and `{}`:
+
+```js
+if ([]) console.log("empty arrays are truthy");
+if ("0") console.log("so are non-empty strings");
+```
+
+### Useful operators
+
+```js
+// Logical operators return one of their operands, not just true/false
+"hi" || "default";      // "hi"
+"" || "default";        // "default"
+0 ?? 10;                // 0       — nullish coalescing: only null/undefined fall through
+null ?? 10;             // 10
+
+const user = { profile: null };
+user.profile?.name;     // undefined — optional chaining stops at null/undefined
+
+let cache;
+cache ??= {};           // assign only if null/undefined
+```
+
+Prefer `??` over `||` for defaults when `0`, `""` or `false` are valid values.
+
+## Functions
+
+Functions are **first-class values**: you can assign them to variables, pass them to other functions, and return them from functions. That single idea powers callbacks, array methods, React hooks and middleware.
+
+### Ways to write a function
+
+```js
+// 1. Declaration — hoisted: callable before its line
+function add(a, b) {
+  return a + b;
+}
+
+// 2. Expression — assigned to a variable, not hoisted
+const subtract = function (a, b) {
+  return a - b;
+};
+
+// 3. Arrow function — concise, lexical `this`
+const multiply = (a, b) => a * b;
+const square = (n) => n * n;
+const greet = () => "hi";
+const makeUser = (name) => ({ name });  // wrap object literals in parentheses
+```
+
+### Parameters
+
+```js
+function greet(name = "friend", greeting = "Hello") {   // default values
+  return `${greeting}, ${name}!`;
+}
+greet();            // "Hello, friend!"
+greet("Ada");       // "Hello, Ada!"
+
+function sum(...numbers) {                              // rest parameter → real array
+  return numbers.reduce((total, n) => total + n, 0);
+}
+sum(1, 2, 3);       // 6
+```
+
+Missing arguments become `undefined`; extra arguments are ignored (unless collected by `...rest`).
+
+### Returning values
+
+A function without `return` returns `undefined`. Beware automatic semicolon insertion:
+
+```js
+function bad() {
+  return
+  { ok: true };      // never reached — returns undefined!
+}
+```
+
+### Higher-order functions and callbacks
+
+A **higher-order function** takes or returns functions.
+
+```js
+const numbers = [1, 2, 3, 4, 5];
+
+numbers.map((n) => n * 2);              // [2, 4, 6, 8, 10]
+numbers.filter((n) => n % 2 === 0);     // [2, 4]
+numbers.reduce((acc, n) => acc + n, 0); // 15
+numbers.find((n) => n > 3);             // 4
+numbers.some((n) => n > 4);             // true
+numbers.every((n) => n > 0);            // true
+
+function repeat(times, action) {        // a function that takes a function
+  for (let i = 0; i < times; i++) action(i);
+}
+repeat(3, (i) => console.log(`run ${i}`));
+```
+
+### Arrow vs regular functions
+
+| Feature                    | Regular function | Arrow function |
+| -------------------------- | ---------------- | -------------- |
+| Own `this`                 | Yes (set by caller) | No (inherits from surrounding scope) |
+| `arguments` object         | Yes              | No (use rest)  |
+| Can be used with `new`     | Yes              | No             |
+| Hoisted (declarations)     | Yes              | No             |
+
+We'll unpack `this` in a later lesson. For now: use arrows for callbacks and short helpers, and regular functions for methods and constructors.
+
+### Immediately invoked and pure functions
+
+```js
+(() => {
+  const private = "scoped";
+  console.log(private);
+})();   // IIFE: runs immediately, keeps variables out of the outer scope
+```
+
+A **pure function** returns the same output for the same input and has no side effects (no mutation, no I/O). Pure functions are easy to test and are the foundation of React's data model — aim for them by default.
+
+```js
+// impure: mutates its input
+function addItemBad(cart, item) { cart.push(item); return cart; }
+// pure: returns a new array
+const addItem = (cart, item) => [...cart, item];
+```
+
+<Exercise title="Predict the output">
+What does each line print, and why?
+
+```js
+console.log(typeof null);
+console.log(0.1 + 0.2 === 0.3);
+console.log([] == false);
+console.log([] ? "truthy" : "falsy");
+console.log(null ?? "x", 0 ?? "x", 0 || "x");
+const a = { n: 1 }; const b = a; b.n = 2;
+console.log(a.n);
+```
+
+<Solution>
+```text
+"object"        // historical bug
+false           // floating point
+true            // [] → "" → 0, false → 0, so 0 == 0
+"truthy"        // objects are always truthy
+x 0 x           // ?? only skips null/undefined; || skips every falsy value
+2               // a and b share one object
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Implement three helpers">
+Without using `Array.prototype.reduce` for the first, write: `sum(...nums)`, `compose(f, g)` returning a function that computes `f(g(x))`, and `once(fn)` that calls `fn` only the first time and returns the cached result afterward.
+
+<Solution>
+```js
+function sum(...nums) {
+  let total = 0;
+  for (const n of nums) total += n;
+  return total;
+}
+
+const compose = (f, g) => (x) => f(g(x));
+
+function once(fn) {
+  let called = false;
+  let result;
+  return function (...args) {
+    if (!called) {
+      called = true;
+      result = fn.apply(this, args);
+    }
+    return result;
+  };
+}
+
+const init = once(() => { console.log("initialising"); return 42; });
+init(); // logs, returns 42
+init(); // returns 42 silently
+```
+`once` relies on closures (the next lesson): the inner function remembers `called` and `result`.
+</Solution>
+</Exercise>
+
+<Exercise title="Shallow vs deep">
+Given `const original = { name: "Ada", skills: ["js"] }`, make a shallow copy with spread, push `"ts"` to the copy's `skills`, and check what happened to `original`. Then fix it with `structuredClone`.
+
+<Solution>
+```js
+const copy = { ...original };
+copy.skills.push("ts");
+console.log(original.skills);   // ["js", "ts"] — nested array is shared!
+
+const safe = structuredClone(original);
+safe.skills.push("react");
+console.log(original.skills);   // unchanged
+```
+</Solution>
+</Exercise>

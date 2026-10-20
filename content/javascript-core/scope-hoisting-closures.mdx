@@ -1,0 +1,324 @@
+---
+title: Scope, Hoisting & Closures
+summary: Where variables live, how JavaScript hoists declarations, and how closures let functions remember their surroundings.
+order: 2
+takeaways:
+  - Scope decides where a variable is visible - global, function, or block; lookups walk outward through the scope chain.
+  - var is function scoped and hoisted as undefined; let/const are block scoped and sit in the temporal dead zone until declared.
+  - A closure is a function plus the variables it captured from where it was defined; they keep those variables alive.
+  - Closures power private state, factories, memoization, debouncing and React hooks.
+  - Classic trap - var in a loop shares one variable across iterations; let creates a fresh one per iteration.
+videos:
+  - title: "Closures Explained in 100 Seconds // Tricky JavaScript Interview Prep"
+    channel: "Fireship"
+    duration: "4:57"
+    url: https://www.youtube.com/watch?v=vKJpN5FAeF4
+  - title: "Learn JavaScript CLOSURES in 10 minutes!"
+    channel: "Bro Code"
+    duration: "10:58"
+    url: https://www.youtube.com/watch?v=beZfCfiuIkA
+docs:
+  - title: "MDN: Closures"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Closures
+  - title: "MDN: Hoisting"
+    url: https://developer.mozilla.org/en-US/docs/Glossary/Hoisting
+  - title: "MDN: Scope"
+    url: https://developer.mozilla.org/en-US/docs/Glossary/Scope
+---
+
+Closures are the single most-asked JavaScript interview topic, and they underpin React hooks, event handlers, and middleware. They are also not magic: they follow directly from how scope works. We'll build up in order.
+
+## Scope
+
+**Scope** is the region of code where a variable is accessible. JavaScript has three kinds:
+
+```js
+const globalValue = "visible everywhere";           // global scope
+
+function outer() {
+  const functionValue = "visible inside outer()";   // function scope
+
+  if (true) {
+    let blockValue = "visible inside this block";   // block scope
+    const alsoBlock = "same for const";
+    var notBlock = "var ignores blocks";            // function scoped!
+  }
+
+  console.log(notBlock);      // "var ignores blocks"
+  console.log(blockValue);    // ReferenceError
+}
+```
+
+- **Global scope** — top level. In browsers, `var` and function declarations at the top level become properties of `window`; `let`/`const` don't. In ES modules, top-level variables are module scoped, not global.
+- **Function scope** — everything declared inside a function.
+- **Block scope** — everything between `{ }` for `let`, `const` and `class`.
+
+### The scope chain
+
+When you reference a variable, JavaScript looks in the current scope, then the enclosing scope, then the next one out, up to global. This is the **scope chain**, and it's determined by where code is **written** (lexical scoping), not where it's called.
+
+```js
+const x = "global";
+
+function a() {
+  const x = "a";            // shadows the global x
+  function b() {
+    console.log(x);         // finds "a" first
+  }
+  b();
+}
+a();                        // "a"
+```
+
+Inner scopes can read outer variables but not the reverse. An inner variable with the same name **shadows** the outer one — legal but a common source of confusion.
+
+## Hoisting
+
+Before running a scope, JavaScript scans it and registers declarations. This is **hoisting**.
+
+```js
+console.log(a);   // undefined   (var is hoisted and initialised to undefined)
+var a = 5;
+
+console.log(b);   // ReferenceError: Cannot access 'b' before initialization
+let b = 5;
+
+sayHi();          // works — function declarations are hoisted completely
+function sayHi() { console.log("hi"); }
+
+sayBye();         // TypeError: sayBye is not a function (var hoisted as undefined)
+var sayBye = function () {};
+```
+
+| Declaration         | Hoisted? | Initialised at hoist? | Before its line |
+| ------------------- | -------- | --------------------- | --------------- |
+| `var`               | Yes      | `undefined`           | Reads `undefined` |
+| `let` / `const`     | Yes      | No                    | `ReferenceError` (TDZ) |
+| function declaration| Yes      | Yes (whole function)  | Works           |
+| `class`             | Yes      | No                    | `ReferenceError` |
+
+### The temporal dead zone
+
+For `let`/`const`, the span from the start of the scope to the declaration line is the **temporal dead zone (TDZ)**. Touching the variable there throws. That is a feature: it catches use-before-define bugs that `var` silently hides.
+
+```js
+{
+  // TDZ for `value` begins
+  console.log(typeof value); // ReferenceError (even typeof is not safe in the TDZ)
+  let value = 1;             // TDZ ends
+}
+```
+
+## Closures
+
+A **closure** is a function bundled with references to the variables from the scope where it was **created**. Every function in JavaScript is a closure.
+
+```js
+function makeCounter() {
+  let count = 0;            // lives in makeCounter's scope
+
+  return function increment() {
+    count += 1;             // still has access after makeCounter has returned
+    return count;
+  };
+}
+
+const counterA = makeCounter();
+const counterB = makeCounter();
+
+counterA();  // 1
+counterA();  // 2
+counterB();  // 1 — separate closure, separate `count`
+```
+
+Normally local variables disappear when a function returns. Here `count` survives because `increment` still references it, so the engine keeps that scope alive. Each call to `makeCounter` creates a **new** scope, so `counterA` and `counterB` have independent state.
+
+<Callout type="note" title="Closures capture variables, not values">
+A closure keeps a live link to the variable. If the variable changes later, the closure sees the new value. This is the root of most closure bugs.
+</Callout>
+
+### Practical uses
+
+**1. Private state (encapsulation)**
+
+```js
+function createBankAccount(initial) {
+  let balance = initial;                 // not accessible from outside
+  return {
+    deposit(amount) { balance += amount; return balance; },
+    withdraw(amount) {
+      if (amount > balance) throw new Error("Insufficient funds");
+      balance -= amount;
+      return balance;
+    },
+    getBalance: () => balance,
+  };
+}
+
+const acct = createBankAccount(100);
+acct.deposit(50);
+acct.getBalance();   // 150
+acct.balance;        // undefined — truly private
+```
+
+**2. Function factories**
+
+```js
+const multiplyBy = (factor) => (n) => n * factor;
+const double = multiplyBy(2);
+const triple = multiplyBy(3);
+double(5);   // 10
+triple(5);   // 15
+```
+
+**3. Memoization (caching results)**
+
+```js
+function memoize(fn) {
+  const cache = new Map();
+  return (arg) => {
+    if (cache.has(arg)) return cache.get(arg);
+    const result = fn(arg);
+    cache.set(arg, result);
+    return result;
+  };
+}
+
+const slowSquare = (n) => { /* pretend this is expensive */ return n * n; };
+const fastSquare = memoize(slowSquare);
+fastSquare(9);   // computed
+fastSquare(9);   // cached
+```
+
+**4. Debounce** — wait until the user stops typing before running a function:
+
+```js
+function debounce(fn, delay) {
+  let timerId;
+  return (...args) => {
+    clearTimeout(timerId);
+    timerId = setTimeout(() => fn(...args), delay);
+  };
+}
+
+const onSearch = debounce((q) => console.log("search for", q), 300);
+```
+
+**5. Event handlers and callbacks** all close over the variables around them. In React, `useState` and `useEffect` callbacks close over the values from a particular render, which is why "stale closures" are a famous hooks bug. You'll meet it again in Phase 2.
+
+## The classic loop trap
+
+```js
+for (var i = 0; i < 3; i++) {
+  setTimeout(() => console.log(i), 0);
+}
+// prints 3, 3, 3
+```
+
+`var i` is function scoped: there is **one** `i`, and by the time the timeouts run the loop has finished and `i` is `3`. Every callback closes over the same variable.
+
+```js
+for (let i = 0; i < 3; i++) {
+  setTimeout(() => console.log(i), 0);
+}
+// prints 0, 1, 2
+```
+
+With `let`, the loop creates a **new binding per iteration**, so each callback captures its own `i`. The old-school fix wrapped the body in an IIFE to create a new scope — `let` makes it unnecessary.
+
+### Memory considerations
+
+Closures keep captured variables alive. That's usually fine, but a long-lived closure (like an event listener never removed) that captures a large object prevents it from being garbage collected. Remove listeners you no longer need and avoid capturing more than necessary.
+
+<Exercise title="Counter with reset">
+Write `createCounter(start = 0)` returning an object with `increment()`, `decrement()`, `reset()` and `value()`. The count must not be directly accessible.
+
+<Solution>
+```js
+function createCounter(start = 0) {
+  let count = start;
+  return {
+    increment: () => ++count,
+    decrement: () => --count,
+    reset: () => (count = start),
+    value: () => count,
+  };
+}
+
+const c = createCounter(10);
+c.increment();   // 11
+c.reset();       // 10
+c.count;         // undefined
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the loop">
+This code should log the index of each button when clicked, but always logs `3`. Fix it in two different ways.
+
+```js
+var buttons = ["a", "b", "c"];
+for (var i = 0; i < buttons.length; i++) {
+  document.getElementById(buttons[i]).addEventListener("click", function () {
+    console.log(i);
+  });
+}
+```
+
+<Solution>
+```js
+// 1. let creates a new binding per iteration
+for (let i = 0; i < buttons.length; i++) {
+  document.getElementById(buttons[i]).addEventListener("click", () => console.log(i));
+}
+
+// 2. forEach gives each callback its own parameter
+buttons.forEach((id, index) => {
+  document.getElementById(id).addEventListener("click", () => console.log(index));
+});
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the output">
+```js
+let x = 1;
+function show() { console.log(x); }
+function test() {
+  let x = 2;
+  show();
+}
+test();
+
+function a() {
+  console.log(typeof hoisted, typeof notHoisted);
+  var hoisted = 1;
+  function notHoisted() {}
+}
+a();
+```
+
+<Solution>
+The first prints `1`: scope is lexical, so `show` uses the `x` where it was **defined** (global), not where it was called. The second prints `undefined function`: `var hoisted` is hoisted as `undefined`, and the `notHoisted` function declaration is hoisted completely (the name is misleading on purpose).
+</Solution>
+</Exercise>
+
+<Exercise title="Build once and limit">
+Write `limit(fn, n)` that returns a function calling `fn` at most `n` times, then keeps returning the last result.
+
+<Solution>
+```js
+function limit(fn, n) {
+  let calls = 0;
+  let last;
+  return (...args) => {
+    if (calls < n) {
+      calls++;
+      last = fn(...args);
+    }
+    return last;
+  };
+}
+```
+</Solution>
+</Exercise>

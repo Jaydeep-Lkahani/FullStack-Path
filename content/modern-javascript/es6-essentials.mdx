@@ -1,0 +1,315 @@
+---
+title: ES6+ Essentials
+summary: The modern syntax you will see in every codebase — destructuring, spread/rest, template literals, modules, and the array/object helpers.
+order: 1
+takeaways:
+  - Destructuring unpacks arrays and objects into variables; defaults, renaming and nesting are all supported.
+  - Spread (...) expands an iterable or object; rest (...) collects the remainder - same symbol, opposite direction.
+  - Spread copies are shallow, and updating state immutably with spread is the pattern React relies on.
+  - ES modules (import/export) give every file its own scope; prefer named exports, use default exports sparingly.
+  - map/filter/reduce, Map/Set, optional chaining and nullish coalescing replace a lot of manual loops and null checks.
+videos:
+  - title: "Why Is Array/Object Destructuring So Useful And How To Use It"
+    channel: "Web Dev Simplified"
+    duration: "13:24"
+    url: https://www.youtube.com/watch?v=NIq3qLaHCIs
+  - title: "JavaScript ES6 Tutorial #5 - The Spread Operator"
+    channel: "Net Ninja"
+    duration: "4:49"
+    url: https://www.youtube.com/watch?v=1INe_jCWq1Q
+  - title: "JavaScript Modules with Import/Export Syntax (ES6)"
+    channel: "dcode"
+    duration: "12:37"
+    url: https://www.youtube.com/watch?v=s9kNndJLOjg
+docs:
+  - title: "MDN: Destructuring"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Destructuring
+  - title: "MDN: Spread syntax"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/Spread_syntax
+  - title: "MDN: JavaScript modules"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules
+---
+
+ES6 (2015) and the yearly releases since transformed JavaScript. This lesson covers the features that appear in almost every React, Node and Next.js file you'll read.
+
+## Destructuring
+
+Destructuring unpacks values from arrays or objects into variables in a single statement.
+
+### Object destructuring
+
+```js
+const user = { id: 1, name: "Ada", role: "admin", address: { city: "London" } };
+
+const { name, role } = user;                 // name = "Ada", role = "admin"
+const { name: userName } = user;             // rename: userName = "Ada"
+const { age = 30 } = user;                   // default when undefined: age = 30
+const { address: { city } } = user;          // nested: city = "London"
+const { id, ...rest } = user;                // rest = { name, role, address }
+```
+
+It shines in function parameters:
+
+```js
+function createUser({ name, role = "user", active = true } = {}) {
+  return { name, role, active };
+}
+createUser({ name: "Grace" });   // { name: "Grace", role: "user", active: true }
+```
+
+This is exactly how React components receive props: `function Button({ label, onClick }) { ... }`.
+
+### Array destructuring
+
+Position matters, not names.
+
+```js
+const [first, second] = ["a", "b", "c"];       // first = "a", second = "b"
+const [, , third] = ["a", "b", "c"];           // skip with commas
+const [head, ...tail] = [1, 2, 3, 4];          // tail = [2, 3, 4]
+const [x = 0, y = 0] = [5];                    // y = 0 (default)
+
+// swap without a temp variable
+let a = 1, b = 2;
+[a, b] = [b, a];
+```
+
+React's `const [count, setCount] = useState(0)` is array destructuring — `useState` returns a two-element array.
+
+## Spread and rest
+
+The same `...` syntax does two opposite jobs depending on where it appears.
+
+**Spread** (expanding) in calls, arrays and objects:
+
+```js
+const nums = [1, 2, 3];
+Math.max(...nums);                  // 3 — spreads into arguments
+
+const copy = [...nums];             // shallow copy
+const merged = [...nums, 4, 5];     // [1, 2, 3, 4, 5]
+
+const defaults = { theme: "light", lang: "en" };
+const settings = { ...defaults, theme: "dark" };   // later keys win → { theme: "dark", lang: "en" }
+```
+
+**Rest** (collecting) in parameters and destructuring:
+
+```js
+function log(level, ...messages) {    // messages is a real array
+  console.log(level, messages.join(" "));
+}
+const { a, ...others } = { a: 1, b: 2, c: 3 };   // others = { b: 2, c: 3 }
+```
+
+### Immutable updates
+
+React and Redux expect you to **create new objects instead of mutating**. Spread makes that easy:
+
+```js
+const state = { user: { name: "Ada", age: 30 }, todos: ["learn JS"] };
+
+// update a nested field
+const next = { ...state, user: { ...state.user, age: 31 } };
+
+// add / remove / update items in arrays
+const added = [...state.todos, "learn React"];
+const removed = state.todos.filter((t) => t !== "learn JS");
+const updated = state.todos.map((t) => (t === "learn JS" ? "mastered JS" : t));
+```
+
+Remember: spread is **shallow**. In the example, `...state` copies the top level, and we re-spread `user` ourselves because it's nested.
+
+## Template literals
+
+```js
+const name = "Ada";
+const items = 3;
+const message = `Hi ${name}, you have ${items} item${items === 1 ? "" : "s"}.`;
+
+const html = `
+  <ul>
+    <li>${name}</li>
+  </ul>
+`;   // multi-line strings
+```
+
+Any expression works inside `${ }`. **Tagged templates** (`` sql`SELECT * FROM users WHERE id = ${id}` ``) let a function process the pieces — libraries use this for safe SQL and styled-components.
+
+## Modules
+
+Every `.js`/`.mjs` file loaded as an ES module has its **own scope** and explicitly exports what others may use.
+
+```js title="math.js"
+export const PI = 3.14159;              // named export
+export function add(a, b) { return a + b; }
+export default function multiply(a, b) { return a * b; }   // one default per module
+```
+
+```js title="app.js"
+import multiply, { PI, add } from "./math.js";   // default + named
+import { add as sum } from "./math.js";           // rename
+import * as math from "./math.js";                // namespace object
+```
+
+```js
+// dynamic import — loads code on demand, returns a Promise (code splitting)
+const { default: Chart } = await import("./chart.js");
+```
+
+Guidance:
+
+- **Prefer named exports**: they're greppable, refactor-safe and auto-import friendly. Frameworks sometimes *require* default exports (Next.js pages, `React.lazy`).
+- `import` statements are static and hoisted; they run before the rest of the module.
+- In the browser use `<script type="module">`; in Node use `"type": "module"` in `package.json` (or `.mjs`).
+- Older Node code uses **CommonJS**: `const fs = require("fs")` and `module.exports = ...`. You'll still meet it, and the two systems can't be mixed carelessly.
+
+## Array and object helpers
+
+### Transforming arrays
+
+```js
+const products = [
+  { id: 1, name: "Pen", price: 2, tags: ["office"] },
+  { id: 2, name: "Laptop", price: 1200, tags: ["tech", "office"] },
+  { id: 3, name: "Mouse", price: 25, tags: ["tech"] },
+];
+
+products.map((p) => p.name);                         // ["Pen", "Laptop", "Mouse"]
+products.filter((p) => p.price > 10);                // Laptop, Mouse
+products.find((p) => p.id === 2);                    // the Laptop object (or undefined)
+products.findIndex((p) => p.id === 2);               // 1
+products.some((p) => p.price > 1000);                // true
+products.every((p) => p.price > 0);                  // true
+products.reduce((sum, p) => sum + p.price, 0);       // 1227
+products.flatMap((p) => p.tags);                     // ["office","tech","office","tech"]
+[...new Set(products.flatMap((p) => p.tags))];       // unique tags: ["office","tech"]
+[3, 1, 2].toSorted((a, b) => a - b);                 // [1,2,3] — non-mutating
+products.at(-1);                                     // last item
+products.includes("x");                              // for primitives
+```
+
+`sort`, `reverse` and `splice` **mutate** the array. Prefer `toSorted`, `toReversed`, `toSpliced` (or copy first with `[...arr]`) when you need immutability.
+
+Group data with `reduce` or the newer `Object.groupBy`:
+
+```js
+const byTag = Object.groupBy(products, (p) => p.price > 10 ? "expensive" : "cheap");
+```
+
+### Objects
+
+```js
+const o = { a: 1, b: 2 };
+Object.keys(o);         // ["a", "b"]
+Object.values(o);       // [1, 2]
+Object.entries(o);      // [["a", 1], ["b", 2]]
+Object.fromEntries([["x", 1], ["y", 2]]);   // { x: 1, y: 2 }
+
+const key = "dynamic";
+const obj = { [key]: true, shorthand() {} };   // computed keys, method shorthand
+
+const name = "Ada", age = 30;
+const person = { name, age };                  // property shorthand
+```
+
+### `Map` and `Set`
+
+```js
+const seen = new Set([1, 2, 2, 3]);   // {1, 2, 3} — unique values
+seen.add(4); seen.has(2); seen.size;
+
+const lookup = new Map();             // keys of ANY type, remembers insertion order
+lookup.set("a", 1).set({ id: 1 }, "object key");
+lookup.get("a");                      // 1
+for (const [key, value] of lookup) { /* ... */ }
+```
+
+Use `Map` for dynamic key/value collections (counts, caches), plain objects for fixed-shape records.
+
+### Optional chaining and nullish coalescing
+
+```js
+const city = user?.address?.city ?? "Unknown";
+const first = list?.[0];
+const result = callback?.();
+```
+
+## Iteration
+
+```js
+for (const item of ["a", "b"]) { }                       // values of any iterable
+for (const [i, item] of ["a", "b"].entries()) { }        // index + value
+for (const key in { a: 1, b: 2 }) { }                    // keys of an object (avoid for arrays)
+```
+
+<Callout type="warning" title="for...in vs for...of">
+`for...of` iterates **values** of iterables (arrays, strings, Maps, Sets). `for...in` iterates enumerable **keys**, including inherited ones — rarely what you want for arrays.
+</Callout>
+
+<Exercise title="Refactor with modern syntax">
+Rewrite using destructuring, spread and array helpers:
+
+```js
+function summarize(order) {
+  var customerName = order.customer.name;
+  var total = 0;
+  for (var i = 0; i < order.items.length; i++) {
+    total = total + order.items[i].price * order.items[i].qty;
+  }
+  var result = Object.assign({}, order, { total: total });
+  result.label = "Order for " + customerName + ": $" + total;
+  return result;
+}
+```
+
+<Solution>
+```js
+const summarize = (order) => {
+  const { customer: { name }, items } = order;
+  const total = items.reduce((sum, { price, qty }) => sum + price * qty, 0);
+  return { ...order, total, label: `Order for ${name}: $${total}` };
+};
+```
+The new version doesn't mutate its input, which is what React-style code expects.
+</Solution>
+</Exercise>
+
+<Exercise title="Immutable todo updates">
+Given `const todos = [{ id: 1, text: "a", done: false }, { id: 2, text: "b", done: false }]`, write pure functions `toggle(todos, id)`, `remove(todos, id)` and `add(todos, text)` that never mutate their input.
+
+<Solution>
+```js
+const toggle = (todos, id) =>
+  todos.map((t) => (t.id === id ? { ...t, done: !t.done } : t));
+
+const remove = (todos, id) => todos.filter((t) => t.id !== id);
+
+const add = (todos, text) => [
+  ...todos,
+  { id: Math.max(0, ...todos.map((t) => t.id)) + 1, text, done: false },
+];
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Word frequency">
+Write `wordCount(text)` returning a `Map` of lowercase words to counts, then print the top 3 words.
+
+<Solution>
+```js
+function wordCount(text) {
+  const counts = new Map();
+  for (const word of text.toLowerCase().match(/[a-z']+/g) ?? []) {
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  return counts;
+}
+
+const top3 = [...wordCount("the cat and the hat and the bat")]
+  .sort((a, b) => b[1] - a[1])
+  .slice(0, 3);
+console.log(top3);   // [["the", 3], ["and", 2], ["cat", 1]]
+```
+</Solution>
+</Exercise>

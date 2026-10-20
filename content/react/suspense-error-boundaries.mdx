@@ -1,0 +1,376 @@
+---
+title: Suspense & Error Boundaries
+summary: Show loading states with `<Suspense>`, split code with `lazy`, read data with `use`, and catch rendering errors with an error boundary so one broken widget doesn't blank the whole page.
+order: 10
+takeaways:
+  - A `Suspense` boundary shows its `fallback` while any component inside it is waiting for code or data, so loading states live in one place instead of in every component.
+  - The `lazy` function loads a component's code only when it first renders, which Vite turns into a separate file; declare it at the top level of a module, never inside a component.
+  - The `use` API reads a promise and suspends until it resolves, but the promise must come from a cache, because a promise created during render starts a new request on every render.
+  - Nested boundaries reveal content in steps, while one boundary around several components waits for the slowest of them.
+  - An error boundary is a class component that catches errors thrown while rendering its children and shows a fallback instead; it doesn't catch errors in event handlers or other async code.
+  - To retry after an error, reset the boundary and clear whatever cached the failure, or give the boundary a `key` that changes with its input.
+videos:
+  - title: "Speed Up Your React Apps With Code Splitting"
+    channel: "Web Dev Simplified"
+    duration: "16:50"
+    url: https://www.youtube.com/watch?v=JU6sl_yyZqs
+  - title: "New React 19 use hook–deep dive"
+    channel: "Tom Dohnal"
+    duration: "11:45"
+    url: https://www.youtube.com/watch?v=UUW4xS05Y6s
+  - title: "Error Handling in React (Complete Tutorial)"
+    channel: "Cosden Solutions"
+    duration: "10:32"
+    url: https://www.youtube.com/watch?v=OQQAv8t3bfc
+docs:
+  - title: "react.dev — Suspense"
+    url: https://react.dev/reference/react/Suspense
+  - title: "react.dev — lazy"
+    url: https://react.dev/reference/react/lazy
+  - title: "react.dev — use"
+    url: https://react.dev/reference/react/use
+  - title: "react.dev — Catching rendering errors with an error boundary"
+    url: https://react.dev/reference/react/Component#catching-rendering-errors-with-an-error-boundary
+---
+
+So far every component has handled its own `loading` and `error` flags, like `useFetch` in lesson 9. That works, but each component repeats the same `if (loading)` and `if (error)` branches, and a page with five widgets shows five spinners. React has two components that move those states **up** the tree: `<Suspense>` for "still waiting" and error boundaries for "something broke".
+
+You'll use them constantly later: Next.js builds its `loading.tsx` and `error.tsx` files on exactly these two features, and TanStack Query (lesson 15) can suspend too. Interviewers ask what error boundaries can't catch and how code splitting works. Written for React 19 and the Vite setup from lesson 1.
+
+## Suspense: one place for "loading"
+
+`<Suspense>` wraps part of the tree and takes a `fallback`. If any component inside isn't ready yet, React shows the fallback in place of the **whole** wrapped part, then swaps in the real content when everything inside is ready:
+
+```tsx
+<Suspense fallback={<p>Loading…</p>}>
+  <SomethingThatMightWait />
+</Suspense>
+```
+
+A component "isn't ready" when it **suspends**. Three things can suspend in a Vite app: a component loaded with `lazy`, a component reading a promise with `use`, and data libraries built for it (TanStack Query's `useSuspenseQuery`). A `useEffect` fetch never suspends: the component renders straight away with its own loading flag, and Suspense doesn't know it's waiting.
+
+## Code splitting with lazy
+
+By default Vite bundles your whole app into one JavaScript file, so a visitor downloads the settings page even if they never open it. `lazy` loads a component's code the first time it renders:
+
+```tsx
+import { lazy, Suspense, useState } from "react";
+
+const Settings = lazy(() => import("./Settings"));
+
+export function App() {
+  const [show, setShow] = useState(false);
+  return (
+    <div>
+      <button type="button" onClick={() => setShow(true)}>Open settings</button>
+      {show && (
+        <Suspense fallback={<p>Loading settings…</p>}>
+          <Settings />
+        </Suspense>
+      )}
+    </div>
+  );
+}
+```
+
+`import("./Settings")` (with brackets) is a **dynamic import**: a function call that returns a promise for the module, so it runs only when called. `npm run build` now produces a separate file:
+
+```text
+dist/assets/Settings-BRjkT046.js    0.15 kB │ gzip:  0.15 kB
+dist/assets/index-BvYQWS9j.js     224.49 kB │ gzip: 70.18 kB
+```
+
+In the browser, the Settings file wasn't requested on page load. Clicking the button showed "Loading settings…", requested the file, then showed the panel. Two rules:
+
+- `lazy` expects the module's **default export** (`export default function Settings`). For a named export, write `lazy(() => import("./Settings").then((m) => ({ default: m.Settings })))`.
+- Call `lazy` at the **top level** of a module. Inside a component, every render creates a new component type, so React throws away the old one with its state and suspends again (the second exercise shows this).
+
+Split by **route** or by heavy, rarely used pieces (a chart library, a rich text editor, an admin panel). Splitting a 2 kB button only adds a request. Lesson 14 lazy-loads routes, and lesson 17 returns to bundle size.
+
+## Suspense for data with use
+
+The `use` API reads the value of a promise. While the promise is pending, the component suspends; when it resolves, React renders again and `use` returns the value. To see it clearly, use a fake API with a delay:
+
+```ts
+// api.ts
+export type User = { id: number; name: string };
+
+export function fetchUser(id: number): Promise<User> {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      if (id === 404) reject(new Error("User not found"));
+      else resolve({ id, name: ["Asha", "Ben", "Chen"][id % 3] });
+    }, 1000);
+  });
+}
+```
+
+The catch: React may render a suspended component many times, and every render must get the **same** promise. So keep promises in a cache, keyed by what they fetch:
+
+```ts
+// cache.ts
+const userCache = new Map<number, Promise<User>>();
+
+export function getUser(id: number) {
+  let promise = userCache.get(id);
+  if (!promise) {
+    promise = fetchUser(id);
+    userCache.set(id, promise);
+  }
+  return promise;
+}
+```
+
+```tsx
+import { use } from "react";
+
+export function UserName({ id }: { id: number }) {
+  const user = use(getUser(id));
+  return <h2>{user.name}</h2>;
+}
+
+// <Suspense fallback={<p>Loading user…</p>}><UserName id={1} /></Suspense>
+```
+
+"Loading user…" shows for a second, then "Ben". There's no `loading` flag and no effect, and `user` is never `undefined`, so the component only describes the finished state.
+
+<Callout type="warning" title="Never create the promise during render">
+`use(fetchUser(id))` looks simpler, but each render creates a new promise. React suspends, the promise resolves, React renders again, which starts **another** request, forever. In the sandbox it stayed on "Loading…" and sent a new request every second. In real apps the cache usually comes from a library (TanStack Query) or a framework (Next.js passes promises from the server). Lesson 12 covers more of `use`.
+</Callout>
+
+## Where to put boundaries
+
+Each `<Suspense>` waits only for the components inside it, so nesting boundaries reveals the page in steps. Here the user takes 1 second and their posts take 2:
+
+```tsx
+<Suspense fallback={<p>Loading profile…</p>}>
+  <UserName id={1} />
+  <Suspense fallback={<p>Loading posts…</p>}>
+    <Posts userId={1} />
+  </Suspense>
+</Suspense>
+```
+
+```text
+0.0s  Loading profile…
+1.0s  Ben | Loading posts…
+2.0s  Ben | Post by user 1
+```
+
+The outer boundary waits for `UserName` only; the inner one then covers the slower posts. Both requests started at once, so the posts arrived at 2 seconds, not 3. Put boundaries around parts that make sense to appear together, and avoid one spinner per tiny component, which makes the page jump around.
+
+One more behaviour to know: if content that is already on screen suspends again (say `id` changes to a user that isn't cached), React replaces it with the fallback again. Wrapping that update in a transition keeps the old content visible instead; that's `useTransition`, in lesson 12.
+
+## Error boundaries
+
+When a component throws while rendering, React removes the **whole** app from the screen, because a half-broken UI could show wrong data. An **error boundary** limits the damage: it catches errors from the components inside it and renders a fallback instead.
+
+Error boundaries are the one thing that still needs a **class component**. You don't need to know classes well: write this once and reuse it everywhere.
+
+```tsx
+// ErrorBoundary.tsx
+import { Component } from "react";
+import type { ErrorInfo, ReactNode } from "react";
+
+type Props = {
+  fallback: (error: Error, reset: () => void) => ReactNode;
+  children: ReactNode;
+};
+type State = { error: Error | null };
+
+export class ErrorBoundary extends Component<Props, State> {
+  state: State = { error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Caught by ErrorBoundary:", error.message, info.componentStack);
+  }
+
+  reset = () => this.setState({ error: null });
+
+  render() {
+    if (this.state.error) return this.props.fallback(this.state.error, this.reset);
+    return this.props.children;
+  }
+}
+```
+
+Reading it piece by piece: `state` and `this.setState` are the class version of `useState`. React calls `getDerivedStateFromError` when a child throws and stores the error; `render` then shows the fallback. `componentDidCatch` is the place to log to an error service (Sentry, in the production module). `reset` clears the error so the children render again.
+
+```tsx
+function BuggyCounter() {
+  const [count, setCount] = useState(0);
+  if (count === 3) throw new Error("Counter crashed at 3");
+  return <button onClick={() => setCount(count + 1)}>Count: {count}</button>;
+}
+
+<>
+  <ErrorBoundary fallback={(error, reset) => <p>{error.message} <button onClick={reset}>Reset</button></p>}>
+    <BuggyCounter />
+  </ErrorBoundary>
+  <p>Outside the boundary</p>
+</>
+```
+
+The third click shows "Counter crashed at 3" with a Reset button, and "Outside the boundary" stays on screen. Reset shows "Count: 0": the counter was removed and mounted fresh, so its state started over.
+
+An error boundary also catches a **rejected promise** read with `use`: wrap the Suspense part in it and `UserName id={404}` shows "User not found" instead of blanking the app.
+
+### What boundaries don't catch
+
+Boundaries catch errors thrown **while React renders** children. They don't catch:
+
+- errors in **event handlers**: a click handler that throws leaves the screen unchanged and logs "Uncaught Error" in the console;
+- **async code** such as `setTimeout` callbacks or an `await` in a handler;
+- errors in the boundary's own render.
+
+For those, use `try/catch` and put the error in state (the third exercise). If you don't want to maintain the class, the `react-error-boundary` package, which react.dev recommends, provides a ready-made `ErrorBoundary` component and a `useErrorBoundary` hook.
+
+## Retrying
+
+A "Try again" button calls `reset`, but with `use` that isn't enough: the cache still holds the **rejected** promise, so the child throws the same error at once. In the sandbox, clicking it changed nothing and sent no request. Remove the failed entry first:
+
+```tsx
+// cache.ts: export function forgetUser(id: number) { userCache.delete(id); }
+
+<ErrorBoundary
+  fallback={(error, reset) => (
+    <div role="alert">
+      <p>Something went wrong: {error.message}</p>
+      <button type="button" onClick={() => { forgetUser(id); reset(); }}>Try again</button>
+    </div>
+  )}
+>
+  <Suspense fallback={<p>Loading user…</p>}>
+    <UserName id={id} />
+  </Suspense>
+</ErrorBoundary>
+```
+
+Now "Try again" shows "Loading user…" and sends a fresh request. Put the error boundary **outside** the Suspense boundary, as here, so one error fallback covers both the waiting and the failing.
+
+<Exercise title="Predict the output">
+`UserName` takes 1 second and `Posts` takes 2. Both requests start immediately. What is on screen at 0.5s, 1.5s and 2.5s?
+
+```tsx
+<Suspense fallback={<p>Loading…</p>}>
+  <UserName id={2} />
+  <Posts userId={2} />
+</Suspense>
+```
+
+<Solution>
+"Loading…" at 0.5s **and** at 1.5s, then "Chen" and "Post by user 2" together at 2.5s. One boundary waits until everything inside is ready, so the user's name, though ready at 1 second, isn't shown alone. Wrap `Posts` in its own `<Suspense>` to show the name first.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the flashing panel">
+Every click on "bump" flashes "Loading panel…" before the panel comes back. Why, and how do you fix it?
+
+```tsx
+function Page() {
+  const [count, setCount] = useState(0);
+  const Panel = lazy(() => import("./Settings"));
+  return (
+    <div>
+      <button type="button" onClick={() => setCount(count + 1)}>bump {count}</button>
+      <Suspense fallback={<p>Loading panel…</p>}>
+        <Panel />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+<Solution>
+`lazy` runs on every render, so each render has a brand-new `Panel` component type. React unmounts the old one (losing any state inside it) and suspends while the new one loads. Declare it once, at the top level:
+
+```tsx
+const Panel = lazy(() => import("./Settings"));
+
+function Page() {
+  const [count, setCount] = useState(0);
+  return (
+    <div>
+      <button type="button" onClick={() => setCount(count + 1)}>bump {count}</button>
+      <Suspense fallback={<p>Loading panel…</p>}>
+        <Panel />
+      </Suspense>
+    </div>
+  );
+}
+```
+
+The Vite linter flags the original: "Cannot create components during render".
+</Solution>
+</Exercise>
+
+<Exercise title="Show an error from a handler">
+`saveNote("")` rejects with "Note is empty", but wrapping `SaveNote` in an error boundary shows nothing. Explain why, then make the component show the message under the button.
+
+```tsx
+async function saveNote(text: string) {
+  await new Promise((r) => setTimeout(r, 100));
+  if (text === "") throw new Error("Note is empty");
+}
+
+function SaveNote() {
+  return <button type="button" onClick={() => saveNote("")}>Save</button>;
+}
+```
+
+<Solution>
+The error happens in an event handler, after an `await`, not while React renders, so no boundary sees it. Catch it and keep it in state:
+
+```tsx
+function SaveNote() {
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    try {
+      setError(null);
+      await saveNote("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    }
+  }
+
+  return (
+    <div>
+      <button type="button" onClick={handleSave}>Save</button>
+      {error && <p role="alert">{error}</p>}
+    </div>
+  );
+}
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Reset the boundary when the input changes">
+A `<select>` switches `userId` between `404` and `1`. After the 404 error, picking user 1 still shows "User not found". Fix it without a "Try again" button.
+
+```tsx
+<ErrorBoundary fallback={(error) => <p role="alert">{error.message}</p>}>
+  <Suspense fallback={<p>Loading user…</p>}>
+    <UserName id={userId} />
+  </Suspense>
+</ErrorBoundary>
+```
+
+<Solution>
+The boundary keeps its `error` state when its children change. Give it a `key` that changes with the input, so React creates a fresh boundary (with no error) for each user:
+
+```tsx
+<ErrorBoundary key={userId} fallback={(error) => <p role="alert">{error.message}</p>}>
+  <Suspense fallback={<p>Loading user…</p>}>
+    <UserName id={userId} />
+  </Suspense>
+</ErrorBoundary>
+```
+
+Picking user 1 now shows "Loading user…", then "Ben". Switching back to 404 shows the error again at once, because the rejected promise is still cached.
+</Solution>
+</Exercise>

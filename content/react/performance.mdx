@@ -1,0 +1,386 @@
+---
+title: Performance and the React Compiler
+summary: "Find out why a component renders, remove wasted renders, let the React Compiler memoize for you, and load less code up front."
+order: 17
+takeaways:
+  - A component renders again when its own state changes or when its parent renders, even if the props are identical.
+  - The first fixes are structural, such as moving state down into a small component or passing slow parts as children, and they need no memo at all.
+  - The React Compiler adds memoization at build time, so unchanged children are skipped without memo, useMemo or useCallback in your code.
+  - The compiler skips components that break the Rules of React, and the linter tells you which ones.
+  - memo, useMemo and useCallback still matter for code without the compiler, for stable values that effects or libraries depend on, and for old codebases.
+  - useDeferredValue keeps typing responsive by rendering a slow list from a delayed copy of the value.
+  - lazy and dynamic import keep heavy code out of the first download, and you should measure the production build before and after.
+videos:
+  - title: "React Compiler Explained in 3 Minutes (Goodbye, re-renders)"
+    channel: "Better Stack"
+    duration: "3:32"
+    url: https://www.youtube.com/watch?v=40osg7LoShc
+  - title: "React Compiler is HERE 🔥 Delete useMemo, useCallback & memo?"
+    channel: "Thapa Technical"
+    duration: "13:48"
+    url: https://www.youtube.com/watch?v=PoIXXkmyT0I
+docs:
+  - title: "react.dev — React Compiler"
+    url: https://react.dev/learn/react-compiler
+  - title: "react.dev — React Compiler installation"
+    url: https://react.dev/learn/react-compiler/installation
+  - title: "react.dev — memo"
+    url: https://react.dev/reference/react/memo
+  - title: "react.dev — useDeferredValue"
+    url: https://react.dev/reference/react/useDeferredValue
+  - title: "react.dev — Profiler"
+    url: https://react.dev/reference/react/Profiler
+---
+
+"How would you optimize a slow React app?" is an interview classic, and most people answer "add `useMemo` and `useCallback` everywhere". That answer is out of date, and it is often wrong even when the app has no compiler. This lesson teaches the order that works in real jobs: **measure, fix the structure, let the compiler memoize, and only then reach for manual tools**. It also finishes the story started in lessons 7 and 10, where we promised that the compiler removes the need for `useMemo` and that bundle size comes back here.
+
+Written for React 19.3, Vite 8, `@vitejs/plugin-react` 6.1 and React Compiler 1.0, in the Vite + TypeScript app from lesson 1. All counts below were measured in a dev build with `StrictMode` removed, because `StrictMode` renders everything twice in development and would double every number.
+
+## Measure first
+
+Most React apps are fast enough. Optimizing a component nobody notices only adds code. So start from a symptom, such as typing that lags, a list that janks, or a page that takes seconds to load, and measure it.
+
+- **React DevTools Profiler** (lesson 1): click record, do the slow thing, stop. It shows which components rendered and how long each took. The setting "Highlight updates when components render" flashes a border around every component that renders, which makes wasted renders easy to spot.
+- **Browser Performance tab**: shows the whole picture, including work that is not React.
+- **`<Profiler>` component**: measures a subtree from code, so you can log or test it.
+
+Wrap a subtree as `<Profiler id="page" onRender={onRender}>`, and React calls `onRender(id, phase, actualDuration)` after each commit. It logged `page mount 7.4ms` on the first render and `page update 11.0ms` on later ones. `phase` is `"mount"` or `"update"`, and `actualDuration` is the time spent rendering that subtree.
+
+<Callout type="warning" title="Dev mode is slower than production">
+React in development does extra checks. Judge speed with `npm run build` and `npm run preview`, and use dev-mode numbers only to compare two versions of the same code.
+</Callout>
+
+## Why components render
+
+To **render** means React calls your component function to find out what the screen should look like. React then **commits** only the differences to the DOM. Rendering is usually cheap, and committing a real change is the expensive part. Two things start a render:
+
+1. The component's own state (or context it reads) changed.
+2. Its **parent rendered**. React renders all children again by default and does not check whether their props changed.
+
+The second rule surprises people. A tiny test shows it, with a counter in the parent and a child that never changes:
+
+```tsx
+function Child({ label }: { label: string }) {
+  count("Child"); // adds 1 to window.renders.Child each time the function runs
+  return <p>child: {label}</p>;
+}
+
+function Parent() {
+  const [clicks, setClicks] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setClicks(clicks + 1)}>clicks: {clicks}</button>
+      <Child label="static" />
+    </div>
+  );
+}
+```
+
+After 3 clicks, `Parent` had run 4 times (mount plus 3), and `Child` also ran 4 times without the compiler. The props never changed, and `Child` rendered anyway.
+
+A "wasted" render only costs the time to run the function and compare the result, and the DOM is untouched when nothing changed. That is why many wasted renders are harmless, and why you measure before fixing.
+
+## Fix the structure first
+
+The cheapest fix removes the render instead of caching it. No memo is needed, and it works with or without the compiler.
+
+### Move state down
+
+State that only one small part uses should live in that part. Here the color input changes on every keystroke, but `SlowTable` does not care:
+
+```tsx
+// The color state moved out of Page into this small component
+function ColorPicker() {
+  const [color, setColor] = useState("red");
+  return (
+    <div>
+      <input value={color} onChange={(e) => setColor(e.target.value)} />
+      <p style={{ color }}>Preview</p>
+    </div>
+  );
+}
+
+function Page() {
+  return (
+    <div>
+      <ColorPicker />
+      <SlowTable />
+    </div>
+  );
+}
+```
+
+When `Page` owned the state itself, typing "abc" ran `SlowTable` 4 times. After the move it ran once (compiler off). `Page` no longer has state, so it never re-renders after mount. This is lesson 4's "where should state live" applied to speed.
+
+### Pass slow parts as children
+
+If the state must stay in a wrapper that also holds slow content, pass the slow part in as `children`. JSX written by the *caller* is created once, so the wrapper re-rendering does not re-create it:
+
+```tsx
+function Counter({ children }: { children: ReactNode }) {
+  const [clicks, setClicks] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setClicks(clicks + 1)}>clicks: {clicks}</button>
+      {children}
+    </div>
+  );
+}
+
+function Page() {
+  return (
+    <Counter>
+      <ExpensiveTree />
+    </Counter>
+  );
+}
+```
+
+`Counter` re-rendered on every click, and `ExpensiveTree` ran once in total, still with the compiler off. React sees that the `children` element is the same object as last time and skips it.
+
+## The React Compiler
+
+Structure fixes cover many cases, but you cannot restructure everything. The **React Compiler** is a build-time tool that reads each component and hooks, works out which values depend on which inputs, and wraps results in caches. If the inputs are unchanged, it reuses the old result. It is the same idea as `memo`, `useMemo` and `useCallback`, applied automatically and everywhere.
+
+### Turn it on in Vite
+
+```bash
+npm install -D babel-plugin-react-compiler @rolldown/plugin-babel
+```
+
+```ts
+// vite.config.ts
+import babel from "@rolldown/plugin-babel";
+import react, { reactCompilerPreset } from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [react(), babel({ presets: [reactCompilerPreset()] })],
+});
+```
+
+Since `@vitejs/plugin-react` 6, Vite no longer runs Babel itself, so a separate Babel plugin carries the compiler. If you have an older setup with `react({ babel: { plugins: [...] } })`, that option was removed in version 6. Next.js has its own setting for the compiler, which the Next.js module covers.
+
+### What it does
+
+For a component like `Product({ product, onAdd })` that builds a label and returns `<button onClick={() => onAdd(product.name)}>`, the compiler emits (shortened):
+
+```js
+function Product(t0) {
+  const $ = _c(8); // a cache with 8 slots that lives as long as the component
+  const { product, onAdd } = t0;
+  // ...
+  let t3;
+  if ($[2] !== onAdd || $[3] !== product.name) {
+    t3 = () => onAdd(product.name); // re-created only when its inputs change
+    $[2] = onAdd;
+    $[3] = product.name;
+    $[4] = t3;
+  } else {
+    t3 = $[4];
+  }
+  // ...the JSX element is cached the same way
+}
+```
+
+Each cached value is checked against its inputs. When the parent re-renders `Product` with equal props, the cached JSX comes back and React skips the child's work. You write the plain version, and you get both the handler and the element memoized.
+
+### Same app, compiler off and on
+
+| Test (3 clicks on a parent counter) | Compiler off | Compiler on |
+| --- | --- | --- |
+| Plain `Child` renders | 4 | 1 |
+| `memo` child that gets `options={{ color: "red" }}` | 4 | 1 |
+| Slow child, `<Profiler>` update time | 8 to 11 ms | 0.0 to 0.1 ms |
+| Effect with `[options]` where `options = { room }` | 4 runs, then 5 | 1 run, then 2 |
+
+The compiler also made `Slow` render once instead of four times. The last row is worth a second look: an object created in the component body is a new object every render, so an effect that lists it as a dependency ran after every render without the compiler. With the compiler the object keeps its identity until `room` changes.
+
+<Callout type="warning" title="Do not build logic that needs the compiler">
+That effect result is a side effect of memoization, and not a promise. If a component is skipped by the compiler or someone turns it off, the effect starts running every render again. Keep correctness independent of it. Memoization is an optimization, and it may be absent.
+</Callout>
+
+### When the compiler skips a component
+
+The compiler only handles code that follows the **Rules of React**: components are pure during render, and props and state are never mutated. For code that breaks them it does not fail the build. It leaves that component as it was and moves on. We compiled three bad examples and read the compiler's report:
+
+```tsx
+let seen = 0;
+
+function B() {
+  const ref = useRef(0);
+  ref.current += 1; // reading and writing a ref during render
+  return <p>{ref.current}</p>;
+}
+
+function C({ n }: { n: number }) {
+  seen = n; // changing a variable outside the component during render
+  return <p>{seen}</p>;
+}
+```
+
+The report said `Cannot access refs during render` for `B` and `Cannot reassign variables declared outside of the component/hook` for `C`, and neither was optimized. The linter reports the same problems as warnings in your editor, using the compiler rules in `eslint-plugin-react-hooks` (the `recommended-latest` preset). **Treat these warnings as real bugs.** They break the rules for reasons beyond the compiler: render can run twice in `StrictMode`, and React may pause or restart a render.
+
+To skip one component on purpose, for example while you track down a bug, make `"use no memo"` the first statement of its function body. It is meant as a temporary measure.
+
+### Rules of thumb with the compiler
+
+Write plain components, and do not add `memo`, `useMemo` or `useCallback` to new code for speed. Leave existing ones alone unless you test the change, because removing them can change what the compiler produces. Turn on the lint rules, and check by profiling that an unchanged child does not show up after a parent update.
+
+## When memo, useMemo and useCallback still matter
+
+You will meet them in interviews, in older code, and in projects without the compiler. Here is how they work, and what we measured with the compiler off.
+
+**`memo(Component)`** skips a re-render when every prop is equal to last time (compared with `Object.is`):
+
+```tsx
+const Chart = memo(function Chart({ options }: { options: { color: string } }) {
+  return <p>chart {options.color}</p>;
+});
+```
+
+A `memo` child with a constant prop rendered once in 3 clicks. Passing `options={{ color: "red" }}` inline made it render 4 times, because the object is new every time and `memo` sees a changed prop. That is the number one reason `memo` "doesn't work". There are three fixes:
+
+```tsx
+// 1. Move the constant out of the component (best)
+const redOptions = { color: "red" };
+<Chart options={redOptions} />;
+
+// 2. Remember an object that depends on state
+const options = useMemo(() => ({ color }), [color]);
+
+// 3. Remember a function
+const onSelect = useCallback((id: number) => setSelected(id), []);
+```
+
+With the first fix, `Chart` rendered once in 3 clicks with the compiler off. `useMemo(fn, deps)` caches the *result* of `fn` until a dependency changes, and `useCallback(fn, deps)` is `useMemo(() => fn, deps)`: it caches the *function itself*.
+
+Things still worth knowing even with the compiler:
+
+- **Expensive calculations.** `useMemo` for sorting or filtering 10,000 rows is valid when you have measured. The compiler caches it too, but explicit code is clearer when it is the whole point.
+- **Stable values for effects and libraries.** Some libraries compare your values by identity. If a value must not change when an effect or a library depends on it, an explicit `useMemo` states that intent in code.
+- **Old React versions and codebases.** Compiler 1.0 can target React 17 and 18, but many projects have not adopted it yet.
+
+Do not memoize by default. Every `useMemo` costs a dependency check and makes the code harder to read, so there is nothing to gain when the calculation is cheap or the value changes on every render anyway.
+
+## Keep typing responsive with useDeferredValue
+
+Some work is slow by nature: filtering and drawing 3000 rows on every keystroke. Memoization does not help here, because the input value *did* change. The problem is that urgent work (showing the typed letter) waits for non-urgent work (the list).
+
+`useDeferredValue` gives you a copy of a value that lags behind. React updates the input first, then renders the list from the old value in the background, and **interrupts that render** if you type again:
+
+```tsx
+function Search() {
+  const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
+
+  return (
+    <div>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+      <List query={deferredQuery} />
+    </div>
+  );
+}
+```
+
+We typed `Item ` (5 characters, 30 ms apart) into a list of 3000 deliberately slow rows. Without `useDeferredValue`, each keystroke handler blocked for 459, 632, 600, 527 and 575 ms, because the list rendered before the browser could paint. With it, the same keystrokes took 4, 3, 2, 2 and 1 ms, and the list caught up afterwards. The total work is the same, but the input never freezes.
+
+Compare with the debounce from lesson 9: debounce waits for the user to stop typing before it starts working, and `useDeferredValue` starts at once and can be thrown away. For lists that are still too big, **virtualization** (libraries such as TanStack Virtual) renders only the rows on screen. It is the right tool for thousands of rows, and it is beyond this lesson.
+
+Also remember lesson 3's reminder about `key`: use a stable id such as `product.id`, never the array index for lists that can reorder, or React will rebuild rows that did not change.
+
+## Load less code
+
+Rendering speed is half of performance. The other half is how much JavaScript a visitor downloads before they see anything. Lesson 10 introduced `lazy`; here is what it buys. A dashboard imports a chart library that is only used after a button click. Production build sizes, with `vite build`:
+
+```text
+Static import (chart in the main bundle)
+  index.js        520.43 kB   gzip: 157.80 kB
+
+lazy(() => import("./SalesChart"))
+  index.js        222.40 kB   gzip:  69.77 kB   <- downloaded first
+  SalesChart.js   299.35 kB   gzip:  89.10 kB   <- downloaded when needed
+```
+
+The code change is lesson 10's `lazy` plus `Suspense` around the chart (see the last exercise).
+
+The first download dropped by more than half, from about 158 kB to 70 kB gzipped, and the chart code arrives on demand. Good places to split: each route (lesson 14), modals and panels, and heavy libraries such as charts, editors and maps. Also check what you import. A bundle analyzer such as `rollup-plugin-visualizer` shows what takes the space, and importing only the functions you need from a library (`import { debounce } from "lodash-es"`, not the whole package) keeps it smaller.
+
+<Exercise title="Predict the renders">
+The compiler is **off**. After three clicks on the first button, how many times does `Row` run, counting the first mount? What changes if you delete `useCallback` and write `const onSelect = (id: number) => console.log(id);`?
+
+```tsx
+const Row = memo(function Row({ onSelect }: { onSelect: (id: number) => void }) {
+  return <button onClick={() => onSelect(1)}>select</button>;
+});
+
+function List() {
+  const [clicks, setClicks] = useState(0);
+  const onSelect = useCallback((id: number) => console.log(id), []);
+  return (
+    <div>
+      <button onClick={() => setClicks(clicks + 1)}>clicks: {clicks}</button>
+      <Row onSelect={onSelect} />
+    </div>
+  );
+}
+```
+
+<Solution>
+Once. `useCallback` with an empty array returns the same function every render, so `memo` sees equal props and skips `Row` after mount. Without `useCallback`, `onSelect` is a new function each render, `memo` sees a changed prop, and `Row` renders 4 times. With the compiler on, it is 1 either way.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+This `memo` component re-renders every time `Dashboard` does (compiler off). Find the cause and fix it in two ways.
+
+```tsx
+const Chart = memo(function Chart({ options }: { options: { color: string } }) {
+  return <p>chart {options.color}</p>;
+});
+
+function Dashboard() {
+  const [clicks, setClicks] = useState(0);
+  return (
+    <div>
+      <button onClick={() => setClicks(clicks + 1)}>clicks: {clicks}</button>
+      <Chart options={{ color: "red" }} />
+    </div>
+  );
+}
+```
+
+<Solution>
+`{ color: "red" }` is a new object on every render, so `memo` sees a changed prop (4 renders in 3 clicks). Two fixes:
+
+```tsx
+// 1. A constant outside the component (1 render in 3 clicks)
+const redOptions = { color: "red" };
+<Chart options={redOptions} />;
+
+// 2. Pass a primitive, so there is no identity to compare
+const Chart = memo(function Chart({ color }: { color: string }) {
+  return <p>chart {color}</p>;
+});
+<Chart color="red" />;
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Split a heavy dependency">
+`Dashboard` statically imports `SalesChart`, which pulls in a big chart library, but the chart only shows after a button press. Make the library load only then, and say how to confirm it.
+
+<Solution>
+```tsx
+const SalesChart = lazy(() => import("./SalesChart")); // top level, never inside a component
+
+{show && (
+  <Suspense fallback={<p>Loading chart...</p>}>
+    <SalesChart />
+  </Suspense>
+)}
+```
+
+`SalesChart` needs a default export. Run `npm run build` before and after: one big `index.js` (520 kB) becomes a smaller `index.js` (222 kB) plus a separate `SalesChart` file (299 kB). In the Network tab the second file should appear only after you press the button.
+</Solution>
+</Exercise>

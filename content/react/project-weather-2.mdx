@@ -1,0 +1,342 @@
+---
+title: "Project: Weather App, Part 2"
+summary: "Finish the weather app's features: show the current weather and a 5-day forecast, switch between °C and °F without blanking the screen, and remember the last city with validated localStorage data."
+order: 22
+takeaways:
+  - A query that has not finished is in one of four states, so check isPending and isError first, and TypeScript then knows that data exists in the code below.
+  - Put every input of the request in the query key, so a new city or unit becomes a separate cache entry that is fetched and cached on its own.
+  - keepPreviousData shows the old result while the new one loads, which suits a unit switch but would show the wrong city's numbers on a city change.
+  - Giving a component a key that changes with the item, such as key={city.id}, makes React start a fresh component, which also resets what the query remembers.
+  - Validate saved settings with the same Zod schema you use for API data, and fall back to defaults when anything is wrong.
+videos: []
+docs:
+  - title: "TanStack Query — Placeholder Query Data"
+    url: https://tanstack.com/query/latest/docs/framework/react/guides/placeholder-query-data
+  - title: "MDN — Intl.DateTimeFormat"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat
+  - title: "MDN — Web Storage API"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API
+  - title: "Open-Meteo — Weather Forecast API"
+    url: https://open-meteo.com/en/docs
+---
+
+In Part 1 you built the search and the API layer. Now you use the second endpoint to show real weather, and you make the app pleasant to use: switching units without a blank flash, and remembering your city the next time you open it. Continue in the same project; this part assumes the files from Part 1 (`api.ts`, `queries.ts`, `format.ts`, `CitySearch.tsx`, `useDebouncedValue.ts` and `App.tsx`).
+
+## Where you are
+
+Part 1 ends with the search done. This part covers these requirements:
+
+- [ ] Choosing a city shows the current weather: description, temperature, feels like, humidity and wind
+- [ ] The weather area shows loading and error states, and a Try again button
+- [ ] A 5-day forecast with high, low and chance of rain
+- [ ] A °C/°F switch that refetches in the chosen unit
+- [ ] The last city and unit are saved in `localStorage`, and broken saved data never crashes the app
+
+## Stage 3: Show the current weather
+
+Add a second query hook, `useForecast(city, unit)`, to `src/queries.ts`. Think about the query key first: the request depends on the coordinates **and** the unit, so all three belong in the key (lesson 15). Then write `src/weatherCodes.ts` with `describeWeather(code)`, which turns Open-Meteo's weather code (a WMO number: 0 is clear sky, 61 is light rain, listed in the [forecast docs](https://open-meteo.com/en/docs)) into a `{ label, icon }`. A lookup object is enough, with a fallback for codes you did not list.
+
+Then write `CurrentWeather({ city, unit })`. It calls `useForecast` and handles every outcome: `isPending` shows "Loading weather for ...", `isError` shows the message and a Try again button, and success shows the heading, description, temperature, feels like, humidity and wind. Mark the emoji `aria-hidden`, because the text next to it says the same. Add `formatTemp` to `format.ts`. In `App`, render `CurrentWeather` with `unit="celsius"` when a city is chosen, instead of the line from Part 1.
+
+<Solution>
+
+```ts
+// src/queries.ts - add useForecast, and change the import line to
+import { getForecast, searchCities, type City, type Unit } from "./api";
+
+export function useForecast(city: City, unit: Unit) {
+  return useQuery({
+    queryKey: ["forecast", city.latitude, city.longitude, unit],
+    queryFn: ({ signal }) => getForecast(city, unit, signal),
+    staleTime: FIVE_MINUTES,
+  });
+}
+```
+
+```ts
+// src/format.ts - add
+export const formatTemp = (value: number) => `${Math.round(value)}°`;
+```
+
+```ts
+// src/weatherCodes.ts
+// WMO weather codes used by Open-Meteo: https://open-meteo.com/en/docs
+const CODES: Record<number, { label: string; icon: string }> = {
+  0: { label: "Clear sky", icon: "☀️" },
+  1: { label: "Mostly clear", icon: "🌤️" },
+  2: { label: "Partly cloudy", icon: "⛅" },
+  3: { label: "Overcast", icon: "☁️" },
+  45: { label: "Fog", icon: "🌫️" },
+  51: { label: "Light drizzle", icon: "🌦️" },
+  61: { label: "Light rain", icon: "🌧️" },
+  63: { label: "Rain", icon: "🌧️" },
+  65: { label: "Heavy rain", icon: "🌧️" },
+  71: { label: "Light snow", icon: "🌨️" },
+  75: { label: "Heavy snow", icon: "❄️" },
+  80: { label: "Rain showers", icon: "🌦️" },
+  95: { label: "Thunderstorm", icon: "⛈️" },
+};
+
+export function describeWeather(code: number) {
+  return CODES[code] ?? { label: "Unknown", icon: "❓" };
+}
+```
+
+```tsx
+// src/CurrentWeather.tsx
+import type { City, Unit } from "./api";
+import { cityLabel, formatTemp } from "./format";
+import { useForecast } from "./queries";
+import { describeWeather } from "./weatherCodes";
+
+type Props = { city: City; unit: Unit };
+
+export function CurrentWeather({ city, unit }: Props) {
+  const { data, isPending, isError, error, refetch } = useForecast(city, unit);
+
+  if (isPending) return <p role="status">Loading weather for {city.name}…</p>;
+  if (isError) {
+    return (
+      <p role="alert">
+        Could not load the weather: {error.message}{" "}
+        <button onClick={() => refetch()}>Try again</button>
+      </p>
+    );
+  }
+
+  const { current } = data;
+  const { label, icon } = describeWeather(current.code);
+  return (
+    <section aria-label={`Weather in ${city.name}`}>
+      <h2>{cityLabel(city)}</h2>
+      <p>
+        <span aria-hidden="true">{icon}</span> {label}
+      </p>
+      <p>{formatTemp(current.temperature)}</p>
+      <p>Feels like {formatTemp(current.feelsLike)}</p>
+      <p>Humidity {current.humidity}%</p>
+      <p>Wind {Math.round(current.windSpeed)} km/h</p>
+    </section>
+  );
+}
+```
+
+```tsx
+// src/App.tsx - the changed lines
+import { CurrentWeather } from "./CurrentWeather";
+
+{city ? (
+  <CurrentWeather city={city} unit="celsius" />
+) : (
+  <p>Search for a city to see its weather.</p>
+)}
+```
+
+The checks after `isPending` and `isError` narrow the type: below them TypeScript knows `data` is defined, so there is no `data?.` anywhere. A weather-code table is data, not logic, so a plain object reads better here than a long `switch`. In the sandbox, searching for Berlin and choosing the first result showed "Overcast, 10°, feels like 7°, humidity 77%".
+
+</Solution>
+
+## Stage 4: Forecast and units
+
+Three changes, and the last one hides a trap.
+
+1. **Daily forecast.** Write `DailyForecast({ days })`, a list with one item per day: weekday, icon and description, high / low, and the chance of rain when it is not `null`. Add `formatDay(date)` to `format.ts`. The API gives `"2026-10-20"`, a date with no time zone, and `new Date("2026-10-20")` means midnight **UTC**, which is still the day before for a visitor west of Greenwich. Format it with `Intl.DateTimeFormat` and `timeZone: "UTC"` to get the same weekday for everyone.
+2. **Unit switch.** Write `UnitToggle` like the filter buttons in the todo app: two buttons in a `role="group"`, `aria-pressed` on the active one. Keep `unit` in `useState` in `App` and pass it down.
+3. **No blank flash.** When the unit changes, the query key changes, so `isPending` is `true` again and the weather disappears until the new numbers arrive. TanStack Query's `placeholderData: keepPreviousData` keeps showing the old result meanwhile, and `isPlaceholderData` tells you it is not the final answer. Add it to `useForecast`, and show "Updating…" in `CurrentWeather` while `isPlaceholderData` is true.
+
+Before you open the solution, predict what happens with `keepPreviousData` when the user searches for "Paris" **while Berlin is on screen** and picks it. Then try it.
+
+<Solution>
+
+```ts
+// src/format.ts - add
+// "2026-10-20" is a calendar date with no time zone. Reading and formatting it as UTC
+// keeps the weekday the same for every visitor.
+export function formatDay(date: string) {
+  return new Intl.DateTimeFormat("en", { weekday: "short", timeZone: "UTC" }).format(
+    new Date(date),
+  );
+}
+```
+
+```tsx
+// src/DailyForecast.tsx
+import type { Forecast } from "./api";
+import { formatDay, formatTemp } from "./format";
+import { describeWeather } from "./weatherCodes";
+
+export function DailyForecast({ days }: { days: Forecast["days"] }) {
+  return (
+    <ul aria-label="5-day forecast">
+      {days.map((day) => {
+        const { label, icon } = describeWeather(day.code);
+        return (
+          <li key={day.date}>
+            <strong>{formatDay(day.date)}</strong> <span aria-hidden="true">{icon}</span>{" "}
+            {label}, {formatTemp(day.max)} / {formatTemp(day.min)}
+            {day.rainChance !== null && `, ${day.rainChance}% rain`}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+```
+
+```tsx
+// src/UnitToggle.tsx
+import type { Unit } from "./api";
+
+const UNITS: { value: Unit; label: string }[] = [
+  { value: "celsius", label: "°C" },
+  { value: "fahrenheit", label: "°F" },
+];
+
+type Props = { unit: Unit; onChange: (unit: Unit) => void };
+
+export function UnitToggle({ unit, onChange }: Props) {
+  return (
+    <div role="group" aria-label="Temperature unit">
+      {UNITS.map(({ value, label }) => (
+        <button key={value} aria-pressed={unit === value} onClick={() => onChange(value)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+```
+
+```tsx
+// src/queries.ts - the changed lines
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+
+// inside useForecast, after staleTime:
+    placeholderData: keepPreviousData,
+```
+
+```tsx
+// src/CurrentWeather.tsx - the changed lines
+import { DailyForecast } from "./DailyForecast";
+
+const { data, isPending, isError, error, refetch, isPlaceholderData } = useForecast(city, unit);
+
+<section aria-label={`Weather in ${city.name}`} aria-busy={isPlaceholderData}>
+  {/* ...the same paragraphs as before, then: */}
+  {isPlaceholderData && <p role="status">Updating…</p>}
+  <DailyForecast days={data.days} />
+</section>
+```
+
+```tsx
+// src/App.tsx - the changed lines
+import { useState } from "react";
+import type { City, Unit } from "./api";
+import { UnitToggle } from "./UnitToggle";
+
+const [unit, setUnit] = useState<Unit>("celsius");
+
+<UnitToggle unit={unit} onChange={setUnit} />
+{city ? (
+  <CurrentWeather key={city.id} city={city} unit={unit} />
+) : (
+  <p>Search for a city to see its weather.</p>
+)}
+```
+
+**The trap:** `keepPreviousData` keeps the previous result for _any_ key change, not only for the unit. Without `key={city.id}`, picking Paris while Berlin is on screen showed the heading "Paris" above Berlin's temperatures, with "Updating…" beside them, until Paris's data arrived. The heading comes from the new `city` prop, and the numbers from the old cache entry, so the screen lies for a moment. Giving `CurrentWeather` a `key` that changes with the city makes React throw away the old component and start a new one, which has no previous data to keep, so it shows "Loading weather for Paris…". A unit switch keeps the same `key`, so it still keeps the old numbers. Part 3 has a test for this.
+
+</Solution>
+
+## Stage 5: Remember the last city
+
+Save the city and the unit in `localStorage`, following the todo app's Stage 5. Create `src/storage.ts` with `loadSettings()` and `saveSettings(settings)`, under a versioned key such as `weather-v1`. Two rules apply again: saved data is **untrusted**, and storage can throw. This time you already have a validation tool: reuse `CitySchema` from `api.ts` and build a Zod schema for the whole settings object (`city` can be `null`, `unit` is one of the two units). `loadSettings` parses the saved JSON and falls back to the defaults (no city, Celsius) on any error. In `App`, keep `city` and `unit` together in one `useState(loadSettings)`, which reads storage once, and save in an effect whenever the settings change.
+
+<Solution>
+
+```ts
+// src/storage.ts
+import { z } from "zod";
+import { CitySchema } from "./api";
+
+const KEY = "weather-v1";
+
+const SettingsSchema = z.object({
+  city: CitySchema.nullable(),
+  unit: z.enum(["celsius", "fahrenheit"]),
+});
+export type Settings = z.infer<typeof SettingsSchema>;
+
+const DEFAULTS: Settings = { city: null, unit: "celsius" };
+
+// Saved data is untrusted: parse it, and fall back to the defaults if anything is off.
+export function loadSettings(): Settings {
+  try {
+    return SettingsSchema.parse(JSON.parse(localStorage.getItem(KEY) ?? "null"));
+  } catch {
+    return DEFAULTS;
+  }
+}
+
+export function saveSettings(settings: Settings) {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(settings));
+  } catch {
+    // storage full or blocked: the app keeps working without saving
+  }
+}
+```
+
+```tsx
+// src/App.tsx
+import { useEffect, useState } from "react";
+import { CitySearch } from "./CitySearch";
+import { CurrentWeather } from "./CurrentWeather";
+import { loadSettings, saveSettings } from "./storage";
+import { UnitToggle } from "./UnitToggle";
+
+export default function App() {
+  const [settings, setSettings] = useState(loadSettings);
+  const { city, unit } = settings;
+
+  useEffect(() => saveSettings(settings), [settings]);
+
+  return (
+    <main>
+      <h1>Weather</h1>
+      <CitySearch onSelect={(city) => setSettings((s) => ({ ...s, city }))} />
+      <UnitToggle unit={unit} onChange={(unit) => setSettings((s) => ({ ...s, unit }))} />
+      {city ? (
+        <CurrentWeather key={city.id} city={city} unit={unit} />
+      ) : (
+        <p>Search for a city to see its weather.</p>
+      )}
+    </main>
+  );
+}
+```
+
+`useState(loadSettings)` passes the function itself, so React calls it once, on the first render, and not on every render. One schema now checks both the API's answer and the saved data, so a city that was saved by an older version of the app, or edited by hand to `{"name": 42}`, is rejected in the same way. The saved city is complete (name, coordinates, country), so on the next visit the weather loads immediately, with no search. In the sandbox, choosing Berlin, switching to °F and reloading brought back "Berlin" with 49°.
+
+</Solution>
+
+## Stretch goals and checking your work
+
+Once everything works, try one or more of these:
+
+- **Recent cities:** remember the last five cities picked and show them as buttons under the search (a list in the settings object, and a new version of the storage key).
+- **Hourly chart:** request `hourly=temperature_2m` and draw the next 24 hours with a chart library such as Recharts.
+- **Use my location:** a button that calls `navigator.geolocation.getCurrentPosition` and passes the coordinates to `useForecast`. Handle the case where the user says no.
+- **Day and night icons:** ask for `is_day` in the `current` parameters, and show a moon instead of a sun at night.
+- **Refresh on focus:** TanStack Query already refetches stale data when the tab regains focus. Lower `staleTime` to 10 seconds and watch it happen in the Network tab.
+- **Tailwind and shadcn/ui:** restyle the app with lesson 13. The tests in Part 3 find elements by role and label, so they should still pass.
+
+Before you move on, run every check by hand: search, pick a city, switch units, reload, and try the offline case from Part 1. Then run:
+
+```bash
+npx tsc -b
+npm run lint
+npm run build
+```
+
+All three should finish without errors. In Part 3 you add the tests that prove all of this keeps working.

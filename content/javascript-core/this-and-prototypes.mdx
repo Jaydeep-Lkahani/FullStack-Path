@@ -1,0 +1,331 @@
+---
+title: this, Prototypes & Classes
+summary: How `this` is decided at call time, how objects inherit through the prototype chain, and how class syntax sits on top of it all.
+order: 3
+takeaways:
+  - this is set by HOW a function is called, not where it is defined (arrow functions are the exception - they inherit this lexically).
+  - The four rules in priority order are new, explicit (call/apply/bind), implicit (obj.method()), and default (undefined in strict mode).
+  - Every object has a hidden prototype link; property lookup walks that prototype chain until it finds the key or reaches null.
+  - class is syntactic sugar over prototypes - methods live on Class.prototype and are shared by all instances.
+  - Prefer composition and plain functions; reach for classes when you genuinely need instances with shared behaviour.
+videos:
+  - title: "Javascript this keyword explained"
+    channel: "techsith"
+    duration: "20:17"
+    url: https://www.youtube.com/watch?v=NV9sHLX-jZU
+  - title: "Visually Understanding JavaScript Prototypes"
+    channel: "Steve Griffith - Prof3ssorSt3v3"
+    duration: "14:57"
+    url: https://www.youtube.com/watch?v=01jVgCK-HX4
+docs:
+  - title: "MDN: this"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/this
+  - title: "MDN: Inheritance and the prototype chain"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Inheritance_and_the_prototype_chain
+  - title: "MDN: Classes"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Classes
+---
+
+`this` is notorious because it's decided **when a function is called**, not where it's written. Prototypes are how JavaScript does inheritance. Together they explain how objects, methods and classes work — and they're interview staples.
+
+## What is `this`?
+
+Inside a function, `this` refers to "the object that is calling me". Four rules determine it. Check them in this priority order.
+
+### 1. `new` binding
+
+Calling a function with `new` creates a fresh object and sets `this` to it.
+
+```js
+function User(name) {
+  this.name = name;
+}
+const u = new User("Ada");
+console.log(u.name);   // "Ada"
+```
+
+### 2. Explicit binding: `call`, `apply`, `bind`
+
+You can set `this` yourself:
+
+```js
+function intro(greeting, punctuation) {
+  return `${greeting}, I'm ${this.name}${punctuation}`;
+}
+const ada = { name: "Ada" };
+
+intro.call(ada, "Hi", "!");        // arguments listed
+intro.apply(ada, ["Hi", "!"]);     // arguments as an array
+const boundIntro = intro.bind(ada, "Hello");   // returns a NEW function with this fixed
+boundIntro("?");                   // "Hello, I'm Ada?"
+```
+
+### 3. Implicit binding: method calls
+
+When you call `obj.method()`, `this` is the object **before the dot**.
+
+```js
+const counter = {
+  count: 0,
+  inc() {
+    this.count++;
+    return this.count;
+  },
+};
+counter.inc();   // this === counter → 1
+```
+
+### 4. Default binding
+
+A plain call like `fn()` has no owner. In strict mode (modules, classes, and anywhere with `"use strict"`) `this` is `undefined`; in sloppy mode it's the global object.
+
+```js
+function show() { console.log(this); }
+show();   // undefined (strict) or window/globalThis (sloppy)
+```
+
+### Losing `this`
+
+The most common bug: detaching a method from its object.
+
+```js
+const counter = {
+  count: 0,
+  inc() { this.count++; },
+};
+
+const { inc } = counter;
+inc();                       // TypeError / NaN — called with no owner
+
+setTimeout(counter.inc, 100);   // same problem: the callback is called as a plain function
+
+// Fixes
+setTimeout(() => counter.inc(), 100);        // wrap in an arrow
+setTimeout(counter.inc.bind(counter), 100);  // or bind
+```
+
+React class components used to need `this.handleClick = this.handleClick.bind(this)` for exactly this reason.
+
+### Arrow functions and `this`
+
+Arrow functions **do not have their own `this`**. They use the `this` from the surrounding scope at the time they're **defined**, and `call`/`bind` can't change it.
+
+```js
+const timer = {
+  seconds: 0,
+  start() {
+    setInterval(() => {
+      this.seconds++;          // `this` is the surrounding start() call → timer
+    }, 1000);
+  },
+};
+```
+
+That makes arrows ideal for callbacks inside methods — and a poor choice for object methods themselves:
+
+```js
+const bad = {
+  name: "bad",
+  hello: () => console.log(this.name),   // `this` is NOT bad; it's the outer scope's this
+};
+```
+
+### The precedence in one picture
+
+```text
+new Foo()            → this = the new object
+fn.call(obj) / bind  → this = obj
+obj.fn()             → this = obj
+fn()                 → this = undefined (strict) / global (sloppy)
+() => {}             → this = whatever it was where the arrow was written
+```
+
+## Prototypes
+
+JavaScript objects can **inherit** from other objects. Each object has an internal link, `[[Prototype]]`, pointing to another object (or `null`). You can read it with `Object.getPrototypeOf(obj)`.
+
+```js
+const animal = {
+  eats: true,
+  describe() { return `${this.name} eats: ${this.eats}`; },
+};
+
+const dog = Object.create(animal);   // dog's prototype is `animal`
+dog.name = "Rex";
+
+dog.describe();   // "Rex eats: true"
+dog.eats;         // true — not on dog, found on its prototype
+```
+
+### The prototype chain
+
+When you read a property, the engine checks the object itself, then its prototype, then the prototype's prototype… until it finds the key or hits `null`, ending the chain.
+
+```text
+dog ──▶ animal ──▶ Object.prototype ──▶ null
+```
+
+```js
+dog.hasOwnProperty("name");    // true  (own property)
+dog.hasOwnProperty("eats");    // false (inherited)
+Object.hasOwn(dog, "name");    // true  (modern, preferred)
+"eats" in dog;                 // true  (own OR inherited)
+dog.toString();                // inherited all the way from Object.prototype
+```
+
+**Writes** don't walk the chain: `dog.eats = false` creates an own property on `dog` that shadows the inherited one.
+
+### Constructor functions and `prototype`
+
+Before classes, you built instances like this:
+
+```js
+function Person(name) {
+  this.name = name;               // per-instance data
+}
+Person.prototype.greet = function () {   // shared method, stored once
+  return `Hi, I'm ${this.name}`;
+};
+
+const a = new Person("Ada");
+const b = new Person("Grace");
+a.greet === b.greet;              // true — one shared function
+Object.getPrototypeOf(a) === Person.prototype;   // true
+```
+
+`new Person()` does four things: creates an empty object, links its `[[Prototype]]` to `Person.prototype`, runs the function with `this` set to the new object, and returns the object.
+
+Note the two different things named "prototype": **`Person.prototype`** is a property on constructor functions (the object that instances will inherit from), while **`[[Prototype]]`** (accessed with `Object.getPrototypeOf`, historically `__proto__`) is the hidden link on every object.
+
+### Inheritance with prototypes
+
+```js
+function Student(name, school) {
+  Person.call(this, name);                         // reuse the parent constructor
+  this.school = school;
+}
+Student.prototype = Object.create(Person.prototype);   // link the chain
+Student.prototype.constructor = Student;
+
+Student.prototype.study = function () { return `${this.name} studies at ${this.school}`; };
+
+const s = new Student("Linus", "Helsinki");
+s.greet();   // inherited from Person.prototype
+s.study();
+```
+
+## Classes
+
+ES6 `class` syntax wraps all of the above in a cleaner form. It is **syntactic sugar**: classes are still functions, and methods still live on the prototype.
+
+```js
+class Person {
+  #secret = "hidden";                 // private field (truly private)
+
+  constructor(name) {
+    this.name = name;
+  }
+
+  greet() {                           // goes on Person.prototype
+    return `Hi, I'm ${this.name}`;
+  }
+
+  get shout() {                       // getter
+    return this.name.toUpperCase();
+  }
+
+  static create(name) {               // static: called on the class itself
+    return new Person(name);
+  }
+}
+
+class Student extends Person {
+  constructor(name, school) {
+    super(name);                      // required before using `this`
+    this.school = school;
+  }
+
+  greet() {                           // override and extend
+    return `${super.greet()} and I study at ${this.school}`;
+  }
+}
+
+const s = new Student("Ada", "MIT");
+s.greet();                            // "Hi, I'm Ada and I study at MIT"
+s instanceof Person;                  // true
+typeof Person;                        // "function"
+```
+
+Class gotchas:
+
+- Calling a class without `new` throws a `TypeError`.
+- Class bodies are always strict mode.
+- Methods are **not** bound; passing `s.greet` as a callback loses `this` (see above). A class field with an arrow function (`greet = () => ...`) creates a per-instance bound method at the cost of one function per instance.
+
+<Callout type="tip" title="Do you need a class?">
+Modern React and much Node code rely on functions and plain objects. Use a class when you need many instances sharing behaviour (an `Error` subclass, a data structure, a service with state). For everything else, functions and closures are simpler.
+</Callout>
+
+<Exercise title="Predict this">
+```js
+const obj = {
+  name: "obj",
+  regular() { return this.name; },
+  arrow: () => typeof this,
+  delayed() { return [1].map(() => this.name); },
+};
+
+const f = obj.regular;
+console.log(obj.regular());
+console.log(f.call({ name: "other" }));
+console.log(obj.delayed());
+```
+
+<Solution>
+`"obj"` (implicit binding). `"other"` (explicit binding overrides — `f` is just the function). `["obj"]` — the arrow function inside `delayed` inherits `this` from `delayed`, which was called as `obj.delayed()`. (`obj.arrow()` would not refer to `obj`.)
+</Solution>
+</Exercise>
+
+<Exercise title="Implement bind">
+Write `myBind(fn, context, ...preset)` that behaves like `Function.prototype.bind`.
+
+<Solution>
+```js
+function myBind(fn, context, ...preset) {
+  return function (...args) {
+    return fn.apply(context, [...preset, ...args]);
+  };
+}
+
+function add(a, b) { return this.base + a + b; }
+const add10 = myBind(add, { base: 10 }, 1);
+add10(2);   // 13
+```
+(The real `bind` also supports `new`; this covers the interview-sized version.)
+</Solution>
+</Exercise>
+
+<Exercise title="Build an inheritance chain">
+Create `Shape` with a method `area()` returning `0` and `describe()` returning `` `${this.constructor.name} with area ${this.area()}` ``. Extend it with `Circle` (radius) and `Rectangle` (width, height) overriding `area`. Then confirm using `Object.getPrototypeOf` that `Circle.prototype`'s prototype is `Shape.prototype`.
+
+<Solution>
+```js
+class Shape {
+  area() { return 0; }
+  describe() { return `${this.constructor.name} with area ${this.area().toFixed(2)}`; }
+}
+class Circle extends Shape {
+  constructor(r) { super(); this.r = r; }
+  area() { return Math.PI * this.r ** 2; }
+}
+class Rectangle extends Shape {
+  constructor(w, h) { super(); this.w = w; this.h = h; }
+  area() { return this.w * this.h; }
+}
+
+new Circle(2).describe();        // "Circle with area 12.57"
+new Rectangle(2, 3).describe();  // "Rectangle with area 6.00"
+Object.getPrototypeOf(Circle.prototype) === Shape.prototype;   // true
+```
+</Solution>
+</Exercise>

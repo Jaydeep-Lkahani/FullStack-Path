@@ -1,0 +1,300 @@
+---
+title: Promises & async/await
+summary: Handle asynchronous work cleanly — callbacks, Promises, chaining, async/await, error handling and running tasks in parallel.
+order: 2
+takeaways:
+  - A Promise is an object representing a future value; it is pending, then fulfilled or rejected, and settles only once.
+  - .then/.catch/.finally chain, and each .then returns a new Promise so values and errors flow down the chain.
+  - async functions always return a Promise; await pauses only that function until the Promise settles.
+  - Handle errors with try/catch around await (or .catch); an unhandled rejection is a bug.
+  - Use Promise.all for independent parallel work - awaiting in a loop makes it sequential.
+videos:
+  - title: "Asynchronous JavaScript in ~10 Minutes - Callbacks, Promises, and Async/Await"
+    channel: "James Q Quick"
+    duration: "13:55"
+    url: https://www.youtube.com/watch?v=670f71LTWpM
+  - title: "Async JS Crash Course - Callbacks, Promises, Async Await"
+    channel: "Traversy Media"
+    duration: "24:30"
+    url: https://www.youtube.com/watch?v=PoRJizFvM7s
+docs:
+  - title: "MDN: Using promises"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Using_promises
+  - title: "MDN: async function"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/async_function
+  - title: "MDN: Promise.all()"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all
+---
+
+JavaScript is single threaded but constantly waits — for network responses, timers, files, databases. **Asynchronous programming** lets the program keep working while it waits. Promises and `async/await` are how modern code expresses that.
+
+## From callbacks to promises
+
+The original approach was **callbacks**: pass a function to be called when the work finishes.
+
+```js
+setTimeout(() => console.log("1 second later"), 1000);
+
+getUser(1, (err, user) => {
+  if (err) return handle(err);
+  getOrders(user.id, (err, orders) => {
+    if (err) return handle(err);
+    getItems(orders[0].id, (err, items) => {
+      // "callback hell": deep nesting, repeated error handling
+    });
+  });
+});
+```
+
+Callbacks work, but nesting and error handling get ugly, and you give up control of *when* and *how often* your callback is called. **Promises** fix this.
+
+## Promises
+
+A **Promise** is an object that represents a value that isn't available yet. It's always in one of three states:
+
+```text
+pending ──▶ fulfilled (with a value)
+        └─▶ rejected  (with a reason/error)
+```
+
+Once settled, a Promise never changes state.
+
+### Creating promises
+
+You will mostly *consume* promises, but creating one shows how they work:
+
+```js
+function wait(ms) {
+  return new Promise((resolve, reject) => {
+    if (ms < 0) reject(new Error("ms must be positive"));
+    setTimeout(() => resolve(`waited ${ms}ms`), ms);
+  });
+}
+```
+
+`resolve(value)` fulfills; `reject(error)` rejects. Always reject with an `Error` object so you get a stack trace.
+
+### Consuming with `.then`, `.catch`, `.finally`
+
+```js
+wait(500)
+  .then((message) => {
+    console.log(message);          // "waited 500ms"
+    return message.length;         // the returned value feeds the next .then
+  })
+  .then((length) => console.log(length))
+  .catch((error) => console.error("failed:", error.message))   // handles ANY earlier rejection
+  .finally(() => console.log("always runs"));                  // cleanup
+```
+
+Key behaviours:
+
+- Every `.then` returns a **new promise**, enabling chaining.
+- Returning a **promise** from `.then` makes the chain wait for it (flattening) — that's how you sequence async steps without nesting.
+- A thrown error or rejected promise skips ahead to the next `.catch`.
+- `.then` callbacks always run **asynchronously**, as microtasks (see the Event Loop lesson).
+
+```js
+fetchUser(1)
+  .then((user) => fetchOrders(user.id))       // returns a promise → chain waits
+  .then((orders) => fetchItems(orders[0].id))
+  .then((items) => console.log(items))
+  .catch(handleError);                        // one place for all errors
+```
+
+## async / await
+
+`async/await` is syntax that makes promise code **read like synchronous code**. Under the hood it is still promises.
+
+```js
+async function loadDashboard(userId) {
+  const user = await fetchUser(userId);          // pause here until the promise settles
+  const orders = await fetchOrders(user.id);
+  return { user, orders };                       // wrapped in a promise automatically
+}
+
+loadDashboard(1).then(console.log);
+```
+
+The rules:
+
+1. An `async` function **always returns a Promise** (returning a value resolves it; throwing rejects it).
+2. `await` can only be used inside an `async` function (or at the top level of an ES module).
+3. `await` pauses **only that function**; the rest of the program keeps running.
+4. `await somePromise` evaluates to the fulfilled value, or **throws** if rejected.
+
+```js
+const f = async () => 42;
+f();           // Promise { 42 } — not 42
+await f();     // 42
+```
+
+### Error handling
+
+Use `try/catch/finally` with `await`:
+
+```js
+async function getUser(id) {
+  try {
+    const response = await fetch(`/api/users/${id}`);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);   // fetch does NOT reject on 404/500!
+    }
+    return await response.json();
+  } catch (error) {
+    console.error("Could not load user:", error);
+    throw error;                                    // re-throw if the caller should know
+  } finally {
+    hideSpinner();
+  }
+}
+```
+
+<Callout type="warning" title="Unhandled rejections">
+A rejected promise nobody handles triggers an "unhandled rejection" — in Node it can crash the process. Always `await` inside `try/catch`, attach `.catch`, or let the error propagate to a caller that handles it.
+</Callout>
+
+`return await` vs `return`: inside `try/catch`, you need `return await promise` for the `catch` to see a rejection. Outside `try`, plain `return promise` is fine.
+
+## Running work in parallel
+
+`await` in a loop runs things **one after another**. If the tasks are independent, start them together:
+
+```js
+// Sequential: ~3 seconds if each takes 1s
+const a = await fetchA();
+const b = await fetchB();
+const c = await fetchC();
+
+// Parallel: ~1 second
+const [a2, b2, c2] = await Promise.all([fetchA(), fetchB(), fetchC()]);
+```
+
+| Combinator              | Resolves when…                       | Rejects when…               |
+| ----------------------- | ------------------------------------ | --------------------------- |
+| `Promise.all`           | **all** fulfill (array of values)    | **any** rejects (fast fail) |
+| `Promise.allSettled`    | **all** settle (status objects)      | never                       |
+| `Promise.race`          | **first** settles                    | first one rejects           |
+| `Promise.any`           | **first fulfills**                   | all reject (`AggregateError`) |
+
+```js
+const results = await Promise.allSettled([fetchA(), fetchB()]);
+// [{ status: "fulfilled", value: ... }, { status: "rejected", reason: Error }]
+
+// Timeout pattern
+const withTimeout = (promise, ms) =>
+  Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))]);
+```
+
+Processing an array asynchronously:
+
+```js
+// Parallel: map creates the promises, Promise.all waits
+const users = await Promise.all(ids.map((id) => fetchUser(id)));
+
+// Sequential: for...of with await (order matters or you must limit load)
+for (const id of ids) {
+  await processOne(id);
+}
+
+// Pitfall: forEach does NOT wait for async callbacks
+ids.forEach(async (id) => await processOne(id));   // returns immediately!
+```
+
+## Common patterns
+
+**Retry with backoff**
+
+```js
+async function retry(fn, attempts = 3, delay = 500) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (i === attempts - 1) throw error;
+      await new Promise((r) => setTimeout(r, delay * 2 ** i));
+    }
+  }
+}
+```
+
+**Promisifying a callback API**
+
+```js
+const readFileAsync = (path) =>
+  new Promise((resolve, reject) => {
+    fs.readFile(path, "utf8", (err, data) => (err ? reject(err) : resolve(data)));
+  });
+```
+
+(Node also provides `util.promisify` and `fs/promises`.)
+
+**Cancellation**: use `AbortController` with `fetch` (covered in the Fetch lesson).
+
+<Exercise title="Promisify and sequence">
+Write `delay(ms, value)` returning a promise that resolves with `value` after `ms`. Then use `async/await` to log `"a"`, `"b"`, `"c"` one second apart, and then use `Promise.all` to resolve three delays of 1s each in about one second total.
+
+<Solution>
+```js
+const delay = (ms, value) => new Promise((resolve) => setTimeout(() => resolve(value), ms));
+
+async function sequence() {
+  console.log(await delay(1000, "a"));
+  console.log(await delay(1000, "b"));
+  console.log(await delay(1000, "c"));
+}
+
+async function parallel() {
+  console.time("parallel");
+  const values = await Promise.all([delay(1000, 1), delay(1000, 2), delay(1000, 3)]);
+  console.timeEnd("parallel");   // ~1000ms
+  return values;                 // [1, 2, 3]
+}
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the order">
+```js
+console.log("1");
+setTimeout(() => console.log("2"), 0);
+Promise.resolve().then(() => console.log("3"));
+(async () => {
+  console.log("4");
+  await null;
+  console.log("5");
+})();
+console.log("6");
+```
+
+<Solution>
+Output: `1, 4, 6, 3, 5, 2`. Synchronous code runs first (`1`, then the async function runs synchronously until its first `await`, printing `4`, then `6`). Promise callbacks and the continuation after `await` are **microtasks** and run next (`3`, `5`). The `setTimeout` callback is a **macrotask** and runs last (`2`). The next lesson explains why.
+</Solution>
+</Exercise>
+
+<Exercise title="Fetch with retry and timeout">
+Write `fetchJson(url, { retries = 2, timeoutMs = 3000 })` that retries on network errors or `5xx` responses, fails immediately on `4xx`, and aborts if a request exceeds the timeout.
+
+<Solution>
+```js
+async function fetchJson(url, { retries = 2, timeoutMs = 3000 } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (res.ok) return await res.json();
+      if (res.status < 500) throw new Error(`HTTP ${res.status}`);   // don't retry 4xx
+      throw Object.assign(new Error(`HTTP ${res.status}`), { retryable: true });
+    } catch (error) {
+      const retryable = error.retryable || error.name === "AbortError" || error instanceof TypeError;
+      if (!retryable || attempt >= retries) throw error;
+      await new Promise((r) => setTimeout(r, 300 * 2 ** attempt));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+```
+</Solution>
+</Exercise>

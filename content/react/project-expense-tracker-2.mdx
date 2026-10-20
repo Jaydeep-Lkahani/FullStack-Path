@@ -1,0 +1,553 @@
+---
+title: "Project: Expense Tracker, Part 2"
+summary: "Build the pages of the expense tracker: a layout with routes, one form that adds and edits expenses with React Hook Form and a Zod schema, a list with delete, and tests that click through the flows."
+order: 25
+takeaways:
+  - A layout route renders the header once and an Outlet for the current page, and NavLink with end marks the page you are on.
+  - One form component can serve both adding and editing, because the only differences are its starting values and what happens on submit.
+  - Give useForm the input and the output type of the schema, so the form works with text while onSubmit receives the converted values, such as an amount in cents.
+  - A page that reads an id from the URL must handle an id that does not exist, because anyone can type any address.
+  - Never call sort on an array that lives in a store, because it reorders the stored data, so use toSorted to sort a copy.
+videos: []
+docs:
+  - title: "React Router — Declarative routing"
+    url: https://reactrouter.com/start/declarative/routing
+  - title: "React Hook Form — useForm"
+    url: https://react-hook-form.com/docs/useform
+  - title: "MDN: Array.prototype.toSorted()"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/toSorted
+---
+
+In Part 1 you built the data layer. Now you give it a face, using lesson 14 (routing) and lesson 11 (React Hook Form with Zod), in the same project.
+
+## Where you are
+
+Part 1 ends with the data layer done. Part 2 covers these requirements:
+
+- [ ] Add an expense with a title, an amount, a category and a date, with a clear error under every field that is wrong
+- [ ] Edit and delete an expense, and show a message when the id in the URL does not exist
+- [ ] Pages for the dashboard, the list and the form, reached through links and with a page for unknown addresses
+
+The dashboard stays a placeholder until Part 3, and the list shows everything without filters.
+
+## Stage 6: Layout and routes
+
+The pages:
+
+| URL | Page |
+| --- | --- |
+| `/` | Dashboard (a placeholder for now) |
+| `/expenses` | The list |
+| `/expenses/new` | The add form |
+| `/expenses/:id/edit` | The edit form |
+| anything else | A not found page |
+
+Write `src/Layout.tsx`: a header with the title and a `nav` with three `NavLink`s, and a `main` that renders the current page with `<Outlet />`. Then replace `src/App.tsx` with the routes (a layout route wrapping the pages, as in lesson 14), and `src/main.tsx` so that `BrowserRouter` wraps the app. For the pages that do not exist yet, import the files you are about to write in the next stages. Finally put some basic styling in `src/index.css`.
+
+Use `end` on every `NavLink`: without it the link to `/expenses` would also be marked active on `/expenses/new`.
+
+<Solution>
+
+```tsx
+// src/Layout.tsx
+import { NavLink, Outlet } from "react-router";
+
+const links = [
+  { to: "/", label: "Dashboard" },
+  { to: "/expenses", label: "Expenses" },
+  { to: "/expenses/new", label: "Add expense" },
+];
+
+export function Layout() {
+  return (
+    <>
+      <header>
+        <h1>Expense tracker</h1>
+        <nav aria-label="Main">
+          {links.map((link) => (
+            <NavLink key={link.to} to={link.to} end>
+              {link.label}
+            </NavLink>
+          ))}
+        </nav>
+      </header>
+      <main>
+        <Outlet />
+      </main>
+    </>
+  );
+}
+```
+
+```tsx
+// src/App.tsx
+import { Route, Routes } from "react-router";
+import { Layout } from "./Layout";
+import { EditExpensePage } from "./pages/EditExpensePage";
+import { ExpensesPage } from "./pages/ExpensesPage";
+import { NewExpensePage } from "./pages/NewExpensePage";
+import { NotFoundPage } from "./pages/NotFoundPage";
+
+export default function App() {
+  return (
+    <Routes>
+      <Route element={<Layout />}>
+        <Route index element={<h2>Dashboard</h2>} />
+        <Route path="expenses">
+          <Route index element={<ExpensesPage />} />
+          <Route path="new" element={<NewExpensePage />} />
+          <Route path=":id/edit" element={<EditExpensePage />} />
+        </Route>
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Routes>
+  );
+}
+```
+
+```tsx
+// src/main.tsx
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { BrowserRouter } from "react-router";
+import App from "./App.tsx";
+import "./index.css";
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </StrictMode>,
+);
+```
+
+```css
+body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 0 auto; padding: 1rem; }
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.5rem; }
+nav { display: flex; gap: 1rem; }
+nav a.active { font-weight: 700; }
+form { display: grid; gap: 0.75rem; max-width: 22rem; }
+label { display: grid; gap: 0.25rem; }
+[role="alert"] { color: #b00020; margin: 0; }
+ul { list-style: none; padding: 0; }
+li { display: flex; gap: 1rem; align-items: center; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid #ddd; }
+```
+
+The layout route has no `path`, so it only wraps its children. `expenses` is a prefix route with no `element`: it adds `/expenses` in front of its three children. The `path="*"` route matches whatever nothing else did, so it is the not found page. `NavLink` adds the class `active` to the current page's link, which the CSS makes bold.
+
+</Solution>
+
+## Stage 7: The form
+
+Add and edit need the same fields, the same errors and the same button, so write the form once as `src/ExpenseForm.tsx`. It takes three props: an optional `initial` expense, a `submitLabel`, and an `onSubmit` that receives an `ExpenseInput`.
+
+Use `useForm` with `zodResolver(ExpenseFormSchema)`. Give it three type arguments, the form's input type, `unknown`, and the output type, as in lesson 11, so that `onSubmit` receives the converted values with the amount already in cents. The default values depend on `initial`: for a new expense, an empty title and amount, the category `"Food"` and today's date; for an edit, the saved values, with the amount shown as text by `centsToInput`. Put an error message under each text field with `role="alert"`, and `noValidate` on the form so that the browser's own popups do not replace yours.
+
+<Solution>
+
+```tsx
+// src/ExpenseForm.tsx
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useForm } from "react-hook-form";
+import { centsToInput } from "./money";
+import { todayISO } from "./dates";
+import { CATEGORIES, ExpenseFormSchema } from "./schema";
+import type { Expense, ExpenseFormInput, ExpenseInput } from "./schema";
+
+type Props = {
+  initial?: Expense;
+  submitLabel: string;
+  onSubmit: (values: ExpenseInput) => void;
+};
+
+export function ExpenseForm({ initial, submitLabel, onSubmit }: Props) {
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<ExpenseFormInput, unknown, ExpenseInput>({
+    resolver: zodResolver(ExpenseFormSchema),
+    defaultValues: initial
+      ? {
+          title: initial.title,
+          amount: centsToInput(initial.amount),
+          category: initial.category,
+          date: initial.date,
+        }
+      : { title: "", amount: "", category: "Food", date: todayISO() },
+  });
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} noValidate>
+      <label>
+        Title
+        <input {...register("title")} aria-invalid={!!errors.title} />
+      </label>
+      {errors.title && <p role="alert">{errors.title.message}</p>}
+
+      <label>
+        Amount (USD)
+        <input
+          {...register("amount")}
+          inputMode="decimal"
+          aria-invalid={!!errors.amount}
+        />
+      </label>
+      {errors.amount && <p role="alert">{errors.amount.message}</p>}
+
+      <label>
+        Category
+        <select {...register("category")}>
+          {CATEGORIES.map((category) => (
+            <option key={category}>{category}</option>
+          ))}
+        </select>
+      </label>
+
+      <label>
+        Date
+        <input type="date" {...register("date")} aria-invalid={!!errors.date} />
+      </label>
+      {errors.date && <p role="alert">{errors.date.message}</p>}
+
+      <button type="submit">{submitLabel}</button>
+    </form>
+  );
+}
+```
+
+The amount is a text field with `inputMode="decimal"`, not `type="number"`: a number input hides what the user really typed and accepts `1e3`, while a text field gives the schema exactly the characters to check, and `inputMode` still gives phone users the numeric keyboard. The `initial` branch is the only place where add and edit differ. `centsToInput(1250)` returns `"12.50"`; if the form showed `1250`, saving without touching the field would turn $12.50 into $1,250.00.
+
+</Solution>
+
+## Stage 8: The add, edit and not found pages
+
+Each page is small, because the form and the store do the work.
+
+- `src/pages/NewExpensePage.tsx` reads `add` from the store, renders the form, and on submit calls `add(values)` and then `navigate("/expenses")`.
+- `src/pages/EditExpensePage.tsx` reads the `id` with `useParams`, finds the expense in the store, and renders the form with `initial` set. If there is no such expense, show "Expense not found" with a link back to the list. On submit, call `update` and navigate to the list.
+- `src/pages/NotFoundPage.tsx` shows the address that matched nothing, with a link to the dashboard.
+
+Select a single expense in the edit page with `state.expenses.find(...)`, and not a new array.
+
+<Solution>
+
+```tsx
+// src/pages/NewExpensePage.tsx
+import { useNavigate } from "react-router";
+import { ExpenseForm } from "../ExpenseForm";
+import { useExpenseStore } from "../store";
+
+export function NewExpensePage() {
+  const add = useExpenseStore((state) => state.add);
+  const navigate = useNavigate();
+
+  return (
+    <>
+      <h2>Add expense</h2>
+      <ExpenseForm
+        submitLabel="Add expense"
+        onSubmit={(values) => {
+          add(values);
+          navigate("/expenses");
+        }}
+      />
+    </>
+  );
+}
+```
+
+```tsx
+// src/pages/EditExpensePage.tsx
+import { Link, useNavigate, useParams } from "react-router";
+import { ExpenseForm } from "../ExpenseForm";
+import { useExpenseStore } from "../store";
+
+export function EditExpensePage() {
+  const { id } = useParams();
+  const expense = useExpenseStore((state) => state.expenses.find((e) => e.id === id));
+  const update = useExpenseStore((state) => state.update);
+  const navigate = useNavigate();
+
+  if (!expense) {
+    return (
+      <>
+        <h2>Expense not found</h2>
+        <p>
+          It may have been deleted. <Link to="/expenses">Back to all expenses</Link>
+        </p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <h2>Edit expense</h2>
+      <ExpenseForm
+        initial={expense}
+        submitLabel="Save changes"
+        onSubmit={(values) => {
+          update(expense.id, values);
+          navigate("/expenses");
+        }}
+      />
+    </>
+  );
+}
+```
+
+```tsx
+// src/pages/NotFoundPage.tsx
+import { Link, useLocation } from "react-router";
+
+export function NotFoundPage() {
+  const { pathname } = useLocation();
+  return (
+    <>
+      <h2>Page not found</h2>
+      <p>
+        Nothing lives at <code>{pathname}</code>. <Link to="/">Go to the dashboard</Link>
+      </p>
+    </>
+  );
+}
+```
+
+The ids are strings, so `useParams` needs no conversion. The check `if (!expense)` comes before the form, because anyone can type `/expenses/nope/edit` or open a link to an expense that was deleted. The selector returns an object that already exists in the store, or `undefined`, so it is the same value on every render. A selector that built a new array here would loop forever in Zustand 5 (lesson 16).
+
+</Solution>
+
+## Stage 9: The list
+
+`src/pages/ExpensesPage.tsx` shows the expenses newest first, each with its title, category, date, amount, an Edit link and a Delete button. When there are none, show a message with a link to the form. Give the links and buttons labels that include the title (`aria-label="Delete Lunch"`), because a screen reader user who hears "Delete, Delete, Delete" cannot tell the rows apart, and your tests will use these labels.
+
+Sort by date, newest first. The dates are `YYYY-MM-DD` strings, so `b.date.localeCompare(a.date)` is enough.
+
+<Solution>
+
+```tsx
+// src/pages/ExpensesPage.tsx
+import { Link } from "react-router";
+import { formatDate } from "../dates";
+import { formatMoney } from "../money";
+import { useExpenseStore } from "../store";
+
+export function ExpensesPage() {
+  const expenses = useExpenseStore((state) => state.expenses);
+  const remove = useExpenseStore((state) => state.remove);
+
+  if (expenses.length === 0) {
+    return (
+      <>
+        <h2>Expenses</h2>
+        <p>
+          No expenses yet. <Link to="/expenses/new">Add your first one</Link>.
+        </p>
+      </>
+    );
+  }
+
+  // toSorted returns a sorted copy. sort() would reorder the array inside the store.
+  const sorted = expenses.toSorted((a, b) => b.date.localeCompare(a.date));
+
+  return (
+    <>
+      <h2>Expenses</h2>
+      <ul aria-label="Expenses">
+        {sorted.map((expense) => (
+          <li key={expense.id}>
+            <span>
+              <strong>{expense.title}</strong>
+              <br />
+              {expense.category} · {formatDate(expense.date)}
+            </span>
+            <span>{formatMoney(expense.amount)}</span>
+            <Link to={`/expenses/${expense.id}/edit`} aria-label={`Edit ${expense.title}`}>
+              Edit
+            </Link>
+            <button
+              type="button"
+              onClick={() => remove(expense.id)}
+              aria-label={`Delete ${expense.title}`}
+            >
+              Delete
+            </button>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+```
+
+`toSorted` returns a sorted copy, and `sort` reorders the array it is called on. Here `expenses` is the array inside the store, so `sort` would change the store's data behind Zustand's back. Nothing would crash and the list would even look right, but the store would hold a different order from the one it announced.
+
+</Solution>
+
+Run `npm run dev` and try it: the empty form shows two errors, a valid one adds a row, Edit shows the amount as `12.50`, Delete removes the row, and reloading the page keeps everything.
+
+## Stage 10: Test the flows
+
+Now test the screens by using them like a person. The pages need a router, so write a helper in `src/test-utils.tsx` that renders `App` inside a `MemoryRouter` (the router that keeps the address in memory, so each test can start on any page). Then write `src/expenses.test.tsx`:
+
+1. An empty form shows both errors and saves nothing.
+2. A valid form saves the expense and shows it in the list, and the stored amount is in cents.
+3. Editing fills the form with `12.50`, saves a changed amount, and leaves one expense, not two.
+4. Deleting removes the expense and shows the empty message.
+5. Showing the list does not reorder the expenses in the store. Seed an older expense first and a newer one second.
+6. `/expenses/nope/edit` says "Expense not found", and an unknown address shows the not found page.
+7. Expenses survive a reload. Call `await useExpenseStore.persist.rehydrate()` after unmounting, as in Part 1.
+
+Find elements with `getByRole` and `getByLabelText`, never with test ids.
+
+<Solution>
+
+```tsx
+// src/test-utils.tsx
+import { render } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
+import App from "./App";
+
+// MemoryRouter keeps the URL in memory, so a test can start on any page.
+export function renderApp(path = "/") {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <App />
+    </MemoryRouter>,
+  );
+}
+```
+
+```tsx
+// src/expenses.test.tsx
+import { screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, test } from "vitest";
+import { useExpenseStore } from "./store";
+import { renderApp } from "./test-utils";
+
+describe("adding, editing and deleting", () => {
+  test("an empty form shows every error and saves nothing", async () => {
+    const user = userEvent.setup();
+    renderApp("/expenses/new");
+
+    await user.click(screen.getByRole("button", { name: "Add expense" }));
+
+    const alerts = screen.getAllByRole("alert").map((a) => a.textContent);
+    expect(alerts).toEqual(["Enter a title", "Enter an amount like 12.50"]);
+    expect(useExpenseStore.getState().expenses).toHaveLength(0);
+  });
+
+  test("a valid form saves the expense and shows it in the list", async () => {
+    const user = userEvent.setup();
+    renderApp("/expenses");
+
+    await user.click(screen.getByRole("link", { name: "Add your first one" }));
+    await user.type(screen.getByLabelText("Title"), "Lunch");
+    await user.type(screen.getByLabelText("Amount (USD)"), "12.5");
+    await user.click(screen.getByRole("button", { name: "Add expense" }));
+
+    const list = await screen.findByRole("list", { name: "Expenses" });
+    expect(within(list).getByText("Lunch")).toBeInTheDocument();
+    expect(within(list).getByText("$12.50")).toBeInTheDocument();
+    expect(useExpenseStore.getState().expenses[0].amount).toBe(1250);
+  });
+
+  test("editing fills the form with the saved values and saves the change", async () => {
+    const user = userEvent.setup();
+    useExpenseStore
+      .getState()
+      .add({ title: "Lunch", amount: 1250, category: "Food", date: "2026-10-20" });
+    renderApp("/expenses");
+
+    await user.click(screen.getByRole("link", { name: "Edit Lunch" }));
+    expect(screen.getByLabelText("Amount (USD)")).toHaveValue("12.50");
+
+    await user.clear(screen.getByLabelText("Amount (USD)"));
+    await user.type(screen.getByLabelText("Amount (USD)"), "15");
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    const list = await screen.findByRole("list", { name: "Expenses" });
+    expect(within(list).getByText("$15.00")).toBeInTheDocument();
+    expect(useExpenseStore.getState().expenses).toHaveLength(1);
+  });
+
+  test("deleting removes the expense and brings back the empty state", async () => {
+    const user = userEvent.setup();
+    useExpenseStore
+      .getState()
+      .add({ title: "Lunch", amount: 1250, category: "Food", date: "2026-10-20" });
+    renderApp("/expenses");
+
+    await user.click(screen.getByRole("button", { name: "Delete Lunch" }));
+
+    expect(screen.getByText(/No expenses yet/)).toBeInTheDocument();
+  });
+
+  test("showing the list does not reorder the expenses in the store", () => {
+    const { add } = useExpenseStore.getState();
+    add({ title: "Old", amount: 100, category: "Food", date: "2026-01-01" });
+    add({ title: "New", amount: 200, category: "Food", date: "2026-02-01" });
+    renderApp("/expenses");
+
+    expect(screen.getAllByRole("listitem")[0]).toHaveTextContent("New"); // newest first on screen
+    expect(useExpenseStore.getState().expenses[0].title).toBe("Old"); // unchanged in the store
+  });
+
+  test("editing an id that does not exist says so", () => {
+    renderApp("/expenses/nope/edit");
+    expect(
+      screen.getByRole("heading", { name: "Expense not found" }),
+    ).toBeInTheDocument();
+  });
+
+  test("an unknown URL shows the not found page", () => {
+    renderApp("/whatever/x");
+    expect(screen.getByText("/whatever/x")).toBeInTheDocument();
+  });
+});
+
+test("expenses survive a reload", async () => {
+  const user = userEvent.setup();
+  const first = renderApp("/expenses/new");
+  await user.type(screen.getByLabelText("Title"), "Lunch");
+  await user.type(screen.getByLabelText("Amount (USD)"), "12.50");
+  await user.click(screen.getByRole("button", { name: "Add expense" }));
+  first.unmount();
+
+  await useExpenseStore.persist.rehydrate(); // read localStorage again, as a new page load does
+  renderApp("/expenses");
+
+  expect(screen.getByText("Lunch")).toBeInTheDocument();
+});
+```
+
+Run `npx vitest run`: 25 tests pass (the 17 from Part 1 and 8 new ones). Test 3 matters most: the form must be filled with `12.50`, and saving must update the expense instead of adding a second one. Seeding with `useExpenseStore.getState().add(...)` is quicker than typing into the form to set up a test that is about something else. The last test unmounts by hand, so the second `renderApp` is a fresh page load.
+
+</Solution>
+
+## Break it on purpose
+
+Make each change, run `npx vitest run`, check that the named test goes red, and undo it. These are the results in the sandbox:
+
+| Break this | Result |
+| ---------- | ------ |
+| In `EditExpensePage`, call `add(values)` instead of `update(...)` | The edit test fails: there are two expenses |
+| In `ExpenseForm`, fill the amount with `String(initial.amount)` | The edit test fails: the field holds `1250`, not `12.50` |
+| In `NewExpensePage`, remove the `navigate` call | The "valid form saves" test fails: the list never appears |
+| In `ExpensesPage`, use `expenses.sort(...)` instead of `toSorted` | The "does not reorder the store" test fails |
+| In `App`, remove the `path="*"` route | The unknown address test fails |
+
+The `sort` change is a good example of why you break things on purpose. Before test 5 existed, this change turned **no** test red, because the list looked exactly right. The bug was only in the store, so only a test that looks at the store could see it.
+
+## Checking your work
+
+```bash
+npx tsc -b
+npm run lint
+npx vitest run
+npm run build
+```
+
+All four should finish without errors, with 25 tests passing. Part 3 finishes the project with filters kept in the URL, the dashboard, and the tests for them.

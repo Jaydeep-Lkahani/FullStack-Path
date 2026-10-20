@@ -1,0 +1,348 @@
+---
+title: Terminal, Git, GitHub & npm
+summary: The daily toolchain of every JavaScript developer — shell basics, version control with Git and GitHub, and managing packages with npm.
+order: 2
+takeaways:
+  - The terminal is faster than a GUI for repeatable work; learn cd, ls, cat, grep, mkdir, rm, and pipes.
+  - Git records snapshots (commits) of your project; the loop is edit → git add → git commit, with branches for isolated work.
+  - GitHub hosts your repo; the professional workflow is branch → commit → push → pull request → review → merge.
+  - package.json describes your project and dependencies; npm install fetches them into node_modules, and the lockfile pins exact versions.
+  - Never commit node_modules or secrets - list them in .gitignore.
+videos:
+  - title: "Command Line Basics for Beginners - Full Course"
+    channel: "freeCodeCamp.org"
+    duration: "45:19"
+    url: https://www.youtube.com/watch?v=mABpAI-pCw0
+  - title: "Git & GitHub Crash Course 2025"
+    channel: "Traversy Media"
+    duration: "49:29"
+    url: https://www.youtube.com/watch?v=vA5TTz6BXhY
+  - title: "NPM Crash Course"
+    channel: "Traversy Media"
+    duration: "42:03"
+    url: https://www.youtube.com/watch?v=jHDhaSSKmB0
+docs:
+  - title: "Pro Git book"
+    url: https://git-scm.com/book/en/v2
+  - title: "Git reference documentation"
+    url: https://git-scm.com/docs
+  - title: "GitHub flow"
+    url: https://docs.github.com/en/get-started/using-github/github-flow
+  - title: "npm docs: package.json"
+    url: https://docs.npmjs.com/cli/v11/configuring-npm/package-json
+---
+
+Frameworks come and go, but the toolchain in this lesson is used every single day, at every company. Spend an hour getting comfortable here and everything else in the course gets smoother.
+
+## Terminal basics
+
+The **terminal** (a window) runs a **shell** (a program such as `zsh` or `bash`) that reads commands. On macOS use Terminal/iTerm, on Windows use WSL or Git Bash, on Linux you have it already.
+
+### Navigating the filesystem
+
+```bash
+pwd                 # print working directory: where am I?
+ls                  # list files
+ls -la              # long format, including hidden files (.git, .env)
+cd projects         # change directory into "projects"
+cd ..               # go up one level
+cd ~                # go to your home directory
+cd -                # jump back to the previous directory
+```
+
+### Working with files
+
+```bash
+mkdir my-app            # create a directory
+mkdir -p a/b/c          # create nested directories
+touch index.js          # create an empty file (or update its timestamp)
+cp index.js backup.js   # copy
+mv backup.js old.js     # move or rename
+rm old.js               # delete (no trash can!)
+rm -r folder            # delete a directory recursively
+cat package.json        # print a file
+less long-file.txt      # scroll through a file (q to quit)
+```
+
+<Callout type="warning" title="rm is permanent">
+There is no undo for `rm`. Never run `rm -rf` with a path you haven't double-checked, and be extra careful with variables or globs (`rm -rf $DIR/*` with an empty `$DIR` is a famous disaster).
+</Callout>
+
+### Searching and pipes
+
+The Unix idea: small tools that do one thing, connected with the **pipe** `|`, which feeds one command's output into the next.
+
+```bash
+grep -rn "useState" src            # search text recursively, show line numbers
+ls | wc -l                         # how many files here?
+cat access.log | grep 500 | sort | uniq -c | sort -rn | head
+```
+
+### Environment variables and PATH
+
+```bash
+echo $HOME                         # read a variable
+export API_URL=http://localhost:3000   # set one for this shell session
+node -e "console.log(process.env.API_URL)"
+which node                         # where does this command live?
+```
+
+Handy shortcuts: **Tab** autocompletes, **↑** recalls history, **Ctrl+C** stops a running process, **Ctrl+R** searches history.
+
+## Git: version control
+
+Git tracks changes to your project as a series of **commits** — snapshots you can return to, compare, and share. It is distributed: every clone holds the full history.
+
+### One-time setup
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+git config --global init.defaultBranch main
+```
+
+### The core loop
+
+Files move through three areas:
+
+```text
+working directory ──git add──▶ staging area ──git commit──▶ repository (history)
+```
+
+```bash
+git init                    # start tracking the current folder
+git status                  # what changed? (use this constantly)
+git add src/app.js          # stage one file
+git add .                   # stage everything changed
+git commit -m "Add login form"   # save a snapshot with a message
+git log --oneline           # compact history
+git diff                    # unstaged changes
+git diff --staged           # staged changes
+```
+
+Write commit messages in the imperative, describing *why* as well as *what*: "Fix cart total rounding" beats "changes".
+
+### Ignoring files
+
+Some things must never be committed: dependencies, build output, and secrets. Create a `.gitignore`:
+
+```gitignore
+node_modules/
+.next/
+dist/
+.env
+.env.local
+.DS_Store
+```
+
+<Callout type="warning" title="Leaked secrets">
+If you commit an API key or password, deleting it in a later commit is **not enough** — it stays in history. Treat the secret as compromised and rotate it.
+</Callout>
+
+### Branches
+
+A **branch** is a movable pointer to a line of commits. Branches let you work on a feature without disturbing `main`.
+
+```bash
+git branch                       # list branches
+git switch -c feature/search     # create and switch to a new branch
+# ...edit, add, commit...
+git switch main                  # go back
+git merge feature/search         # bring the feature into main
+git branch -d feature/search     # delete the merged branch
+```
+
+If two branches change the same lines, Git can't decide and reports a **merge conflict**. Open the file, find the markers, choose the correct code, then finish:
+
+```text
+<<<<<<< HEAD
+const title = "Hello";
+=======
+const title = "Welcome";
+>>>>>>> feature/search
+```
+
+```bash
+# edit the file to the final version, remove the markers, then:
+git add path/to/file
+git commit
+```
+
+### Undoing things safely
+
+```bash
+git restore file.js              # discard unstaged changes to a file
+git restore --staged file.js     # unstage a file (keep the edits)
+git commit --amend               # fix the last commit message/content (before pushing)
+git revert <commit>              # make a NEW commit that undoes an old one (safe for shared history)
+git stash                        # shelve uncommitted work temporarily
+git stash pop                    # bring it back
+```
+
+Avoid `git reset --hard` and force-pushes until you understand them — they can destroy work.
+
+## GitHub: sharing and collaborating
+
+GitHub hosts Git repositories and adds collaboration features. A **remote** is a copy of your repo on a server; the default is named `origin`.
+
+```bash
+git clone https://github.com/user/repo.git   # copy a repo locally
+git remote add origin git@github.com:you/my-app.git   # link a local repo to GitHub
+git push -u origin main          # upload commits (first time sets upstream)
+git pull                         # fetch + merge changes from the remote
+git fetch                        # download changes without merging
+```
+
+### Authentication
+
+Use **SSH keys** or the **GitHub CLI** (`gh auth login`) rather than typing passwords. SSH setup in short:
+
+```bash
+ssh-keygen -t ed25519 -C "you@example.com"
+cat ~/.ssh/id_ed25519.pub        # copy this into GitHub → Settings → SSH keys
+ssh -T git@github.com            # test the connection
+```
+
+### The pull request workflow
+
+This is how almost every team works:
+
+1. **Branch** from `main`: `git switch -c fix/cart-total`.
+2. **Commit** small, focused changes.
+3. **Push** the branch: `git push -u origin fix/cart-total`.
+4. **Open a pull request** (PR) on GitHub describing what and why.
+5. Teammates **review**, comment, and request changes; CI runs tests.
+6. **Merge** when approved, then delete the branch and `git pull` on `main`.
+
+Good PRs are small, have a clear description, and link the issue they close (`Closes #42`). A polished GitHub profile with real commit history and READMEs is part of your portfolio — you'll set that up in the interview-prep phase.
+
+## npm: packages and scripts
+
+Node.js ships with **npm**, the package manager for the JavaScript ecosystem. Packages are reusable code published to the npm registry.
+
+### package.json
+
+```bash
+npm init -y        # creates package.json with defaults
+```
+
+```json title="package.json"
+{
+  "name": "my-app",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js",
+    "test": "echo \"no tests yet\""
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.0"
+  }
+}
+```
+
+- **dependencies** — needed to run the app. **devDependencies** — needed only while developing (linters, test tools, TypeScript).
+- **scripts** — named commands: `npm run dev`, `npm start`, `npm test` (`start` and `test` don't need `run`).
+- `"type": "module"` lets you use `import`/`export` in `.js` files.
+
+### Installing
+
+```bash
+npm install                  # install everything listed in package.json
+npm install express          # add a dependency
+npm install -D prettier      # add a devDependency
+npm uninstall express        # remove one
+npm update                   # update within allowed version ranges
+npx create-next-app@latest   # run a package's CLI without installing it globally
+```
+
+### Versions and the lockfile
+
+Versions follow **semver**: `MAJOR.MINOR.PATCH`. In `package.json`, `^4.19.2` means "any 4.x.x at or above 4.19.2" and `~4.19.2` means "4.19.x only". The **`package-lock.json`** records the exact versions that were installed, so every teammate and the CI server get identical `node_modules`. Commit the lockfile; use `npm ci` in CI for clean, exact installs.
+
+`node_modules` can contain thousands of files. It is regenerated from `package.json` + lockfile, so it belongs in `.gitignore`.
+
+<Callout type="tip" title="Evaluate before you install">
+Every dependency is code you're trusting. Check weekly downloads, last publish date, open issues, and the package size. Prefer fewer, well-maintained packages. Run `npm audit` to see known vulnerabilities.
+</Callout>
+
+## Putting it together
+
+A typical new-project flow:
+
+```bash
+mkdir hello-tools && cd hello-tools
+git init
+npm init -y
+printf "node_modules/\n.env\n" > .gitignore
+npm install -D prettier
+echo 'console.log("hello");' > index.js
+git add .
+git commit -m "Initial commit"
+```
+
+<Exercise title="Your first repo">
+1. Create a folder `git-practice`, run `git init`, and add a `README.md` with one line. Commit it.
+2. Create a branch `feature/about`, add `about.md`, commit it, switch back to `main`, and merge.
+3. Run `git log --oneline --graph --all` and describe what you see.
+4. Create a GitHub repo and push `main` to it.
+
+<Solution>
+```bash
+mkdir git-practice && cd git-practice
+git init
+echo "# Git practice" > README.md
+git add README.md && git commit -m "Add README"
+
+git switch -c feature/about
+echo "About me" > about.md
+git add about.md && git commit -m "Add about page"
+git switch main
+git merge feature/about        # fast-forward merge, since main hadn't moved
+
+git log --oneline --graph --all
+
+gh repo create git-practice --public --source=. --push
+# or: add the remote manually and `git push -u origin main`
+```
+Because `main` had no new commits, Git "fast-forwarded" the pointer and the graph is a straight line. Make a commit on both branches before merging to see a real merge commit.
+</Solution>
+</Exercise>
+
+<Exercise title="Make a merge conflict on purpose">
+Create a file `greeting.txt` on `main`. On a new branch change line 1 and commit. Back on `main`, change the same line differently and commit. Merge the branch and resolve the conflict.
+
+<Solution>
+```bash
+echo "Hello" > greeting.txt && git add . && git commit -m "Add greeting"
+git switch -c welcome
+echo "Welcome" > greeting.txt && git commit -am "Change greeting"
+git switch main
+echo "Hi there" > greeting.txt && git commit -am "Change greeting on main"
+git merge welcome        # CONFLICT
+# Edit greeting.txt: keep the line you want, delete the <<<<<<<, =======, >>>>>>> markers
+git add greeting.txt
+git commit               # completes the merge
+```
+Conflicts are normal, not a failure — Git just needs a human to choose.
+</Solution>
+</Exercise>
+
+<Exercise title="Script it">
+In a new npm project, add an npm script `hello` that prints your name using Node, and run it. Then install `chalk` and make the output colored.
+
+<Solution>
+```json
+"scripts": { "hello": "node hello.js" }
+```
+```js title="hello.js"
+import chalk from "chalk";
+console.log(chalk.green("Hello, Ada!"));
+```
+Remember `"type": "module"` in `package.json` for `import` syntax, then run `npm run hello`.
+</Solution>
+</Exercise>

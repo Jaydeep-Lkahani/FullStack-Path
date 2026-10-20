@@ -1,0 +1,104 @@
+---
+title: "TypeScript Basics Quiz"
+summary: "Check that you can annotate, narrow and model data with TypeScript types, and use generics and utility types."
+order: 99
+quiz:
+  - question: "What happens to TypeScript types when the code runs?"
+    options:
+      - "They slow down the program"
+      - "They become comments in the HTML"
+      - "They are checked again at runtime"
+      - "They are erased, so they add no runtime cost and do not validate real data"
+    answer: 3
+    explanation: "Types exist only at compile time. That is why data from an API or a form still needs runtime validation, for example with Zod."
+  - question: "Where should you ALWAYS write explicit type annotations?"
+    options:
+      - "On function parameters and exported function return types"
+      - "Nowhere, inference does everything"
+      - "On every local variable"
+      - "On loop counters"
+    answer: 0
+    explanation: "Parameters cannot be inferred from the body. Local variables usually can, so let inference handle them."
+  - question: "What is the safer alternative to `any` for a value whose type you do not know yet?"
+    options:
+      - "`never`"
+      - "`object`"
+      - "`void`"
+      - "`unknown`, which must be narrowed before use"
+    answer: 3
+    explanation: "`any` switches off checking. `unknown` forces you to check the type (for example with `typeof`) before you use the value."
+  - question: "Which feature can `interface` do that a `type` alias cannot?"
+    options:
+      - "Be exported"
+      - "Describe object shapes"
+      - "Use generics"
+      - "Declaration merging, where two declarations of the same name combine"
+    answer: 3
+    explanation: "Interfaces can be re-opened and merged. Type aliases can express unions, tuples and mapped or conditional types that interfaces cannot."
+  - question: "Given `function f(x: string | number)`, how do you call `x.toUpperCase()` safely?"
+    options:
+      - "Narrow it first with `if (typeof x === 'string')`"
+      - "It is always safe on a union"
+      - "`x as string` everywhere"
+      - "Change the parameter to `any`"
+    answer: 0
+    explanation: "Narrowing refines a union inside a branch. Casting with `as` silences the checker without checking anything."
+  - question: "Why is `{ status: 'loading' } | { status: 'success'; data: string[] }` better than `{ loading: boolean; data?: string[] }`?"
+    options:
+      - "It runs faster"
+      - "It avoids needing `strict`"
+      - "It makes impossible states unrepresentable and narrows on `status`"
+      - "It uses less memory"
+    answer: 2
+    explanation: "A discriminated union ties each state to exactly the fields that exist in it, so you cannot read `data` while loading and cannot have `loading: true` with an error."
+  - question: "What does `strict: true` change?"
+    options:
+      - "It disables type inference"
+      - "It forbids classes"
+      - "It turns on a group of checks such as `strictNullChecks` and `noImplicitAny`"
+      - "It makes code run in strict mode at runtime only"
+    answer: 2
+    explanation: "Strict mode catches the bugs people actually hit, like reading a property of a value that may be `undefined`. Use it on every new project."
+  - question: "`const todo: Todo = await res.json();` compiles. Is `todo` guaranteed to match `Todo`?"
+    options:
+      - "Only for GET requests"
+      - "Yes, TypeScript verified the response"
+      - "Yes, if `Todo` is an interface"
+      - "No, `json()` returns `any`, so the type is only your claim and the server may send anything"
+    answer: 3
+    explanation: "Validate untrusted data at the boundary, for example with `TodoSchema.parse(...)` from Zod, which also gives you the type."
+  - question: "What does `function first<T>(items: T[]): T | undefined` give you over using `any[]`?"
+    options:
+      - "The return type stays linked to the input: `first([1, 2])` is `number | undefined`"
+      - "It runs faster"
+      - "It works on non-arrays"
+      - "Nothing, it is just syntax"
+    answer: 0
+    explanation: "The type parameter `T` is inferred at the call site, so the output type follows the input type instead of collapsing to `any`."
+  - question: "Which type removes `password` from a `User` type?"
+    options:
+      - "`Pick<User, 'password'>`"
+      - "`Omit<User, 'password'>`"
+      - "`Record<User, 'password'>`"
+      - "`Partial<User>`"
+    answer: 1
+    explanation: "`Omit<T, K>` drops the listed keys. `Pick` keeps only them, and `Partial` makes every property optional."
+---
+
+You have finished the TypeScript Basics module. Every React, Express and Next.js lesson from here on is written in TypeScript, so this is the foundation that keeps the rest from feeling hard.
+
+## Ready to move on?
+
+Tick these off in your head. If you hesitate on one, reopen that lesson before moving on.
+
+- [ ] I can explain what TypeScript adds to JavaScript and what happens to types at runtime
+- [ ] I can let inference work and know where annotations are required
+- [ ] I can pick `unknown` over `any` and narrow it safely
+- [ ] I can describe the difference between `interface` and `type` and when I use each
+- [ ] I can model states with a discriminated union and check it exhaustively
+- [ ] I can explain why `strict` mode matters and what optional chaining does for `undefined`
+- [ ] I can explain why API data still needs runtime validation
+- [ ] I can write a generic function with a constraint
+- [ ] I can use `Partial`, `Pick`, `Omit`, `Record` and `ReturnType` to derive types
+
+When the list feels solid, take the quiz below. It saves your best score in this browser, and you can retake it as often as you like.

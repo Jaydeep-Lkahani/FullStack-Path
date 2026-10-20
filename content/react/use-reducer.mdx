@@ -1,0 +1,399 @@
+---
+title: useReducer
+summary: Move complex state updates out of your event handlers into one pure reducer function with `useReducer`, decide when it beats `useState`, and share it across a tree with the reducer + context pattern.
+order: 8
+takeaways:
+  - A reducer is a pure function that takes the current state and an action and returns the next state, so all the ways your state can change live in one place.
+  - The `useReducer` hook returns the current state and a `dispatch` function; event handlers call `dispatch` with an action that says what happened instead of setting state directly.
+  - Describe actions in TypeScript as a union of object types with a `type` field, and let the reducer's parameter types drive inference instead of passing generics to `useReducer`.
+  - Reducers must not mutate state or cause side effects; return a new object or array, because returning the same one tells React nothing changed.
+  - Reach for `useReducer` when several pieces of state change together or many handlers update the same state; keep `useState` for simple independent values.
+  - Put the state and `dispatch` in two separate contexts so any component can read tasks or send actions without prop drilling.
+videos:
+  - title: "React 19 Tutorial - 27 - useReducer Hook"
+    channel: "Codevolution"
+    duration: "4:51"
+    url: https://www.youtube.com/watch?v=I2B_vbo_4B0
+  - title: "Learn React Hooks: useReducer - Simply Explained!"
+    channel: "Cosden Solutions"
+    duration: "13:48"
+    url: https://www.youtube.com/watch?v=rgp_iCVS8ys
+  - title: "React 19 Tutorial - 29 - useReducer (complex state and actions)"
+    channel: "Codevolution"
+    duration: "20:57"
+    url: https://www.youtube.com/watch?v=9QRq2kbP7PA
+docs:
+  - title: "react.dev — useReducer"
+    url: https://react.dev/reference/react/useReducer
+  - title: "react.dev — Extracting State Logic into a Reducer"
+    url: https://react.dev/learn/extracting-state-logic-into-a-reducer
+  - title: "react.dev — Scaling Up with Reducer and Context"
+    url: https://react.dev/learn/scaling-up-with-reducer-and-context
+---
+
+`useState` is perfect for a counter or a text input. Once a component has a list that can be added to, edited, toggled, deleted and filtered, the update logic ends up spread over half a dozen event handlers, and finding the bug means reading all of them. `useReducer` collects every state change into one function you can read top to bottom and test without React at all.
+
+It's also the idea behind Redux, which you will meet in older codebases and in lesson 16, so interviewers like to ask "when would you use `useReducer` over `useState`?". At the end of this lesson you'll combine it with context from lesson 7, a pattern that handles a surprising amount of app state without any library. Written for React 19 and TypeScript.
+
+## The problem: update logic everywhere
+
+With `useState`, a task list grows handlers like `handleAdd`, `handleToggle` and `handleDelete`, each calling `setTasks(...)` with its own piece of "how tasks change", often spread over several components. A **reducer** flips this around: handlers only report **what happened** ("a task was added"), and one function decides **how the state changes** in response.
+
+## Anatomy of useReducer
+
+A reducer is a plain function with this shape: `(currentState, action) => nextState`. The name comes from `Array.prototype.reduce`, which also folds a list of things into one value. An **action** is an object describing what happened; by convention it has a `type` field.
+
+```ts
+// tasksReducer.ts
+export type Task = { id: number; text: string; done: boolean };
+
+export type TasksAction =
+  | { type: "added"; id: number; text: string }
+  | { type: "toggled"; id: number }
+  | { type: "deleted"; id: number }
+  | { type: "cleared_done" };
+
+export function tasksReducer(tasks: Task[], action: TasksAction): Task[] {
+  switch (action.type) {
+    case "added":
+      return [...tasks, { id: action.id, text: action.text, done: false }];
+    case "toggled":
+      return tasks.map((t) => (t.id === action.id ? { ...t, done: !t.done } : t));
+    case "deleted":
+      return tasks.filter((t) => t.id !== action.id);
+    case "cleared_done":
+      return tasks.filter((t) => !t.done);
+    default: {
+      const unhandled: never = action;
+      throw new Error(`Unknown action: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+```
+
+The component passes the reducer and the starting state to `useReducer`, and gets back the current state plus a `dispatch` function:
+
+```tsx
+import { useReducer, useState } from "react";
+import { tasksReducer, type Task } from "./tasksReducer";
+
+const initialTasks: Task[] = [
+  { id: 1, text: "Learn useState", done: true },
+  { id: 2, text: "Learn useReducer", done: false },
+];
+let nextId = 3;
+
+export function TaskApp() {
+  const [tasks, dispatch] = useReducer(tasksReducer, initialTasks);
+  const [text, setText] = useState("");
+
+  function handleAdd() {
+    dispatch({ type: "added", id: nextId++, text });
+    setText("");
+  }
+
+  return (
+    <div>
+      <input value={text} onChange={(e) => setText(e.target.value)} />
+      <button type="button" onClick={handleAdd}>Add</button>
+      <ul>
+        {tasks.map((task) => (
+          <li key={task.id}>
+            <label>
+              <input
+                type="checkbox"
+                checked={task.done}
+                onChange={() => dispatch({ type: "toggled", id: task.id })}
+              />
+              {task.text}
+            </label>
+          </li>
+        ))}
+      </ul>
+      <button type="button" onClick={() => dispatch({ type: "cleared_done" })}>
+        Clear done
+      </button>
+    </div>
+  );
+}
+```
+
+Tick "Learn useReducer" and click "Clear done": both tasks are done, so the list empties. Type "Write lesson" and click Add, and it appears unticked. On each `dispatch`, React calls `tasksReducer(currentTasks, action)`, stores the array it returns and re-renders `TaskApp` with it.
+
+The input's `text` stays in `useState`: mixing both hooks is normal. Name actions after what the user did (`"added"`, `"toggled"`), not after a state change; `{ type: "set_tasks", tasks }` just moves `setTasks` around and loses the benefit.
+
+### dispatch doesn't change the variable now
+
+State from a reducer is a snapshot, exactly like `useState` state (lesson 3). `dispatch` schedules the next render; reading `tasks` on the line after it still gives the old array. Several dispatches in one handler queue up, and each runs the reducer on the previous result, so reducers never need an "updater function". The first exercise below tests this.
+
+## Typing actions in TypeScript
+
+The `TasksAction` type above is a **discriminated union** (TypeScript basics, lesson 1): each member has a different literal `type`, and inside `case "added":` TypeScript knows `action` has `id` and `text`. Writing `action.text` in the `"toggled"` case is a compile error, which catches a whole class of bugs.
+
+The `default` branch does an **exhaustiveness check**. If every case is handled, `action` has the type `never` there, so the assignment compiles. Add `{ type: "renamed"; id: number; text: string }` to the union and forget the `case`, and TypeScript reports `Type '{ type: "renamed"; ... }' is not assignable to type 'never'` right where the reducer is missing a branch.
+
+<Callout type="warning" title="Don't pass generics to useReducer">
+Many tutorials write `useReducer<Task[], TasksAction>(tasksReducer, [])`. In React 19's types that fails with "Type 'TasksAction' does not satisfy the constraint 'AnyActionArg'", because the second generic now means something else. Type the reducer's parameters and return value instead, and `useReducer` infers both `tasks` and `dispatch` from it. The type of `dispatch` itself is `Dispatch<TasksAction>`.
+</Callout>
+
+## Reducers must be pure
+
+React may call your reducer more than once and at times you don't control, so it must follow the purity rules from lesson 6: the same state and action always give the same result, and nothing outside the function changes.
+
+**1. Never mutate the state.** React compares the old and new state with `Object.is`. If you change the array and return the same one, React sees "same object" and skips the re-render:
+
+```ts
+case "added":
+  cart.push(action.item); // broken: mutates, returns the same array
+  return cart;
+  // fixed: return [...cart, action.item];
+```
+
+Dispatching the broken version twice left the screen at `Items: 0`: the array held two items, but React never re-rendered. Use the same immutable patterns as with `useState`: spread, `map`, `filter`.
+
+**2. No side effects.** No `fetch`, no `localStorage`, no timers, no `nextId++` inside the reducer. Random or changing values like new IDs and `Date.now()` belong in the event handler, which puts them **in the action**. That's why `"added"` carries `id`: the handler creates it, the reducer just uses it.
+
+<Callout type="note" title="Why your reducer runs twice">
+In development with `<StrictMode>` (on in Vite's `main.tsx`), React calls reducers twice and throws one result away. A pure reducer gives the same answer both times; if a log inside it shows double, that log is a side effect.
+</Callout>
+
+### Reducers are easy to test
+
+A reducer is a plain function, so you can test it without React or a browser. Run this with `node reducer.test.ts`:
+
+```ts
+import { tasksReducer, type Task } from "./tasksReducer.ts";
+
+const start: Task[] = [{ id: 1, text: "Learn useState", done: false }];
+
+const afterAdd = tasksReducer(start, { type: "added", id: 2, text: "Learn useReducer" });
+const afterToggle = tasksReducer(afterAdd, { type: "toggled", id: 2 });
+
+console.log(afterAdd.length, afterToggle[1].done); // 2 true
+console.log(start.length); // 1: the original array was never changed
+```
+
+Lesson 18 automates checks like these with Vitest.
+
+### Lazy initialization
+
+If the starting state is expensive to build, such as reading `localStorage`, pass an initializer as the third argument: `useReducer(draftReducer, "post-draft", loadDraft)`. React calls `loadDraft("post-draft")` once, on the first render. Writing `useReducer(draftReducer, loadDraft("post-draft"))` instead calls it on **every** render and ignores the result after the first.
+
+## useState or useReducer?
+
+| Situation | Pick |
+| --- | --- |
+| One or two independent values (a toggle, an input) | `useState` |
+| Several values that change together (`status`, `data`, `error`) | `useReducer` |
+| Many handlers update the same state in different ways | `useReducer` |
+| The next state depends on complex rules you want to test | `useReducer` |
+| State and update logic must be shared deep in the tree | `useReducer` + context |
+
+A reducer is more code up front (types, a switch, actions), but each change is described once and the component shrinks to "show state, dispatch actions". Starting with `useState` and switching later is a mechanical change.
+
+## Reducer + context
+
+Lesson 7 used context to share a theme. Combining it with a reducer gives the whole tree access to the tasks **and** a way to change them, with no prop drilling. Use **two** contexts, one for the state and one for `dispatch`:
+
+```tsx
+// TasksContext.tsx
+import { createContext, useContext, useReducer } from "react";
+import type { Dispatch, ReactNode } from "react";
+import { tasksReducer, type Task, type TasksAction } from "./tasksReducer";
+
+const TasksContext = createContext<Task[] | null>(null);
+const TasksDispatchContext = createContext<Dispatch<TasksAction> | null>(null);
+
+export function TasksProvider({ children }: { children: ReactNode }) {
+  const [tasks, dispatch] = useReducer(tasksReducer, []);
+  return (
+    <TasksContext value={tasks}>
+      <TasksDispatchContext value={dispatch}>{children}</TasksDispatchContext>
+    </TasksContext>
+  );
+}
+
+export function useTasks() {
+  const tasks = useContext(TasksContext);
+  if (tasks === null) throw new Error("useTasks must be used inside <TasksProvider>");
+  return tasks;
+}
+
+export function useTasksDispatch() {
+  const dispatch = useContext(TasksDispatchContext);
+  if (dispatch === null) throw new Error("useTasksDispatch must be used inside <TasksProvider>");
+  return dispatch;
+}
+```
+
+Any component below `<TasksProvider>` can now read the tasks with `useTasks()` or change them:
+
+```tsx
+function ClearDone() {
+  const dispatch = useTasksDispatch();
+  return <button type="button" onClick={() => dispatch({ type: "cleared_done" })}>Clear done</button>;
+}
+
+// <TasksProvider><Layout /></TasksProvider>, where Layout renders AddTask, TaskList and ClearDone
+```
+
+**Why two contexts?** React guarantees `dispatch` is the same function on every render, so the dispatch context's value never changes. Components that only send actions never re-render when the tasks change. In the sandbox, adding and toggling tasks re-rendered `TaskList` every time, while `ClearDone` and `Layout` rendered once and never again. With a single context holding `{ tasks, dispatch }`, `ClearDone` would re-render on every change.
+
+That's a small global store in plain React: a provider that owns the reducer, plus hooks to read and write it. Lesson 9 covers custom hooks; lesson 16 shows when Zustand fits better.
+
+<Exercise title="Predict the output">
+The user clicks the button once. What is logged, and what does the button show afterwards?
+
+```tsx
+function counterReducer(count: number, action: { type: "increment" }) {
+  return action.type === "increment" ? count + 1 : count;
+}
+
+function Counter() {
+  const [count, dispatch] = useReducer(counterReducer, 0);
+  function handleClick() {
+    dispatch({ type: "increment" });
+    dispatch({ type: "increment" });
+    console.log(count);
+  }
+  return <button onClick={handleClick}>Count: {count}</button>;
+}
+```
+
+<Solution>
+It logs `0`, because `count` is the snapshot from the render that created `handleClick`. Both actions are queued and the reducer runs on each result in turn (`0 → 1 → 2`), so the button then shows `Count: 2`. (In development the log appears once per click; Strict Mode doubles renders and reducer calls, not event handlers.)
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the cart that won't update">
+Clicking "Add" and "+1" changes nothing on screen, even though logging `cart` shows the items. Fix the reducer.
+
+```ts
+type Item = { id: number; name: string; qty: number };
+type CartAction = { type: "added"; item: Item } | { type: "qty_increased"; id: number };
+
+function cartReducer(cart: Item[], action: CartAction): Item[] {
+  switch (action.type) {
+    case "added":
+      cart.push(action.item);
+      return cart;
+    case "qty_increased": {
+      const item = cart.find((i) => i.id === action.id);
+      if (item) item.qty += 1;
+      return cart;
+    }
+  }
+}
+```
+
+<Solution>
+Both branches mutate the array and return the same one, so `Object.is(old, next)` is `true` and React skips the render. Return new arrays and a new object for the changed item:
+
+```ts
+function cartReducer(cart: Item[], action: CartAction): Item[] {
+  switch (action.type) {
+    case "added":
+      return [...cart, action.item];
+    case "qty_increased":
+      return cart.map((i) => (i.id === action.id ? { ...i, qty: i.qty + 1 } : i));
+  }
+}
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Counter with step and reset">
+Write a typed `counterReducer` for `{ count: number; step: number }` with actions `incremented`, `step_changed` (carries `step`) and `reset`. Test it by calling it directly: set the step to 5 and increment twice.
+
+<Solution>
+```ts
+type CounterState = { count: number; step: number };
+type CounterAction =
+  | { type: "incremented" }
+  | { type: "step_changed"; step: number }
+  | { type: "reset" };
+
+const initialCounter: CounterState = { count: 0, step: 1 };
+
+function counterReducer(state: CounterState, action: CounterAction): CounterState {
+  switch (action.type) {
+    case "incremented":
+      return { ...state, count: state.count + state.step };
+    case "step_changed":
+      return { ...state, step: action.step };
+    case "reset":
+      return initialCounter;
+  }
+}
+
+let s = counterReducer(initialCounter, { type: "step_changed", step: 5 });
+s = counterReducer(s, { type: "incremented" });
+s = counterReducer(s, { type: "incremented" });
+console.log(s); // { count: 10, step: 5 }
+```
+
+TypeScript accepts the switch without a `default` because every action type returns. In a component: `useReducer(counterReducer, initialCounter)`.
+</Solution>
+</Exercise>
+
+<Exercise title="Build a cart with reducer + context">
+Create `CartProvider` with `useCart()` and `useCartDispatch()` hooks (both throwing outside the provider). One action, `added`, carries `id` and `name`; adding an item already in the cart increases its `qty` instead of adding a duplicate. Then write `CartBadge`, which shows `Cart (3)` with the total quantity, and `AddToCart`, a button that only dispatches.
+
+<Solution>
+```tsx
+import { createContext, useContext, useReducer } from "react";
+import type { Dispatch, ReactNode } from "react";
+
+type Item = { id: number; name: string; qty: number };
+type CartAction = { type: "added"; id: number; name: string };
+
+function cartReducer(cart: Item[], action: CartAction): Item[] {
+  if (cart.some((i) => i.id === action.id)) {
+    return cart.map((i) => (i.id === action.id ? { ...i, qty: i.qty + 1 } : i));
+  }
+  return [...cart, { id: action.id, name: action.name, qty: 1 }];
+}
+
+const CartContext = createContext<Item[] | null>(null);
+const CartDispatchContext = createContext<Dispatch<CartAction> | null>(null);
+
+export function CartProvider({ children }: { children: ReactNode }) {
+  const [cart, dispatch] = useReducer(cartReducer, []);
+  return (
+    <CartContext value={cart}>
+      <CartDispatchContext value={dispatch}>{children}</CartDispatchContext>
+    </CartContext>
+  );
+}
+
+export function useCart() {
+  const cart = useContext(CartContext);
+  if (cart === null) throw new Error("useCart must be used inside <CartProvider>");
+  return cart;
+}
+
+export function useCartDispatch() {
+  const dispatch = useContext(CartDispatchContext);
+  if (dispatch === null) throw new Error("useCartDispatch must be used inside <CartProvider>");
+  return dispatch;
+}
+
+export function CartBadge() {
+  const total = useCart().reduce((sum, i) => sum + i.qty, 0);
+  return <span>Cart ({total})</span>;
+}
+
+export function AddToCart({ id, name }: { id: number; name: string }) {
+  const dispatch = useCartDispatch();
+  return (
+    <button type="button" onClick={() => dispatch({ type: "added", id, name })}>
+      Add {name}
+    </button>
+  );
+}
+
+// <CartProvider><CartBadge /><AddToCart id={1} name="Pen" /><AddToCart id={2} name="Book" /></CartProvider>
+// Clicking "Add Pen" twice and "Add Book" once shows Cart (3), with two items in the array.
+```
+</Solution>
+</Exercise>

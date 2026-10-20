@@ -1,0 +1,503 @@
+---
+title: "Project: GitHub User Search"
+summary: "Build a small TypeScript app, with no framework, that searches GitHub users with fetch, handles every loading and error state, and remembers recent searches."
+order: 3
+takeaways:
+  - A discriminated union type that describes every screen state keeps rendering code simple and prevents impossible combinations.
+  - Check response.ok yourself, because fetch only rejects on network failures and not on 403 or 500 responses.
+  - Debouncing waits until the user stops typing, and an AbortController cancels the previous request so a slow old response never overwrites a newer one.
+  - Build page content with textContent and DOM methods instead of innerHTML so data from an API cannot inject HTML.
+  - Treat saved localStorage data as untrusted, validate it when reading, and wrap storage calls in try/catch.
+  - The public GitHub search API allows only about 10 unauthenticated requests per minute, so a real app has to handle rate limit errors gracefully.
+videos: []
+docs:
+  - title: "GitHub REST API: search users"
+    url: https://docs.github.com/en/rest/search/search#search-users
+  - title: "MDN: Using the Fetch API"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch
+  - title: "TypeScript handbook: narrowing"
+    url: https://www.typescriptlang.org/docs/handbook/2/narrowing.html
+  - title: "Vite: getting started"
+    url: https://vite.dev/guide/
+---
+
+This is your first checkpoint project. Until now every lesson has been a small idea in isolation; here you combine them into something that behaves like a real feature: typed data, a network request, every loading and error state, a debounced input, cancellation, and saved state. The same shape of problem (search box, async data, edge cases) appears in almost every frontend job and in many interview machine-coding rounds.
+
+You will build it with plain TypeScript and the DOM, no React. That is deliberate. When you meet React in Phase 2 you will recognise exactly what it automates, and you will know what is happening underneath. It was written for Vite 8 and TypeScript 6, and it uses GitHub's public API, which needs no account or key.
+
+## What you will build
+
+A page with a search box. Typing a username (or pausing after typing) lists matching GitHub users with their avatars, links to their profiles, and a message for each situation: nothing typed, loading, no results, an error, or success. The last five successful searches appear as chips you can click.
+
+```text
+┌───────────────────────────────────────────────┐
+│ GitHub User Search                            │
+│ Search GitHub users                           │
+│ [ torvalds                        ] [ Search ]│
+│                                               │
+│ Recent searches                        Clear  │
+│ (torvalds) (gaearon) (sindresorhus)           │
+│                                               │
+│ Showing 12 of 470 users for "torvalds".       │
+│ ┌─────────────┐ ┌─────────────┐ ┌───────────┐ │
+│ │ (o) torvalds│ │ (o) torvald │ │ (o) ...   │ │
+│ └─────────────┘ └─────────────┘ └───────────┘ │
+└───────────────────────────────────────────────┘
+```
+
+### Requirements
+
+- [ ] Searching calls `https://api.github.com/search/users` and shows the login, avatar and a link for each result
+- [ ] The page shows five distinct states: idle, loading, error, empty and success
+- [ ] HTTP errors and network failures show a readable message, with a specific one for the rate limit
+- [ ] Typing triggers a search 500 ms after the last keystroke, and pressing Enter searches immediately
+- [ ] A newer search cancels the one still in flight, so old responses never overwrite new ones
+- [ ] The five most recent searches that found users are saved in `localStorage` and can be clicked or cleared
+- [ ] No user data is ever inserted with `innerHTML`
+
+<Callout type="warning" title="The API has a rate limit">
+Unauthenticated search requests are limited to about 10 per minute. If you hit it, GitHub answers with status `403` or `429`. That is why this project debounces input, and why the rate limit gets its own error message.
+</Callout>
+
+## Stage 1: Set up and model the data
+
+Create the project and run it:
+
+```bash
+npm create vite@latest github-search -- --template vanilla-ts
+cd github-search
+npm install
+npm run dev
+```
+
+If it asks for options, choose Vanilla and TypeScript. Then clean up: delete `src/counter.ts` and `src/assets/`, empty `src/main.ts` and `src/style.css`, and add `"strict": true` to `compilerOptions` in `tsconfig.json`.
+
+Now create the types. The `SearchState` union is the heart of the app: one value that says which screen to show, and carries exactly the data that screen needs. Then write `searchUsers(query, signal?)`. Remember from the Fetch lesson that `fetch` does not reject on `403` or `500`, so you must check the response yourself. Add a `GitHubError` class so callers get a friendly message.
+
+Write both files (`src/types.ts` and `src/github.ts`) before opening the solution. Check them by running `npx tsc --noEmit` (no errors) and, in the browser console, calling the endpoint with `fetch` to look at the real JSON.
+
+<Solution>
+
+```ts
+// src/types.ts
+export interface GitHubUser {
+  id: number;
+  login: string;
+  avatar_url: string;
+  html_url: string;
+  type: string;
+}
+
+export interface SearchResponse {
+  total_count: number;
+  items: GitHubUser[];
+}
+
+// One variable describes everything the UI can be showing.
+export type SearchState =
+  | { status: "idle" }
+  | { status: "loading"; query: string }
+  | { status: "error"; query: string; message: string }
+  | { status: "empty"; query: string }
+  | { status: "success"; query: string; users: GitHubUser[]; total: number };
+```
+
+```ts
+// src/github.ts
+import type { SearchResponse } from "./types";
+
+export class GitHubError extends Error {
+  readonly status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = "GitHubError";
+    this.status = status;
+  }
+}
+
+export async function searchUsers(
+  query: string,
+  signal?: AbortSignal,
+): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q: query, per_page: "12" });
+  const response = await fetch(`https://api.github.com/search/users?${params}`, {
+    signal,
+    headers: { Accept: "application/vnd.github+json" },
+  });
+
+  // fetch only rejects on network failure, so HTTP errors are our job.
+  if (response.status === 403 || response.status === 429) {
+    throw new GitHubError("Rate limit reached. Wait a minute and try again.", response.status);
+  }
+  if (!response.ok) {
+    throw new GitHubError(`GitHub returned an error (${response.status}).`, response.status);
+  }
+
+  return (await response.json()) as SearchResponse;
+}
+```
+
+</Solution>
+
+<Callout type="tip" title="Why a union instead of booleans?">
+With `isLoading`, `error` and `users` as separate variables, you can accidentally be loading and showing an error at once. A discriminated union makes those states impossible, and TypeScript checks you handled each one.
+</Callout>
+
+## Stage 2: Render every state
+
+Put the page structure in `index.html`, then write `render(state)` in `src/render.ts`. Rendering is a pure function of the state: clear the results, then draw whatever the state says. Two details matter. The user's `login` comes from an API, so it goes in with `textContent`, never `innerHTML`. And a `ui` object collects every element once at start-up, with a clear error if one is missing. Add the stylesheet too, then run `npm run dev` and confirm the page loads with "Type a username to start."
+
+<Solution>
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GitHub User Search</title>
+  </head>
+  <body>
+    <main id="app">
+      <h1>GitHub User Search</h1>
+
+      <form id="search-form" role="search">
+        <label for="query">Search GitHub users</label>
+        <div class="row">
+          <input id="query" name="query" type="search" placeholder="e.g. torvalds" autocomplete="off" />
+          <button type="submit">Search</button>
+        </div>
+      </form>
+
+      <section aria-labelledby="recent-heading" id="recent" hidden>
+        <div class="row">
+          <h2 id="recent-heading">Recent searches</h2>
+          <button type="button" id="clear-recent" class="link">Clear</button>
+        </div>
+        <ul id="recent-list" class="chips"></ul>
+      </section>
+
+      <p id="status" role="status" aria-live="polite"></p>
+      <ul id="results" class="cards"></ul>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+```
+
+```ts
+// src/render.ts
+import type { SearchState } from "./types";
+
+function getElement<T extends HTMLElement>(selector: string): T {
+  const element = document.querySelector<T>(selector);
+  if (!element) throw new Error(`Missing element: ${selector}`);
+  return element;
+}
+
+export const ui = {
+  form: getElement<HTMLFormElement>("#search-form"),
+  input: getElement<HTMLInputElement>("#query"),
+  status: getElement<HTMLParagraphElement>("#status"),
+  results: getElement<HTMLUListElement>("#results"),
+  recentSection: getElement<HTMLElement>("#recent"),
+  recentList: getElement<HTMLUListElement>("#recent-list"),
+  clearRecent: getElement<HTMLButtonElement>("#clear-recent"),
+};
+
+export function render(state: SearchState): void {
+  ui.results.replaceChildren();
+
+  switch (state.status) {
+    case "idle":
+      ui.status.textContent = "Type a username to start.";
+      break;
+    case "loading":
+      ui.status.textContent = `Searching for "${state.query}"…`;
+      break;
+    case "error":
+      ui.status.textContent = state.message;
+      break;
+    case "empty":
+      ui.status.textContent = `No users found for "${state.query}".`;
+      break;
+    case "success":
+      ui.status.textContent = `Showing ${state.users.length} of ${state.total.toLocaleString()} users for "${state.query}".`;
+      ui.results.append(
+        ...state.users.map((user) => {
+          const item = document.createElement("li");
+          const link = document.createElement("a");
+          link.href = user.html_url;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+
+          const avatar = document.createElement("img");
+          avatar.src = user.avatar_url;
+          avatar.alt = "";
+          avatar.width = 48;
+          avatar.height = 48;
+
+          const name = document.createElement("span");
+          name.textContent = user.login; // textContent: never innerHTML with API data
+
+          link.append(avatar, name);
+          item.append(link);
+          return item;
+        }),
+      );
+      break;
+  }
+}
+```
+
+```css
+/* src/style.css */
+:root { font-family: system-ui, sans-serif; color: #18181b; background: #fafafa; }
+body { margin: 0; }
+main { max-width: 40rem; margin: 0 auto; padding: 2rem 1rem; }
+[hidden] { display: none !important; }
+.row { display: flex; gap: 0.5rem; align-items: center; }
+input[type="search"] { flex: 1; padding: 0.6rem 0.8rem; border: 1px solid #d4d4d8; border-radius: 0.5rem; font-size: 1rem; }
+button { padding: 0.6rem 1rem; border: 0; border-radius: 0.5rem; background: #4f46e5; color: white; cursor: pointer; }
+.link, .chips button { background: none; color: #4f46e5; padding: 0.25rem 0.5rem; }
+.chips { display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0; list-style: none; }
+.chips button { border: 1px solid #c7d2fe; }
+#recent h2 { flex: 1; margin: 0; font-size: 1rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.75rem; padding: 0; list-style: none; }
+.cards a { display: flex; gap: 0.6rem; align-items: center; padding: 0.6rem; border: 1px solid #e4e4e7; border-radius: 0.6rem; background: white; color: inherit; text-decoration: none; }
+.cards img { border-radius: 50%; }
+```
+
+</Solution>
+
+## Stage 3: Search on submit
+
+Wire the form to the API in `src/main.ts`. Write `runSearch(query)` so it trims the input, shows `idle` for an empty query, shows `loading`, awaits `searchUsers`, and then renders `empty`, `success` or `error`. Add a `submit` listener that calls `preventDefault()` so the page does not reload.
+
+Test it: search for `torvalds`, then for something nobody has (`zzzzqqqq1234xy`), then switch off your network in DevTools and search again to see the error message.
+
+<Solution>
+
+```ts
+// src/main.ts
+import "./style.css";
+import { searchUsers } from "./github";
+import { render, ui } from "./render";
+
+async function runSearch(rawQuery: string): Promise<void> {
+  const query = rawQuery.trim();
+
+  if (!query) {
+    render({ status: "idle" });
+    return;
+  }
+
+  render({ status: "loading", query });
+
+  try {
+    const data = await searchUsers(query);
+
+    if (data.items.length === 0) {
+      render({ status: "empty", query });
+      return;
+    }
+
+    render({ status: "success", query, users: data.items, total: data.total_count });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Something went wrong.";
+    render({ status: "error", query, message });
+  }
+}
+
+ui.form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void runSearch(ui.input.value);
+});
+
+render({ status: "idle" });
+```
+
+</Solution>
+
+## Stage 4: Debounce and cancel
+
+Searching on every keystroke would burn through the rate limit and cause a subtle bug: if the answer for `ja` arrives after the answer for `javascript`, the screen shows the wrong results. Fix both problems:
+
+1. **Debounce** the `input` event so a search starts only after the user pauses for 500 ms.
+2. Keep an `AbortController`. Before each search call `controller?.abort()`, create a new controller, and pass its `signal` to `searchUsers`. An aborted request rejects with an `AbortError`, which you must ignore instead of showing as an error.
+
+Test it by typing quickly and watching the Network tab: you should see one request per pause, and cancelled requests marked as such if you type during a slow response.
+
+<Solution>
+
+Edit `src/main.ts`. Add this above `runSearch`:
+
+```ts
+let controller: AbortController | undefined;
+```
+
+At the start of `runSearch`, right after `const query`, abort the old request, and create a new controller just before the `loading` render:
+
+```ts
+  controller?.abort(); // a newer search replaces any request still in flight
+```
+
+```ts
+  controller = new AbortController();
+```
+
+Pass the signal, and ignore aborted requests in the `catch`:
+
+```ts
+    const data = await searchUsers(query, controller.signal);
+```
+
+```ts
+    if (error instanceof DOMException && error.name === "AbortError") return;
+```
+
+Finally, add the debounce helper and change the listeners:
+
+```ts
+function debounce<Args extends unknown[]>(fn: (...args: Args) => void, delay: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return (...args: Args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delay);
+  };
+}
+
+const debouncedSearch = debounce(runSearch, 500);
+
+ui.input.addEventListener("input", () => debouncedSearch(ui.input.value));
+
+ui.form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void runSearch(ui.input.value);
+});
+```
+
+</Solution>
+
+## Stage 5: Remember recent searches
+
+Create `src/recent.ts` with three functions: `getRecentSearches`, `addRecentSearch` and `clearRecentSearches`. Keep at most five terms, newest first, ignore case when removing duplicates, and never crash on corrupt saved data (revisit the Browser Storage lesson if you need it). Then add `renderRecent(terms)` to `render.ts` and connect everything in `main.ts`: save a term only when the search found users, show the chips on start-up, re-run a search when a chip is clicked (one delegated listener on the list), and clear on button click.
+
+<Solution>
+
+```ts
+// src/recent.ts
+const KEY = "github-search-recent-v1";
+const MAX = 5;
+
+export function getRecentSearches(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(KEY) ?? "[]");
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function addRecentSearch(term: string): string[] {
+  const clean = term.trim();
+  if (!clean) return getRecentSearches();
+
+  const rest = getRecentSearches().filter((t) => t.toLowerCase() !== clean.toLowerCase());
+  const next = [clean, ...rest].slice(0, MAX);
+  try {
+    localStorage.setItem(KEY, JSON.stringify(next));
+  } catch {
+    // Storage full or blocked: the list just won't persist.
+  }
+  return next;
+}
+
+export function clearRecentSearches(): void {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    // Nothing to clear if storage is unavailable.
+  }
+}
+```
+
+Add this function to the end of `src/render.ts`:
+
+```ts
+export function renderRecent(terms: string[]): void {
+  ui.recentSection.hidden = terms.length === 0;
+  ui.recentList.replaceChildren(
+    ...terms.map((term) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = term;
+      button.dataset.term = term;
+      item.append(button);
+      return item;
+    }),
+  );
+}
+```
+
+In `src/main.ts`, replace the `render` import and add the recent imports:
+
+```ts
+import { addRecentSearch, clearRecentSearches, getRecentSearches } from "./recent";
+import { render, renderRecent, ui } from "./render";
+```
+
+Inside `runSearch`, just before the final `render` call in the `try` block:
+
+```ts
+    addRecentSearch(query); // only remember searches that found someone
+    renderRecent(getRecentSearches());
+```
+
+At the very bottom of `main.ts`, replace the last `render` line with:
+
+```ts
+ui.recentList.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-term]");
+  if (!button?.dataset.term) return;
+  ui.input.value = button.dataset.term;
+  void runSearch(button.dataset.term);
+});
+
+ui.clearRecent.addEventListener("click", () => {
+  clearRecentSearches();
+  renderRecent([]);
+});
+
+renderRecent(getRecentSearches());
+render({ status: "idle" });
+```
+
+</Solution>
+
+## Stretch goals and checking your work
+
+Once everything works, try one or more of these:
+
+- **Pagination:** add a "Load more" button that requests `page=2` and appends, using the `Link` header or `total_count` to know when to stop.
+- **Validate the response:** parse the JSON with Zod instead of trusting a type assertion, and show a clear error if the shape is wrong.
+- **Keyboard support:** arrow keys move between results and Enter opens one; add `aria-live` text for screen readers.
+- **Profile panel:** clicking a user fetches `https://api.github.com/users/<login>` and shows their name, bio and follower count.
+- **Higher limits:** GitHub allows more requests with a personal access token.
+
+<Callout type="warning" title="Never ship a token in frontend code">
+Anything in a browser bundle, including `import.meta.env` values, can be read by every visitor. If you try the token stretch goal, use it only locally and never commit or deploy it. Real apps put tokens on a server, which you will build in the Node.js module.
+</Callout>
+
+Before calling it done, check each requirement above by hand, then run these:
+
+```bash
+npx tsc --noEmit
+npm run build
+```
+
+Both should finish without errors. Finally, push the project to a GitHub repository with a short README and a screenshot. It is your first portfolio piece, and you will reuse the structure (state union, render function, cancellation) when you rebuild this in React later.

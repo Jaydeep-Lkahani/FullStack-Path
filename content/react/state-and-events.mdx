@@ -1,0 +1,400 @@
+---
+title: State & Events
+summary: Make components interactive with useState and event handlers, then render lists with keys and show or hide UI conditionally.
+order: 3
+takeaways:
+  - State is a component's memory; call `useState` to get the current value and a setter, and calling the setter makes React render the component again.
+  - Event handlers are functions you pass to props like `onClick`, `onChange` and `onSubmit`; pass the function itself, do not call it.
+  - State is a snapshot, so the variable keeps the same value for that whole render, and a new value only appears on the next render.
+  - Never change state in place; create a new object or array with spread, `map` and `filter`, and use an updater function like `setCount(n => n + 1)` when the next value depends on the previous one.
+  - Render lists with `map` and give every item a stable, unique `key` such as an id, not the array index when the list can change.
+  - Show or hide UI with `if`, the ternary `? :` and `&&`, and compute values from state instead of storing copies of them.
+videos:
+  - title: "Every Beginner React Developer Makes This Mistake With State"
+    channel: "Web Dev Simplified"
+    duration: "6:37"
+    url: https://www.youtube.com/watch?v=tz0fDABt67g
+  - title: "Learn useState In 15 Minutes - React Hooks Explained"
+    channel: "Web Dev Simplified"
+    duration: "15:45"
+    url: https://www.youtube.com/watch?v=O6P86uwfdR0
+docs:
+  - title: "react.dev — State: A Component's Memory"
+    url: https://react.dev/learn/state-a-components-memory
+  - title: "react.dev — Responding to Events"
+    url: https://react.dev/learn/responding-to-events
+  - title: "react.dev — State as a Snapshot"
+    url: https://react.dev/learn/state-as-a-snapshot
+  - title: "react.dev — Updating Arrays in State"
+    url: https://react.dev/learn/updating-arrays-in-state
+  - title: "react.dev — Rendering Lists"
+    url: https://react.dev/learn/rendering-lists
+  - title: "react.dev — Conditional Rendering"
+    url: https://react.dev/learn/conditional-rendering
+---
+
+Until now your components were static: the same props gave the same page. Real apps respond to clicks, typing and data that changes, and in React that means **state**. This lesson is the one interviewers probe hardest (state as a snapshot, immutable updates, keys), and everything later in the module, from effects to forms to data fetching, builds on it. It was written for React 19 and TypeScript.
+
+## Events
+
+You attach a handler to an element with a prop whose name starts with `on`, written in camelCase:
+
+```tsx
+function Greeting() {
+  function handleClick() {
+    alert("Hello!");
+  }
+
+  return <button onClick={handleClick}>Say hello</button>;
+}
+```
+
+You pass the **function itself**. This is the most common beginner bug:
+
+```tsx
+<button onClick={handleClick}>OK</button>      {/* ✓ React calls it on click */}
+<button onClick={handleClick()}>Bad</button>   {/* ✗ calls it during render */}
+<button onClick={() => handleClick()}>OK</button> {/* ✓ wrapper, useful for arguments */}
+```
+
+Common events are `onClick`, `onChange` (inputs), `onSubmit` (forms), `onKeyDown`, `onMouseEnter` and `onFocus`. Your handler receives an **event object**, similar to the one from the DOM lessons. In a form's `onSubmit` handler, call `event.preventDefault()` to stop the browser's full page reload (you'll see it in the todo list below). Handlers are usually written as `handleX` functions inside the component, and because they are closures they can use its props and state.
+
+## State with useState
+
+A normal variable can't make the screen change:
+
+```tsx
+function Broken() {
+  let count = 0;
+  return <button onClick={() => (count += 1)}>Clicked {count}</button>; // never updates
+}
+```
+
+Two problems: the variable is reset to `0` every time the function runs again, and changing it doesn't tell React to run again. **State** solves both. The `useState` hook gives the component memory that survives renders, and a setter that triggers a new render:
+
+```tsx
+import { useState } from "react";
+
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <div>
+      <p>Count: {count}</p>
+      <button type="button" onClick={() => setCount(count + 1)}>
+        +1
+      </button>
+    </div>
+  );
+}
+```
+
+Reading `const [count, setCount] = useState(0)`: `useState(0)` returns an array with two items, the current value and a setter, and array destructuring names them. `0` is the initial value, used on the first render only. When you click, `setCount(1)` tells React "the value is now 1, render again". React calls `Counter()` again, this time `useState` returns `1`, and the page updates.
+
+A component can use `useState` as many times as it needs, and each component instance has its own state (two `<Counter />` tags count independently). The state can be any value: a string, a boolean, an object, an array.
+
+### The rules of hooks
+
+Functions starting with `use` are **hooks**. Call them only at the top level of a component (not inside `if`, loops or nested functions), because React tracks state by call order, and the linter enforces this. Also never call a setter directly in the component body; that triggers a render that calls it again, ending in an infinite loop. Set state in event handlers.
+
+### State is a snapshot
+
+This surprises everyone once. Each render sees a fixed **snapshot** of the state, and setting state doesn't change the variable in the code that is already running:
+
+```tsx
+function handleClick() {
+  console.log("before:", count); // 0
+  setCount(count + 1);
+  console.log("after:", count);  // still 0!
+}
+```
+
+`count` is a constant for this render. `setCount(1)` schedules the **next** render, where `count` will be `1`. The same reasoning explains this one:
+
+```tsx
+<button onClick={() => {
+  setCount(count + 1); // count is 0, so this says "set to 1"
+  setCount(count + 1); // "set to 1" again
+  setCount(count + 1); // and again
+}}>+3</button>
+```
+
+After one click the count is `1`, not `3`. When the next value depends on the previous one, pass an **updater function**. React queues it and feeds each call the latest value:
+
+```tsx
+setCount((n) => n + 1);
+setCount((n) => n + 1);
+setCount((n) => n + 1); // after one click: 3
+```
+
+React also **batches** updates: it waits until the handler finishes, then renders once with all the changes.
+
+## Updating objects and arrays
+
+React decides whether state changed by comparing the old and new value with `Object.is`. For objects and arrays that means a different reference. Mutating the existing one keeps the same reference, so React sees no change:
+
+```tsx
+const [items, setItems] = useState(["a", "b"]);
+
+// ✗ Mutation: same array, nothing re-renders
+items.push("c");
+setItems(items);
+
+// ✓ New array
+setItems([...items, "c"]);
+```
+
+Treat state as **immutable**: never change it, always replace it with a copy. The tools you already know from the ES6 lesson do the job:
+
+| Goal | Don't (mutates) | Do (new value) |
+| ---- | --------------- | -------------- |
+| Add | `push`, `unshift` | `[...items, item]` |
+| Remove | `splice`, `pop` | `items.filter(i => i.id !== id)` |
+| Change one item | `items[0].done = true` | `items.map(i => i.id === id ? { ...i, done: true } : i)` |
+| Update an object field | `user.age = 30` | `setUser({ ...user, age: 30 })` |
+
+For nested objects, copy every level you change: `{ ...user, address: { ...user.address, city: "Pune" } }`.
+
+## Rendering lists
+
+Turn an array into elements with `map`:
+
+```tsx
+const people = [
+  { id: 1, name: "Asha" },
+  { id: 2, name: "Ben" },
+];
+
+<ul>
+  {people.map((person) => (
+    <li key={person.id}>{person.name}</li>
+  ))}
+</ul>
+```
+
+React needs the `key` prop on each item to tell which item is which between renders. Without it you get the console warning `Each child in a list should have a unique "key" prop`.
+
+### Choosing keys
+
+- Use a **stable, unique id** from your data (a database id, for example).
+- Keys only need to be unique among siblings, and they are not passed as a prop. Never create them with `Math.random()` during render, or every render looks like a brand new list.
+- Avoid the **array index** as a key when items can be added, removed or reordered:
+
+```tsx
+{people.map((person, index) => (
+  <li key={index}>{person.name} <input placeholder="note" /></li>
+))}
+```
+
+Type a note next to Asha, remove Asha, and the note now sits next to Ben, because index `0` is "the same item" to React. With `key={person.id}` the note leaves with Asha. Index keys are fine only for lists that never change.
+
+## Conditional rendering
+
+JSX has no `if` statement, but you have three options. Use whichever reads best:
+
+```tsx
+function Status({ loading, error, user }: StatusProps) {
+  if (loading) return <p>Loading...</p>; // 1. early return with plain if
+
+  return (
+    <div>
+      {error ? <p className="error">{error}</p> : <p>All good</p>} {/* 2. ternary */}
+      {user && <p>Hello, {user.name}</p>} {/* 3. && : something or nothing */}
+    </div>
+  );
+}
+```
+
+Remember from the last lesson that `{count && <Badge />}` shows a stray `0` when `count` is `0`; compare explicitly with `count > 0 &&`.
+
+## Putting it together: a todo list
+
+This component uses everything above. It keeps the list and the input text in state, adds with spread, toggles with `map`, deletes with `filter`, and shows an empty message:
+
+```tsx
+import { useState } from "react";
+
+type Todo = { id: number; text: string; done: boolean };
+
+export function Todos() {
+  const [todos, setTodos] = useState<Todo[]>([
+    { id: 1, text: "Learn JSX", done: true },
+    { id: 2, text: "Learn state", done: false },
+  ]);
+  const [text, setText] = useState("");
+  const [nextId, setNextId] = useState(3);
+
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = text.trim();
+    if (trimmed === "") return;
+    setTodos([...todos, { id: nextId, text: trimmed, done: false }]);
+    setNextId(nextId + 1);
+    setText("");
+  }
+
+  function toggle(id: number) {
+    setTodos(todos.map((t) => (t.id === id ? { ...t, done: !t.done } : t)));
+  }
+
+  function remove(id: number) {
+    setTodos(todos.filter((t) => t.id !== id));
+  }
+
+  return (
+    <div>
+      <form onSubmit={handleSubmit}>
+        <input
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="New todo"
+        />
+        <button type="submit">Add</button>
+      </form>
+
+      {todos.length === 0 ? (
+        <p>Nothing to do!</p>
+      ) : (
+        <ul>
+          {todos.map((todo) => (
+            <li key={todo.id}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={todo.done}
+                  onChange={() => toggle(todo.id)}
+                />
+                {todo.text}
+              </label>
+              <button type="button" onClick={() => remove(todo.id)}>
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p>{todos.filter((t) => !t.done).length} of {todos.length} left</p>
+    </div>
+  );
+}
+```
+
+Points worth noticing:
+
+- **Controlled input.** The input's `value` comes from state and `onChange` writes typed text back, so React state is the single source of truth. Lesson 11 covers forms in depth.
+- **Derived values aren't state.** "How many are left" is computed from `todos` during render. Storing it in a second `useState` would force you to keep two values in sync, which is a classic bug. Compute what you can from existing state.
+- `nextId` is stored as state so each todo gets a unique key. Real apps usually get ids from a database.
+
+## Common mistakes
+
+- **Calling instead of passing**: `onClick={handleClick()}` runs during render.
+- **Expecting the state variable to change right after the setter.** It doesn't until the next render.
+- **Mutating state** (`push`, `item.done = true`), or using the **index as a key** in a changing list.
+- **Copying props or computed values into state** instead of computing them during render.
+
+<Exercise title="Predict the output">
+A component has `const [count, setCount] = useState(0)` and this button:
+
+```tsx
+<button onClick={() => {
+  setCount(count + 1);
+  setCount(count + 1);
+  setCount((c) => c + 1);
+}}>go</button>
+```
+
+What is `count` after one click, and what is it after a second click?
+
+<Solution>
+After the first click `count` is `2`, after the second it is `4`. In the first render `count` is `0`, so the first two calls both queue "set to 1". The third call is an updater, so it takes the latest queued value (`1`) and returns `2`. On the second click `count` is `2`, so the first two set `3`, and the updater makes it `4`. The updater is what makes each call build on the last one.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+Clicking "Add item" should add "c" to the list, but nothing changes on screen. Find the bug and fix it, and also add the missing piece React warns about in the console.
+
+```tsx
+const [items, setItems] = useState(["a", "b"]);
+
+return (
+  <div>
+    <ul>{items.map((item) => <li>{item}</li>)}</ul>
+    <button onClick={() => { items.push("c"); setItems(items); }}>Add item</button>
+  </div>
+);
+```
+
+<Solution>
+`push` mutates the existing array, and `setItems(items)` passes the same reference, so React sees no change and skips the render. Create a new array, and give each `li` a key (the strings are unique here, so they can be the keys):
+
+```tsx
+<div>
+  <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
+  <button onClick={() => setItems([...items, "c"])}>Add item</button>
+</div>
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Show and hide">
+Build a `Details` component with a `title` prop and `children`. It renders a button labelled `Show <title>` or `Hide <title>` (using the prop value) and shows the children only while open.
+
+<Solution>
+```tsx
+import { useState } from "react";
+
+export function Details({ title, children }: { title: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <section>
+      <button type="button" onClick={() => setOpen(!open)}>
+        {open ? "Hide" : "Show"} {title}
+      </button>
+      {open && <div>{children}</div>}
+    </section>
+  );
+}
+```
+
+`open` is state, the label uses a ternary, and `&&` renders the content only when `open` is `true`.
+</Solution>
+</Exercise>
+
+<Exercise title="Filterable list">
+Given `const tasks = [{ id: 1, text: "Write lesson", done: true }, ...]`, show three buttons "all", "active" and "done" and list only the matching tasks. Store only the selected filter in state, not a filtered copy of the list.
+
+<Solution>
+```tsx
+import { useState } from "react";
+
+type Task = { id: number; text: string; done: boolean };
+type Filter = "all" | "active" | "done";
+
+export function FilterableList({ tasks }: { tasks: Task[] }) {
+  const [filter, setFilter] = useState<Filter>("all");
+
+  const visible = tasks.filter((task) => {
+    if (filter === "active") return !task.done;
+    if (filter === "done") return task.done;
+    return true;
+  });
+
+  return (
+    <div>
+      {(["all", "active", "done"] as const).map((name) => (
+        <button key={name} type="button" aria-pressed={filter === name} onClick={() => setFilter(name)}>
+          {name}
+        </button>
+      ))}
+      <ul>
+        {visible.map((task) => <li key={task.id}>{task.text}</li>)}
+      </ul>
+    </div>
+  );
+}
+```
+
+`visible` is derived on every render from `tasks` and `filter`, so there is nothing to keep in sync.
+</Solution>
+</Exercise>

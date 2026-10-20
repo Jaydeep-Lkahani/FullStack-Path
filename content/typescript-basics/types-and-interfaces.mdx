@@ -1,0 +1,414 @@
+---
+title: Types, Interfaces & Narrowing
+summary: Add static types to JavaScript — annotations, inference, unions, interfaces vs type aliases, narrowing, and strict mode.
+order: 1
+takeaways:
+  - TypeScript is JavaScript plus a compile-time type checker; types are erased and add no runtime cost.
+  - Let inference do the work for variables, and annotate function parameters, exported APIs and ambiguous cases.
+  - Union types (A | B) plus narrowing (typeof, in, ===, discriminated unions) model "one of several shapes" safely.
+  - Use interface or type for object shapes; use unknown instead of any when you do not know a type; turn on strict mode.
+  - Types do not validate data at runtime - API responses and user input still need validation (for example with Zod).
+videos:
+  - title: "Learn TypeScript - Crash Course for Beginners"
+    channel: "freeCodeCamp.org"
+    duration: "1:00:34"
+    url: https://www.youtube.com/watch?v=ZvZ7gvcmPmI
+  - title: "Learn TypeScript in 40 Minutes (Full Course)"
+    channel: "RoadsideCoder"
+    duration: "40:40"
+    url: https://www.youtube.com/watch?v=DTR2p7D6tjk
+docs:
+  - title: "TypeScript handbook: everyday types"
+    url: https://www.typescriptlang.org/docs/handbook/2/everyday-types.html
+  - title: "TypeScript handbook: narrowing"
+    url: https://www.typescriptlang.org/docs/handbook/2/narrowing.html
+  - title: "TypeScript handbook: object types"
+    url: https://www.typescriptlang.org/docs/handbook/2/objects.html
+  - title: "TSConfig reference: strict"
+    url: https://www.typescriptlang.org/tsconfig/#strict
+---
+
+**TypeScript** is a superset of JavaScript that adds a **static type system**. You write types; the compiler checks them and reports mistakes **before** your code runs; then the types are erased and plain JavaScript is output. It is now the default for serious React, Node and Next.js projects, and many job descriptions require it.
+
+## Setup
+
+```bash
+mkdir ts-playground && cd ts-playground
+npm init -y
+npm install -D typescript tsx
+npx tsc --init          # creates tsconfig.json
+npx tsx index.ts        # run TypeScript directly (great for learning)
+npx tsc --noEmit        # type-check only
+```
+
+For experiments you can also use the online **TypeScript Playground** (search for it) — no install needed.
+
+Recommended `tsconfig.json` essentials:
+
+```json title="tsconfig.json"
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true
+  }
+}
+```
+
+`"strict": true` is the most important line. It switches on a family of checks (`strictNullChecks`, `noImplicitAny`, …) that catch the bugs you actually care about. Always use it for new code.
+
+## Basic types and annotations
+
+You annotate with `: Type` after a name:
+
+```ts
+const username: string = "ada";
+let age: number = 36;
+let isAdmin: boolean = false;
+let nothing: null = null;
+let missing: undefined = undefined;
+
+const scores: number[] = [90, 85];          // or Array<number>
+const pair: [string, number] = ["age", 36]; // tuple: fixed length and positions per index
+```
+
+### Inference
+
+TypeScript can often work out the type itself — you don't need to annotate every variable.
+
+```ts
+let city = "Paris";      // inferred as string
+city = 42;               // ❌ Type 'number' is not assignable to type 'string'
+
+const origin = "Paris";  // inferred as the literal type "Paris" (const can't change)
+const nums = [1, 2, 3];  // number[]
+```
+
+**Guideline:** annotate **function parameters** and **exported function return types** (they're your API and can't be inferred); let TypeScript infer local variables.
+
+### Functions
+
+```ts
+function add(a: number, b: number): number {
+  return a + b;
+}
+
+const greet = (name: string, greeting = "Hello"): string => `${greeting}, ${name}`;   // default → optional
+
+function logId(id: string, prefix?: string) {      // optional parameter: string | undefined
+  console.log(prefix ? `${prefix}-${id}` : id);
+}
+
+type Callback = (error: Error | null, data?: string) => void;   // function type
+
+function noReturn(): void {}                       // returns nothing useful
+function fail(message: string): never {            // never returns normally
+  throw new Error(message);
+}
+```
+
+### `any`, `unknown` and `never`
+
+```ts
+let a: any = "x";          // opts OUT of type checking: a.foo.bar() compiles — avoid!
+let u: unknown = fetchedValue;   // "I don't know yet" — must narrow before use
+u.toUpperCase();           // ❌ error: 'u' is of type 'unknown'
+if (typeof u === "string") u.toUpperCase();   // ✅ narrowed
+```
+
+`any` silently spreads and defeats the purpose of TypeScript. Prefer `unknown` for values of uncertain type (parsed JSON, caught errors), then narrow.
+
+## Object types: `interface` and `type`
+
+```ts
+interface User {
+  id: number;
+  name: string;
+  email?: string;            // optional
+  readonly createdAt: Date;  // cannot be reassigned after creation
+}
+
+const user: User = { id: 1, name: "Ada", createdAt: new Date() };
+user.createdAt = new Date();   // ❌ cannot assign to a readonly property
+user.nickname = "x";           // ❌ property doesn't exist on type User
+```
+
+You can also declare shapes with a **type alias**:
+
+```ts
+type Point = { x: number; y: number };
+type ID = string | number;
+```
+
+### `interface` vs `type`
+
+Both describe object shapes and are largely interchangeable.
+
+| Feature                          | `interface`            | `type`                         |
+| -------------------------------- | ---------------------- | ------------------------------ |
+| Object shapes                    | ✅                     | ✅                             |
+| Extending                        | `extends`              | `&` (intersection)             |
+| Declaration merging (re-opening) | ✅                     | ❌                             |
+| Unions, tuples, primitives, mapped/conditional types | ❌ | ✅                          |
+
+A practical rule: use `interface` for public object shapes and class contracts; use `type` for unions, utility combos and everything else. Consistency within a codebase matters more than the choice.
+
+```ts
+interface Animal { name: string }
+interface Dog extends Animal { breed: string }
+
+type Timestamps = { createdAt: Date; updatedAt: Date };
+type Post = { title: string } & Timestamps;       // intersection: has all properties of both
+```
+
+## Union and literal types
+
+A **union** says a value is *one of* several types:
+
+```ts
+type Id = string | number;
+
+function formatId(id: Id) {
+  return id.toUpperCase();   // ❌ number doesn't have toUpperCase
+}
+
+type Status = "idle" | "loading" | "success" | "error";   // literal union ≈ enum
+let status: Status = "loading";
+status = "done";   // ❌ not assignable
+```
+
+Literal unions are the idiomatic replacement for `enum` in most code: zero runtime cost, readable, exhaustively checkable.
+
+## Narrowing
+
+Narrowing is how TypeScript refines a union to a specific type inside a branch. The checker understands these patterns:
+
+```ts
+function printId(id: string | number) {
+  if (typeof id === "string") {
+    id.toUpperCase();        // string here
+  } else {
+    id.toFixed(2);           // number here
+  }
+}
+
+function len(x: string | string[] | null) {
+  if (x === null) return 0;             // equality / truthiness
+  if (Array.isArray(x)) return x.length;
+  return x.length;                      // string
+}
+
+interface Cat { meow(): void }
+interface Dog { bark(): void }
+function speak(pet: Cat | Dog) {
+  if ("meow" in pet) pet.meow();        // `in` narrowing
+  else pet.bark();
+}
+
+if (error instanceof Error) console.log(error.message);   // instanceof
+```
+
+### Discriminated unions
+
+Give every variant a shared literal field (the **discriminant**) and TypeScript narrows on it. This is the most useful pattern in application code — it models states that can't be inconsistent.
+
+```ts
+type RequestState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "success"; data: string[] }
+  | { status: "error"; error: Error };
+
+function render(state: RequestState) {
+  switch (state.status) {
+    case "idle":
+      return "Nothing yet";
+    case "loading":
+      return "Loading…";
+    case "success":
+      return state.data.join(", ");     // `data` exists only here
+    case "error":
+      return state.error.message;       // `error` exists only here
+    default: {
+      const _exhaustive: never = state; // compile error if you add a variant and forget a case
+      return _exhaustive;
+    }
+  }
+}
+```
+
+Compare this with `{ loading: boolean; data?: string[]; error?: Error }`, which allows impossible combinations like `loading: true` with an error.
+
+### Type assertions (use sparingly)
+
+```ts
+const input = document.querySelector("#name") as HTMLInputElement;   // "trust me"
+const value = input.value;
+
+// querySelector returns Element | null — assertion silences the null check. Safer:
+const el = document.querySelector<HTMLInputElement>("#name");
+if (el) console.log(el.value);
+```
+
+`as` doesn't convert anything at runtime; it just overrides the checker. Overusing it hides bugs. The non-null assertion `value!` is the same idea. Prefer real checks.
+
+## Null safety
+
+With `strict`, `null` and `undefined` are **not** assignable to other types, eliminating a huge class of "cannot read properties of undefined" errors.
+
+```ts
+function getLength(s: string | undefined) {
+  return s.length;           // ❌ 's' is possibly 'undefined'
+}
+function getLengthSafe(s?: string) {
+  return s?.length ?? 0;     // ✅ optional chaining + nullish coalescing
+}
+```
+
+## Arrays, objects and index signatures
+
+```ts
+const prices: Record<string, number> = { apple: 1, pear: 2 };   // dictionary
+prices["kiwi"] = 3;
+const first = [1, 2, 3][0];            // number (or number | undefined with noUncheckedIndexedAccess)
+
+interface Dictionary { [key: string]: number }   // index signature (same as Record<string, number>)
+```
+
+## Enums and `as const`
+
+```ts
+const ROLES = ["admin", "editor", "viewer"] as const;   // readonly tuple of literals
+type Role = (typeof ROLES)[number];                     // "admin" | "editor" | "viewer"
+
+const config = { env: "prod", retries: 3 } as const;    // everything readonly + literal
+```
+
+TypeScript `enum` exists but emits runtime code and has quirks; `as const` objects/arrays plus literal unions are usually preferred.
+
+## Types are erased: runtime validation
+
+TypeScript checks **your code**, not the data arriving at runtime:
+
+```ts
+interface Todo { id: number; title: string }
+const res = await fetch("/api/todo/1");
+const todo: Todo = await res.json();   // compiles — but `json()` returns any! The server might send anything.
+```
+
+For data crossing a boundary (API responses, form input, environment variables, `JSON.parse`), validate at runtime with a schema library such as **Zod** and derive the type from it:
+
+```ts
+import { z } from "zod";
+
+const TodoSchema = z.object({ id: z.number(), title: z.string() });
+type Todo = z.infer<typeof TodoSchema>;
+
+const todo = TodoSchema.parse(await res.json());   // throws if the shape is wrong
+```
+
+You'll use this pairing throughout the React and Node modules.
+
+## Working with libraries
+
+Most npm packages ship their own types. For older ones install community types from DefinitelyTyped:
+
+```bash
+npm install -D @types/node @types/express
+```
+
+Your editor (VS Code) shows types on hover and gives autocomplete everywhere — that productivity gain alone is a major reason teams adopt TypeScript.
+
+<Callout type="tip" title="Read the error from the bottom">
+TypeScript errors can be long. The **last lines** usually state the actual mismatch ("Type 'string' is not assignable to type 'number'"). Hover over variables to see inferred types and build your intuition.
+</Callout>
+
+<Exercise title="Fix the types">
+Make this compile under `strict` without using `any`:
+
+```ts
+function getFirst(items) {
+  return items[0];
+}
+const user = { name: "Ada", email: null };
+console.log(user.email.toLowerCase());
+const input = document.getElementById("age");
+console.log(input.value + 1);
+```
+
+<Solution>
+```ts
+function getFirst<T>(items: T[]): T | undefined {
+  return items[0];
+}
+
+const user: { name: string; email: string | null } = { name: "Ada", email: null };
+console.log(user.email?.toLowerCase());
+
+const input = document.getElementById("age");
+if (input instanceof HTMLInputElement) {
+  console.log(Number(input.value) + 1);
+}
+```
+Note `input.value` is a **string**, so `+ 1` would have concatenated — TypeScript guided us toward converting with `Number`. (`getFirst` uses a generic; the next lesson covers them.)
+</Solution>
+</Exercise>
+
+<Exercise title="Model a payment">
+Define a `Payment` discriminated union with `card` (cardNumber, expiry), `paypal` (email) and `bank` (iban) variants, and a function `describe(payment)` that returns a string for each, with an exhaustiveness check.
+
+<Solution>
+```ts
+type Payment =
+  | { method: "card"; cardNumber: string; expiry: string }
+  | { method: "paypal"; email: string }
+  | { method: "bank"; iban: string };
+
+function describe(p: Payment): string {
+  switch (p.method) {
+    case "card":
+      return `Card ending ${p.cardNumber.slice(-4)}`;
+    case "paypal":
+      return `PayPal (${p.email})`;
+    case "bank":
+      return `Bank ${p.iban}`;
+    default: {
+      const _never: never = p;
+      return _never;
+    }
+  }
+}
+```
+Add a fourth variant and watch the compiler flag `describe`.
+</Solution>
+</Exercise>
+
+<Exercise title="Safe JSON parsing">
+Write `parseJson(text: string): unknown` and a type guard `isUser(value: unknown): value is User` for `interface User { id: number; name: string }`. Use them so you can safely read `user.name` from a JSON string.
+
+<Solution>
+```ts
+interface User { id: number; name: string }
+
+function isUser(value: unknown): value is User {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as Record<string, unknown>).id === "number" &&
+    typeof (value as Record<string, unknown>).name === "string"
+  );
+}
+
+const data: unknown = JSON.parse('{"id":1,"name":"Ada"}');
+if (isUser(data)) {
+  console.log(data.name.toUpperCase());   // narrowed to User
+} else {
+  console.error("Invalid user payload");
+}
+```
+A schema library like Zod does this for you with far less code.
+</Solution>
+</Exercise>

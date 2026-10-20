@@ -1,0 +1,287 @@
+---
+title: How the Web Works
+summary: What really happens between typing a URL and seeing a page — DNS, TCP, HTTP, the browser, and the client/server model.
+order: 1
+takeaways:
+  - The web is a request/response system - a client asks, a server answers, and HTTP is the language they speak.
+  - DNS turns a domain name into an IP address; TCP/TLS sets up a reliable, encrypted channel; HTTP carries the actual request.
+  - An HTTP message is a start line, headers and an optional body. Status codes tell you what happened (2xx ok, 3xx redirect, 4xx you erred, 5xx server erred).
+  - The browser parses HTML into the DOM, CSS into the CSSOM, combines them into a render tree, then lays out and paints.
+  - Full stack work is deciding what runs on the client, what runs on the server, and what travels between them.
+videos:
+  - title: "DNS Explained in 100 Seconds"
+    channel: "Fireship"
+    duration: "2:15"
+    url: https://www.youtube.com/watch?v=UVR9lhUGAyU
+  - title: "How websites and HTTP work? Web Basics Crash Course"
+    channel: "Mehul Mohan"
+    duration: "37:54"
+    url: https://www.youtube.com/watch?v=iD2fgC74ZtA
+docs:
+  - title: "MDN: How the Web works"
+    url: https://developer.mozilla.org/en-US/docs/Learn_web_development/Getting_started/Web_standards/How_the_Web_works
+  - title: "MDN: An overview of HTTP"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Overview
+  - title: "MDN: HTTP response status codes"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status
+  - title: "MDN: Populating the page: how browsers work"
+    url: https://developer.mozilla.org/en-US/docs/Web/Performance/How_browsers_work
+---
+
+You already build UIs, so you know what a page *looks* like. This lesson is about what happens **before** the first pixel: how bytes travel from a server on the other side of the world to your browser. Everything later in this course — `fetch`, REST APIs, Server Components, caching, auth cookies — sits on top of this model.
+
+## The client/server model
+
+Every interaction on the web is a conversation between two roles:
+
+- **Client** — the program that *asks*. Usually a browser, but also a mobile app, `curl`, or another server.
+- **Server** — the program that *answers*. It listens on a network port and responds to requests.
+
+A single machine can play both roles. Your Next.js server is a *server* to the browser, but it is a *client* when it calls a database or a payment API.
+
+```text
+┌─────────┐   HTTP request     ┌─────────┐
+│ Browser │ ─────────────────▶ │ Server  │
+│(client) │ ◀───────────────── │         │
+└─────────┘   HTTP response    └─────────┘
+```
+
+The conversation is **stateless**: the server does not remember you between requests unless you send something that identifies you (a cookie, a token). Keep this in mind — it explains why authentication works the way it does later on.
+
+## What happens when you type a URL
+
+Let's follow `https://example.com/products?id=42` from keypress to page.
+
+### 1. Parsing the URL
+
+A URL has several parts:
+
+```text
+https://example.com:443/products?id=42#reviews
+└─┬──┘   └────┬────┘└┬┘└───┬───┘└──┬──┘└──┬──┘
+scheme     host   port  path   query  fragment
+```
+
+- **scheme** — the protocol (`https`).
+- **host** — which server (`example.com`).
+- **port** — which program on that server (443 is the default for HTTPS, 80 for HTTP).
+- **path** — which resource.
+- **query** — extra key/value parameters.
+- **fragment** — a position inside the page; it is *never sent to the server*.
+
+You can explore this in the browser console:
+
+```js
+const url = new URL("https://example.com:443/products?id=42#reviews");
+console.log(url.hostname);            // "example.com"
+console.log(url.pathname);            // "/products"
+console.log(url.searchParams.get("id")); // "42"
+console.log(url.hash);                // "#reviews"
+```
+
+### 2. DNS: names to numbers
+
+Computers route traffic by **IP address** (like `93.184.216.34`), not by names. **DNS** (Domain Name System) is the internet's phone book.
+
+1. The browser checks its own cache, then the operating system's cache.
+2. If missing, it asks a **recursive resolver** (usually your ISP or `1.1.1.1` / `8.8.8.8`).
+3. The resolver walks the hierarchy: **root server → `.com` TLD server → the domain's authoritative name server**, which returns the IP.
+4. The answer is cached for a duration called the **TTL**.
+
+Try it yourself in a terminal:
+
+```bash
+dig example.com +short
+# 93.184.216.34
+```
+
+<Callout type="tip" title="Why DNS matters to you">
+When you deploy a site and "the domain isn't working yet", you are usually waiting for DNS records to propagate (cached copies expiring). Records you will meet: **A** (name → IPv4), **AAAA** (IPv6), **CNAME** (alias to another name), **TXT** (verification, email policies).
+</Callout>
+
+### 3. TCP and TLS: a reliable, private channel
+
+With the IP address known, the browser opens a **TCP connection** (a "three-way handshake": SYN, SYN-ACK, ACK). TCP guarantees that bytes arrive complete and in order.
+
+For `https://`, a **TLS handshake** follows: the server proves its identity with a certificate, and both sides agree on encryption keys. After that, everything is encrypted — anyone listening on the Wi-Fi sees only gibberish. (HTTP/3 replaces TCP with QUIC over UDP to cut these round trips, but the idea is the same.)
+
+### 4. The HTTP request
+
+Now the browser sends the actual request. HTTP/1.1 is human-readable text, which makes it great for learning:
+
+```http
+GET /products?id=42 HTTP/1.1
+Host: example.com
+Accept: text/html
+Accept-Language: en-US
+Cookie: session=abc123
+User-Agent: Mozilla/5.0 ...
+```
+
+A request has:
+
+- A **method** — what you want to do.
+- A **path** — what to do it to.
+- **Headers** — metadata (who you are, what formats you accept, cookies).
+- An optional **body** — data you send (forms, JSON).
+
+| Method   | Meaning                         | Has body? | Safe/idempotent* |
+| -------- | ------------------------------- | --------- | ---------------- |
+| `GET`    | Read a resource                 | No        | Yes / Yes        |
+| `POST`   | Create / trigger an action      | Yes       | No / No          |
+| `PUT`    | Replace a resource entirely     | Yes       | No / Yes         |
+| `PATCH`  | Partially update a resource     | Yes       | No / No          |
+| `DELETE` | Remove a resource               | Rarely    | No / Yes         |
+
+\*Safe = doesn't change server state. Idempotent = repeating it has the same effect as doing it once. You'll lean on these ideas when you design REST APIs in Phase 2.
+
+### 5. The HTTP response
+
+The server replies with a status line, headers and a body:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Cache-Control: max-age=3600
+Set-Cookie: session=abc123; HttpOnly; Secure
+
+<!doctype html>
+<html>...
+```
+
+The **status code** is the first thing to read:
+
+| Range | Meaning       | Common codes                                                              |
+| ----- | ------------- | ------------------------------------------------------------------------- |
+| 1xx   | Informational | `101 Switching Protocols` (WebSockets)                                    |
+| 2xx   | Success       | `200 OK`, `201 Created`, `204 No Content`                                 |
+| 3xx   | Redirection   | `301 Moved Permanently`, `302 Found`, `304 Not Modified`                  |
+| 4xx   | Client error  | `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `429 Too Many Requests` |
+| 5xx   | Server error  | `500 Internal Server Error`, `502 Bad Gateway`, `503 Service Unavailable` |
+
+<Callout type="warning" title="401 vs 403">
+`401` means "I don't know who you are — authenticate". `403` means "I know who you are, and you're not allowed". Mixing these up is a classic interview slip.
+</Callout>
+
+The `Content-Type` header tells the browser how to interpret the body: `text/html`, `application/json`, `image/png`, and so on.
+
+### 6. The browser renders the page
+
+The browser's **rendering pipeline** turns HTML bytes into pixels:
+
+1. **Parse HTML → DOM** (Document Object Model, a tree of nodes). While parsing, it discovers more resources — CSS, scripts, images, fonts — and requests them (each one is another HTTP request, which is why one page load can trigger dozens).
+2. **Parse CSS → CSSOM**.
+3. Combine DOM + CSSOM into the **render tree** (only visible nodes, with computed styles).
+4. **Layout** — compute the size and position of every box.
+5. **Paint** — fill in pixels (text, colors, borders, shadows).
+6. **Composite** — layers are combined on the GPU.
+
+JavaScript is the wild card. A classic `<script>` **blocks HTML parsing** while it downloads and runs, because it might change the DOM. That's why you will see:
+
+```html
+<script src="app.js" defer></script>  <!-- download in parallel, run after parsing, in order -->
+<script src="stats.js" async></script> <!-- download in parallel, run as soon as ready -->
+```
+
+Modern frameworks (React, Next.js) shift work around this pipeline: the server can send ready-made HTML (fast first paint) and JavaScript then **hydrates** it to make it interactive. You'll study exactly how in Phase 3.
+
+## Seeing it for yourself
+
+You have the best tool already installed: **browser DevTools**.
+
+1. Open DevTools → **Network** tab and reload any page.
+2. Click a request. Inspect the **Headers** (request and response), **Preview/Response** and **Timing** (DNS lookup, connection, TLS, waiting, download).
+3. Filter by `Fetch/XHR` to see API calls a site makes.
+
+And from the terminal, `curl -i` shows the raw response:
+
+```bash
+curl -i https://example.com
+```
+
+```bash
+# Follow redirects, show only headers
+curl -sIL http://github.com
+```
+
+## Putting it together: a tiny server
+
+Understanding is deeper when you build the other side. Here is a complete HTTP server using only Node.js — no frameworks. Save it as `server.js` and run `node server.js` (we'll cover Node properly in Phase 2):
+
+```js title="server.js"
+import { createServer } from "node:http";
+
+const server = createServer((req, res) => {
+  console.log(`${req.method} ${req.url}`);
+
+  if (req.url === "/api/hello") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ message: "Hello from the server" }));
+    return;
+  }
+
+  if (req.url === "/") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end("<h1>It works</h1>");
+    return;
+  }
+
+  res.writeHead(404, { "Content-Type": "text/plain" });
+  res.end("Not found");
+});
+
+server.listen(3000, () => console.log("Listening on http://localhost:3000"));
+```
+
+Visit `http://localhost:3000/`, then `http://localhost:3000/api/hello`, then something nonexistent, and watch each response in the Network tab. Every framework you'll learn — Express, Next.js route handlers — is a more convenient way of writing exactly this.
+
+## Static vs dynamic, and where code runs
+
+A last concept that shapes the whole course:
+
+- **Static** responses are pre-built files (`.html`, `.css`, images). Fast, cacheable on a CDN (a network of servers near users).
+- **Dynamic** responses are computed per request: look up the user, query a database, render HTML or JSON.
+- **Client-side** code runs in the browser: interactivity, instant UI updates, but it's visible to users and can't be trusted with secrets.
+- **Server-side** code runs on your machine: it can touch the database and keep secrets, but every interaction costs a network round trip.
+
+A full stack developer's job is largely choosing *where* each piece of work happens.
+
+<Exercise title="Trace a request">
+Open DevTools → Network on any website you like, hard-reload (Cmd/Ctrl+Shift+R), and answer:
+
+1. How many requests did the page make, and what was the first one's status code?
+2. Find one response with a `Cache-Control` header. What does it say?
+3. Find a request whose status is `304` or `301/302`. Why did the server answer that way?
+4. In the Timing tab of the main document, which phase took longest?
+
+<Solution>
+There is no single right answer, but good observations include: the first request is the HTML document with `200`; `Cache-Control: max-age=...` means the browser may reuse the file without asking again for that many seconds; `304 Not Modified` means the browser asked "has this changed?" (using `If-None-Match`/`ETag`) and the server said no, so no body was sent; `301/302` redirects usually move `http` to `https` or add/remove `www`. For the main document, "Waiting for server response" (TTFB) is usually the largest slice on dynamic sites.
+</Solution>
+</Exercise>
+
+<Exercise title="Extend the server">
+Add a `POST /api/echo` route to `server.js` that reads the request body and sends it back as JSON with status `201`. Test it with `curl -i -X POST -d "hi" http://localhost:3000/api/echo`.
+
+<Solution>
+```js
+if (req.method === "POST" && req.url === "/api/echo") {
+  let body = "";
+  req.on("data", (chunk) => (body += chunk));
+  req.on("end", () => {
+    res.writeHead(201, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ youSent: body }));
+  });
+  return;
+}
+```
+The body arrives in chunks as a stream, which is why we collect `data` events and respond on `end`. Frameworks like Express hide this for you.
+</Solution>
+</Exercise>
+
+<Exercise title="Explain it out loud">
+In your own words, explain to a friend what happens between pressing Enter on `https://example.com` and seeing the page. Aim for 6 steps: URL parse, DNS, TCP/TLS, HTTP request, HTTP response, render.
+
+<Solution>
+Good answer outline: the browser splits the URL; DNS resolves `example.com` to an IP; it opens a TCP connection and negotiates TLS; sends `GET / HTTP/1.1` with headers; the server returns `200` with HTML; the browser parses HTML into the DOM, fetches CSS/JS/images, builds the render tree, lays out, paints and composites.
+</Solution>
+</Exercise>

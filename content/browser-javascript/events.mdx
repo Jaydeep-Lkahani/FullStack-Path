@@ -1,0 +1,303 @@
+---
+title: Events
+summary: Respond to user actions — listeners, the event object, bubbling and capturing, event delegation, forms and keyboard handling.
+order: 2
+takeaways:
+  - addEventListener registers a handler; the event object describes what happened (target, type, key, coordinates).
+  - Most events bubble up from the target through its ancestors; currentTarget is the element the handler is on, target is the origin.
+  - Event delegation puts one listener on a parent and uses event.target.closest(...) - fewer listeners, works for dynamic elements.
+  - preventDefault stops the browser's default action (form submit, link follow); stopPropagation stops bubbling - use it sparingly.
+  - Remove listeners you no longer need (removeEventListener or AbortController) to avoid leaks, and debounce/throttle high-frequency events.
+videos:
+  - title: "Event Bubbling and Capturing in JavaScript"
+    channel: "techsith"
+    duration: "9:29"
+    url: https://www.youtube.com/watch?v=sfKDOOJgbSI
+  - title: "Event Delegation in JavaScript, Simplified"
+    channel: "Deeecode"
+    duration: "8:46"
+    url: https://www.youtube.com/watch?v=aZ3JWv0ofuA
+docs:
+  - title: "MDN: Introduction to events"
+    url: https://developer.mozilla.org/en-US/docs/Learn_web_development/Core/Scripting/Events
+  - title: "MDN: Event bubbling"
+    url: https://developer.mozilla.org/en-US/docs/Learn_web_development/Core/Scripting/Event_bubbling
+  - title: "MDN: EventTarget.addEventListener()"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/addEventListener
+---
+
+Interactivity is just code that runs in response to **events**: clicks, key presses, form submissions, timers finishing, network responses. Browsers dispatch events, and your code listens for them.
+
+## Adding listeners
+
+```js
+const button = document.querySelector("#save");
+
+button.addEventListener("click", (event) => {
+  console.log("clicked", event.type);
+});
+```
+
+Prefer `addEventListener` over inline `onclick="..."` attributes or `button.onclick = ...`: it lets you register several handlers, supports options, and keeps JavaScript out of the HTML.
+
+### Removing listeners
+
+You must pass the **same function reference** you added:
+
+```js
+function handleClick() { console.log("once"); }
+button.addEventListener("click", handleClick);
+button.removeEventListener("click", handleClick);
+
+// Convenience options
+button.addEventListener("click", handleClick, { once: true });     // auto-remove after first call
+window.addEventListener("scroll", onScroll, { passive: true });    // promise not to preventDefault → smoother scrolling
+
+// Remove many listeners at once with an AbortController
+const controller = new AbortController();
+window.addEventListener("resize", onResize, { signal: controller.signal });
+window.addEventListener("keydown", onKey, { signal: controller.signal });
+controller.abort();   // removes both
+```
+
+## The event object
+
+Every handler receives an `Event` describing what happened:
+
+```js
+document.addEventListener("click", (e) => {
+  e.type;            // "click"
+  e.target;          // the element that was actually clicked (deepest)
+  e.currentTarget;   // the element this listener is attached to
+  e.clientX; e.clientY;     // mouse position in the viewport
+  e.shiftKey;        // modifier keys
+  e.preventDefault();       // cancel the default action
+  e.stopPropagation();      // stop bubbling
+});
+```
+
+Common events:
+
+| Category  | Events                                                           |
+| --------- | ---------------------------------------------------------------- |
+| Mouse     | `click`, `dblclick`, `mousedown`, `mouseup`, `mouseenter`, `mouseleave`, `contextmenu` |
+| Keyboard  | `keydown`, `keyup` (avoid the deprecated `keypress`)             |
+| Form      | `submit`, `input` (every change), `change` (on commit/blur), `focus`, `blur` |
+| Pointer / touch | `pointerdown`, `pointermove`, `pointerup` (unifies mouse, touch, pen) |
+| Document / window | `DOMContentLoaded`, `load`, `resize`, `scroll`, `visibilitychange` |
+| Clipboard / drag | `copy`, `paste`, `dragstart`, `drop`                       |
+
+## Event flow: capturing and bubbling
+
+When you click a nested element, the event travels in **three phases**:
+
+```text
+1. Capturing: window → document → html → body → div → button   (down)
+2. Target:    the button itself
+3. Bubbling:  button → div → body → html → document → window   (up)
+```
+
+By default listeners fire during the **bubbling** phase, so a click on a button also triggers click handlers on its parents.
+
+```html
+<div id="outer"><button id="inner">Click</button></div>
+```
+
+```js
+outer.addEventListener("click", () => console.log("outer"));
+inner.addEventListener("click", () => console.log("inner"));
+// Clicking the button prints: inner, outer
+```
+
+Pass `{ capture: true }` to listen during the capturing phase instead. `e.stopPropagation()` ends the journey early (use it rarely — it breaks other code's assumptions, such as analytics and "click outside" detectors). A few events don't bubble (`focus`, `blur`, `mouseenter`) — use `focusin`/`focusout`/`mouseover` equivalents if you need bubbling.
+
+## Event delegation
+
+Imagine a list with hundreds of items, with items added dynamically. Attaching a listener to every item is wasteful, and new items would have no listener. Instead attach **one** listener to the parent and inspect `event.target`:
+
+```js
+const list = document.querySelector("#todos");
+
+list.addEventListener("click", (event) => {
+  const deleteBtn = event.target.closest("[data-action='delete']");
+  if (!deleteBtn || !list.contains(deleteBtn)) return;
+
+  deleteBtn.closest("li").remove();
+});
+```
+
+`closest()` handles clicks on child elements inside the button (like an icon). Delegation is how libraries scale lists, and a favourite interview question. (React uses a form of delegation internally: it attaches listeners at the root.)
+
+## Default actions
+
+Many events have built-in behaviour: links navigate, forms submit and reload, checkboxes toggle. `preventDefault()` cancels it.
+
+```js
+document.querySelector("a.js-link").addEventListener("click", (e) => {
+  e.preventDefault();      // don't navigate; do something else
+});
+```
+
+## Forms
+
+```html
+<form id="signup">
+  <input name="email" type="email" required />
+  <input name="plan" type="radio" value="free" checked />
+  <button>Join</button>
+</form>
+```
+
+```js
+const form = document.querySelector("#signup");
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();                       // stop the full-page reload
+
+  const data = new FormData(form);              // collects all named fields
+  const payload = Object.fromEntries(data);     // { email: "...", plan: "free" }
+
+  if (!form.checkValidity()) {                  // built-in HTML validation
+    form.reportValidity();
+    return;
+  }
+  console.log("submitting", payload);
+});
+
+form.elements.email.addEventListener("input", (e) => {
+  console.log("typing:", e.target.value);       // fires on every keystroke
+});
+```
+
+Listen to `submit` on the **form**, not `click` on the button: that way pressing Enter in a field also works, and the browser's validation runs.
+
+## Keyboard
+
+```js
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeModal();
+  if ((e.metaKey || e.ctrlKey) && e.key === "k") {   // Cmd/Ctrl + K
+    e.preventDefault();
+    openSearch();
+  }
+  if (e.key === "Enter" && !e.shiftKey) send();
+});
+```
+
+Use `e.key` for the character/meaning (`"a"`, `"Enter"`) and `e.code` for the physical key (`"KeyA"`), which matters for keyboard layouts. Keep accessibility in mind: anything clickable should also be reachable and operable by keyboard — use real `<button>` and `<a>` elements and you get that for free.
+
+## Custom events
+
+You can create your own events to decouple parts of your code:
+
+```js
+const event = new CustomEvent("cart:add", { detail: { id: 42 }, bubbles: true });
+button.dispatchEvent(event);
+
+document.addEventListener("cart:add", (e) => console.log(e.detail.id));   // 42
+```
+
+## High-frequency events: debounce and throttle
+
+Events like `scroll`, `resize`, `mousemove` and `input` can fire dozens of times per second.
+
+- **Debounce**: run after the activity stops (search-as-you-type).
+- **Throttle**: run at most once per interval (scroll position tracking).
+
+```js
+function throttle(fn, interval) {
+  let last = 0;
+  return (...args) => {
+    const now = performance.now();
+    if (now - last >= interval) {
+      last = now;
+      fn(...args);
+    }
+  };
+}
+
+window.addEventListener("scroll", throttle(() => console.log(scrollY), 100), { passive: true });
+```
+
+(`debounce` was written in the closures lesson.)
+
+## Page lifecycle
+
+```js
+document.addEventListener("DOMContentLoaded", init);   // HTML parsed; DOM ready (not images)
+window.addEventListener("load", onFullyLoaded);        // everything loaded (images, styles)
+```
+
+If your `<script>` has `defer` or is `type="module"`, the DOM is already parsed when it runs, so you rarely need `DOMContentLoaded`.
+
+<Exercise title="Counter and toggle">
+Create a button with the id `like` and a `<span id="count">0</span>`. Clicking increases the count; holding Shift while clicking resets it to 0. Add a keyboard shortcut: pressing "l" also likes.
+
+<Solution>
+```js
+let count = 0;
+const span = document.querySelector("#count");
+const render = () => (span.textContent = count);
+
+document.querySelector("#like").addEventListener("click", (e) => {
+  count = e.shiftKey ? 0 : count + 1;
+  render();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "l" && !e.target.closest("input, textarea")) {
+    count++;
+    render();
+  }
+});
+```
+The `closest("input, textarea")` check avoids stealing keystrokes while typing.
+</Solution>
+</Exercise>
+
+<Exercise title="Todo list with delegation">
+Build a todo list: a form with an input adds items; each item has a "Delete" button and clicking the text toggles a `done` class. Use **one** click listener on the `ul` for both actions.
+
+<Solution>
+```html
+<form id="add"><input name="text" required /><button>Add</button></form>
+<ul id="todos"></ul>
+```
+```js
+const form = document.querySelector("#add");
+const list = document.querySelector("#todos");
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = new FormData(form).get("text").trim();
+  if (!text) return;
+
+  const li = document.createElement("li");
+  const span = document.createElement("span");
+  span.textContent = text;
+  const del = document.createElement("button");
+  del.textContent = "Delete";
+  del.dataset.action = "delete";
+  li.append(span, del);
+  list.append(li);
+  form.reset();
+});
+
+list.addEventListener("click", (e) => {
+  if (e.target.closest("[data-action='delete']")) {
+    e.target.closest("li").remove();
+  } else if (e.target.matches("span")) {
+    e.target.classList.toggle("done");
+  }
+});
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the order">
+With the markup `<div id="a"><div id="b"><button id="c"></button></div></div>` and listeners logging their id on both the bubbling and the capture phase for `a`, `b`, `c`, in what order are the logs when the button is clicked? What changes if `b`'s bubble listener calls `stopPropagation()`?
+
+<Solution>
+Capture phase goes down first: `a(capture), b(capture), c`, then bubbling goes up: `c, b, a`. Precisely: `a-capture, b-capture, c, b, a`. If `b`'s bubble listener calls `stopPropagation()`, then `a`'s bubble listener never runs: `a-capture, b-capture, c, b`.
+</Solution>
+</Exercise>

@@ -1,0 +1,237 @@
+---
+title: The Event Loop
+summary: How single-threaded JavaScript handles async work — the call stack, Web APIs, task and microtask queues, and why the order of output is what it is.
+order: 3
+takeaways:
+  - JavaScript runs one piece of code at a time on a single call stack; async work is handed off to the environment (browser or Node).
+  - When async work finishes its callback is queued; the event loop moves queued callbacks onto the stack only when the stack is empty.
+  - Microtasks (Promise callbacks, queueMicrotask, await continuations) always run before the next macrotask (setTimeout, I/O, UI events).
+  - A long synchronous task blocks everything, including rendering and clicks - split heavy work up or move it to a Web Worker.
+  - setTimeout(fn, 0) means "after the current stack and all microtasks", not "immediately".
+videos:
+  - title: "What the heck is the event loop anyway?"
+    channel: "JSConf (Philip Roberts)"
+    duration: "26:52"
+    url: https://www.youtube.com/watch?v=8aGhZQkoFbQ
+  - title: "JavaScript Event Loop: How it Works and Why it Matters in 5 Minutes"
+    channel: "James Q Quick"
+    duration: "7:20"
+    url: https://www.youtube.com/watch?v=lqLSNG_79lI
+docs:
+  - title: "MDN: The event loop"
+    url: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Event_loop
+  - title: "MDN: Using microtasks"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/HTML_DOM_API/Microtask_guide
+---
+
+JavaScript runs on a **single thread**: it can do exactly one thing at a time. Yet it handles network requests, timers and clicks without freezing. The **event loop** is the mechanism that makes this work, and understanding it explains the output order of every "predict the output" interview question.
+
+## The pieces
+
+```text
+        ┌──────────────┐        ┌───────────────────────┐
+        │  Call Stack  │        │  Web APIs / Node APIs │
+        │ (runs code)  │───────▶│ timers, fetch, DOM,   │
+        └──────▲───────┘        │ fs, network           │
+               │                └──────────┬────────────┘
+               │ event loop                │ when done
+               │ (stack empty?)            ▼
+        ┌──────┴───────────────────────────────────────┐
+        │  Microtask queue  (Promises, queueMicrotask) │  ← drained first
+        │  Macrotask queue  (timers, I/O, UI events)   │  ← one per turn
+        └──────────────────────────────────────────────┘
+```
+
+- **Call stack** — where function calls are tracked. JavaScript executes the top frame; when it returns, it pops off.
+- **Web APIs** (browser) / **libuv & Node APIs** (Node) — the environment does async work *outside* the JS engine: timers, HTTP, file reads.
+- **Task (macrotask) queue** — callbacks for finished timers, I/O, and UI events (clicks, keypresses).
+- **Microtask queue** — callbacks from Promises (`.then/.catch/.finally`), `await` continuations, `queueMicrotask`, and `MutationObserver`.
+- **Event loop** — a loop that checks: *is the stack empty?* If so, run all microtasks, then take **one** macrotask, and repeat. In the browser it may also render between macrotasks.
+
+## The call stack
+
+```js
+function c() { console.log("c"); }
+function b() { c(); }
+function a() { b(); }
+a();
+```
+
+The stack grows `a → b → c`, then unwinds. An infinite recursion overflows it: `RangeError: Maximum call stack size exceeded`.
+
+Because there's one stack, a long-running function **blocks everything**:
+
+```js
+button.addEventListener("click", () => {
+  const start = Date.now();
+  while (Date.now() - start < 5000) {}   // 5 seconds of nothing but blocking
+});
+// During those 5 seconds: no rendering, no scrolling, no other clicks.
+```
+
+## Walking through `setTimeout`
+
+```js
+console.log("A");
+
+setTimeout(() => console.log("B"), 0);
+
+console.log("C");
+```
+
+Output: `A C B`.
+
+1. `console.log("A")` runs on the stack → prints `A`.
+2. `setTimeout` hands the timer to the environment and returns immediately. After 0 ms the callback goes into the **macrotask queue**.
+3. `console.log("C")` runs → prints `C`.
+4. The stack is now empty, so the event loop moves the timer callback onto the stack → prints `B`.
+
+`setTimeout(fn, 0)` doesn't mean "now"; it means "as soon as possible *after* the current code finishes". Browsers also clamp nested timers to at least ~4ms, and delays are a *minimum*, not a guarantee.
+
+## Microtasks run first
+
+Promise reactions go in the **microtask queue**, which is drained **completely** before the next macrotask runs.
+
+```js
+console.log("1: sync");
+
+setTimeout(() => console.log("2: timeout (macrotask)"), 0);
+
+Promise.resolve().then(() => console.log("3: promise (microtask)"));
+
+queueMicrotask(() => console.log("4: queueMicrotask (microtask)"));
+
+console.log("5: sync");
+```
+
+Output:
+
+```text
+1: sync
+5: sync
+3: promise (microtask)
+4: queueMicrotask (microtask)
+2: timeout (macrotask)
+```
+
+The order of operations: **run the current synchronous code → drain all microtasks → (render) → next macrotask → drain microtasks → …**
+
+Microtasks can queue more microtasks, and those also run before any macrotask. A runaway microtask loop can therefore starve the page, just like a `while` loop.
+
+## `async/await` and the event loop
+
+`await` splits a function in two. Everything after the `await` becomes a **microtask continuation** that runs once the awaited promise settles.
+
+```js
+async function run() {
+  console.log("a");        // sync
+  await null;              // schedule the rest as a microtask
+  console.log("c");        // microtask
+}
+
+run();
+console.log("b");          // sync
+// Output: a, b, c
+```
+
+## A harder one
+
+```js
+console.log("start");
+
+setTimeout(() => console.log("timeout 1"), 0);
+
+Promise.resolve()
+  .then(() => {
+    console.log("promise 1");
+    setTimeout(() => console.log("timeout 2"), 0);
+  })
+  .then(() => console.log("promise 2"));
+
+setTimeout(() => console.log("timeout 3"), 0);
+
+console.log("end");
+```
+
+Walk through it:
+
+1. Sync: `start`, `end`. Two timers (1 and 3) are queued as macrotasks; the promise `.then` is queued as a microtask.
+2. Stack empty → drain microtasks: `promise 1` (queues timeout 2), then `promise 2`.
+3. Next macrotasks, in order: `timeout 1`, `timeout 3`, `timeout 2`.
+
+Output: `start, end, promise 1, promise 2, timeout 1, timeout 3, timeout 2`.
+
+## Node.js differences
+
+Node uses the same ideas with **libuv** and more queue "phases" (timers, poll for I/O, check for `setImmediate`, close callbacks). Two extras to know:
+
+- `process.nextTick(fn)` runs **before** promise microtasks — even higher priority.
+- `setImmediate(fn)` runs in the "check" phase right after I/O; relative to `setTimeout(fn, 0)` the order from the main module is not guaranteed.
+
+You'll go deeper in the Node.js module.
+
+## Why it matters in practice
+
+- **Don't block the loop.** Heavy loops (parsing huge JSON, image processing, big sorts) freeze the UI or stall a Node server for all users. Break work into chunks (`setTimeout`/`requestIdleCallback`), stream it, or use **Web Workers** / **worker threads**.
+- **Rendering needs the stack to be empty.** The browser repaints between macrotasks, so `element.style.x = ...` followed by a long synchronous loop won't show until the loop ends. Use `requestAnimationFrame` for animation work.
+- **Ordering bugs**: knowing microtask vs macrotask explains why state set in a `.then` is visible before a `setTimeout(…, 0)` callback.
+- **React** batches state updates and runs effects after paint; the same loop underlies the timing you'll study there.
+
+<Callout type="tip" title="Visualise it">
+Search for "Loupe" (a famous event-loop visualiser by Philip Roberts) and step through the examples above. Seeing the stack, queues and Web APIs move makes it click.
+</Callout>
+
+<Exercise title="Predict the output">
+```js
+console.log("1");
+setTimeout(() => console.log("2"), 0);
+new Promise((resolve) => {
+  console.log("3");
+  resolve();
+}).then(() => console.log("4"));
+console.log("5");
+```
+
+<Solution>
+`1, 3, 5, 4, 2`. The Promise **executor** runs synchronously (`3`). Its `.then` callback is a microtask (`4`) that runs as soon as the sync code finishes, before the timer macrotask (`2`).
+</Solution>
+</Exercise>
+
+<Exercise title="Don't freeze the page">
+This function sums numbers up to a huge `n`, freezing the UI. Rewrite `sumAsync(n)` to process in chunks of 1 million, yielding to the event loop between chunks, and return a promise with the result.
+
+```js
+function sum(n) {
+  let total = 0;
+  for (let i = 1; i <= n; i++) total += i;
+  return total;
+}
+```
+
+<Solution>
+```js
+function sumAsync(n, chunk = 1_000_000) {
+  return new Promise((resolve) => {
+    let total = 0;
+    let i = 1;
+    function work() {
+      const end = Math.min(i + chunk, n + 1);
+      for (; i < end; i++) total += i;
+      if (i <= n) setTimeout(work, 0);   // yield: lets the browser handle events/render
+      else resolve(total);
+    }
+    work();
+  });
+}
+```
+For truly heavy work, a Web Worker is better, because it runs on a separate thread.
+</Solution>
+</Exercise>
+
+<Exercise title="Explain the difference">
+In two sentences each, explain: (1) why `setTimeout(fn, 0)` runs after a resolved promise's `.then`, and (2) why `await` in a `forEach` callback doesn't pause the loop.
+
+<Solution>
+(1) `.then` callbacks are microtasks, drained entirely whenever the stack empties; timer callbacks are macrotasks and wait for the microtask queue to be empty and for their turn in the loop. (2) `forEach` calls each callback and ignores the returned promise; each async callback pauses *itself* at `await`, but `forEach` has already moved on, so the loop never waits. Use `for...of` with `await` for sequential work or `Promise.all(arr.map(...))` for parallel work.
+</Solution>
+</Exercise>

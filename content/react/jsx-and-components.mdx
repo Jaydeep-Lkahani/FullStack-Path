@@ -1,0 +1,400 @@
+---
+title: JSX & Components
+summary: Write JSX correctly, build components, and pass data between them with props, children and composition.
+order: 2
+takeaways:
+  - JSX is HTML-like syntax inside JavaScript that compiles to plain function calls; it is not HTML, so it has stricter rules.
+  - A JSX expression needs one parent element, every tag must be closed, and attributes use camelCase names such as `className` and `onClick`.
+  - Curly braces `{}` let you put any JavaScript expression into JSX; `true`, `false`, `null` and `undefined` render nothing, but `0` renders as `0`.
+  - A component is a function that starts with a capital letter and returns JSX; you use it like a custom HTML tag.
+  - Props are the inputs of a component; they flow from parent to child and must never be changed by the child.
+  - The special `children` prop and composition let you build flexible wrappers like a Card or a Layout without extra configuration.
+videos:
+  - title: "Every React Concept Explained in 15 Minutes"
+    channel: "Time To Program"
+    duration: "15:25"
+    url: https://www.youtube.com/watch?v=r_5JySk9fzg
+  - title: "Learning Components/Props/JSX in React 2024"
+    channel: "CodeHelp - by Babbar"
+    duration: "33:13"
+    url: https://www.youtube.com/watch?v=HKX__TQ9ff0
+docs:
+  - title: "react.dev — Writing Markup with JSX"
+    url: https://react.dev/learn/writing-markup-with-jsx
+  - title: "react.dev — JavaScript in JSX with Curly Braces"
+    url: https://react.dev/learn/javascript-in-jsx-with-curly-braces
+  - title: "react.dev — Your First Component"
+    url: https://react.dev/learn/your-first-component
+  - title: "react.dev — Passing Props to a Component"
+    url: https://react.dev/learn/passing-props-to-a-component
+  - title: "react.dev — Fragment"
+    url: https://react.dev/reference/react/Fragment
+---
+
+Every React screen is built from JSX and components, so this lesson is the vocabulary for the rest of the module. State, effects, forms and routing all happen inside components, and interviewers often start with "what is JSX?" and "what are props?". The goal is that by the end you can read any component and build small ones yourself. It was written for React 19, and the examples use TypeScript, which you met in Phase 1. Typing props gets a full lesson later (lesson 5), so here we only use the basics.
+
+## What JSX is
+
+**JSX** looks like HTML written inside JavaScript:
+
+```tsx
+const heading = <h1 className="title">Hello, React!</h1>;
+```
+
+Browsers can't run this. Vite compiles it into ordinary JavaScript function calls, roughly `jsx("h1", { className: "title", children: "Hello, React!" })`, which return plain objects that React turns into real DOM nodes. You never write that form yourself, but it explains the rules below: JSX is JavaScript in disguise, so it must obey JavaScript's limits.
+
+## The rules of JSX
+
+### 1. Return one parent element
+
+A function can only return one value, so a component can't return two sibling elements:
+
+```tsx
+// ✗ Error: JSX expressions must have one parent element
+return (
+  <h1>One</h1>
+  <p>Two</p>
+);
+```
+
+Wrap them in a parent, such as a `div`. If you don't want an extra element in the page, use a **Fragment**, written as an empty tag `<>...</>`:
+
+```tsx
+return (
+  <>
+    <h1>One</h1>
+    <p>Two</p>
+  </>
+);
+```
+
+The fragment groups the elements for React but adds nothing to the DOM. Put the JSX in parentheses after `return`, or JavaScript ends the statement at the line break and returns `undefined`.
+
+### 2. Close every tag
+
+HTML lets you leave some tags open. JSX does not:
+
+```tsx
+<img src="/logo.svg" alt="Logo" />   {/* self-closing */}
+<br />
+```
+
+Forgetting the slash gives errors like `JSX element 'br' has no corresponding closing tag`.
+
+### 3. Use camelCase attribute names
+
+Most HTML attributes work as you know them, but a few are renamed because they clash with JavaScript words, and multi-word ones are written in camelCase:
+
+| HTML | JSX |
+| ---- | --- |
+| `class` | `className` |
+| `for` | `htmlFor` |
+| `onclick` | `onClick` |
+| `tabindex` | `tabIndex` |
+| `style="color: red"` | `style={{ color: "red" }}` |
+
+`aria-*` and `data-*` attributes keep their hyphens (`aria-label`, `data-id`). TypeScript catches slips such as `Property 'class' does not exist ... Did you mean 'className'?`.
+
+### 4. Comments use curly braces
+
+Write `{/* a comment */}` inside JSX; `//` and HTML comments don't work there.
+
+## JavaScript inside JSX
+
+Curly braces are a window back into JavaScript. Put any **expression** (anything that produces a value) inside them:
+
+```tsx
+const name = "Asha";
+const price = 19.99;
+
+<h1>Hello, {name}!</h1>                     // Hello, Asha!
+<p>Total: {(price * 3).toFixed(2)}</p>       // Total: 59.97
+<p>{name.toUpperCase()}</p>                  // ASHA
+```
+
+You can use braces for text (`<p>{value}</p>`) and for attribute values (`<img src={url} alt={`Photo of ${name}`} />`). Quotes give a fixed string, braces a computed value. Statements such as `if` and `for` are not expressions, so they don't work inside braces; the next lesson covers conditions and lists.
+
+`style` takes an **object**, so it needs double braces: the outer pair is the window into JavaScript and the inner pair is the object, as in `style={{ width: 100, backgroundColor: "tomato" }}`. Property names are camelCase and plain numbers get `px`. For anything beyond one-off values, prefer a `className`.
+
+### What renders and what doesn't
+
+```tsx
+<p>[{true}] [{false}] [{null}] [{undefined}] [{0}] [{""}]</p>
+```
+
+This renders `[] [] [] [] [0] []`. Booleans, `null` and `undefined` render nothing, which is what makes tricks like `{isAdmin && <AdminPanel />}` possible. Numbers do render, including `0`. Objects do not:
+
+```tsx
+const user = { name: "Asha" };
+<p>{user}</p>
+// Error: Objects are not valid as a React child (found: object with keys {name})
+```
+
+Render a property (`{user.name}`) instead. Arrays of things you can render are fine, and you will use that for lists in the next lesson.
+
+<Callout type="warning" title="The 0 trap">
+`{items.length && <List />}` renders a visible `0` when the array is empty, because `0` is a number that React draws. Write `{items.length > 0 && <List />}` instead.
+</Callout>
+
+## Components
+
+A **component** is a JavaScript function that returns JSX. You've already used one, `App`. Here is another:
+
+```tsx
+// src/components/Avatar.tsx
+type AvatarProps = {
+  name: string;
+  size?: number;
+};
+
+export function Avatar({ name, size = 48 }: AvatarProps) {
+  const initials = name
+    .split(" ")
+    .map((word) => word[0])
+    .join("");
+
+  return (
+    <div
+      className="avatar"
+      style={{ width: size, height: size, lineHeight: `${size}px` }}
+      aria-label={name}
+    >
+      {initials}
+    </div>
+  );
+}
+```
+
+Two rules make it a component:
+
+1. **The name starts with a capital letter.** React uses the capital to tell your components (`<Avatar />`) apart from built-in HTML tags (`<div>`). If you wrote `<avatar />`, React would treat it as an unknown HTML element and TypeScript would complain that it does not exist.
+2. **It returns something React can render**, usually JSX (or `null` to render nothing).
+
+You use it like a custom HTML tag, as many times as you like:
+
+```tsx
+<Avatar name="Asha Rao" />
+<Avatar name="Ben Ortiz" size={80} />
+```
+
+Each use is an independent copy. This is what components give you: build a piece of UI once, then reuse it everywhere.
+
+### Files and exports
+
+Keep one component per file, named after it (`Avatar.tsx`), and import it with `import { Avatar } from "./components/Avatar"`. Named exports are easy to find and rename. The Vite template uses `export default App`, which also works: you import it without braces.
+
+Never define a component inside another component. Each render would create a brand new function that React sees as a different component, so it throws away the DOM and state every time. Define components at the top level of a file.
+
+## Props
+
+**Props** (short for properties) are how a parent passes data to a child. You write them like HTML attributes, and the child receives them as one object. In `<Avatar name="Asha Rao" size={80} />`, `Avatar` receives `{ name: "Asha Rao", size: 80 }`. You nearly always **destructure** the object in the parameter list (as in the ES6 lesson): `function Avatar({ name, size = 48 }: AvatarProps)`. The `= 48` is a **default value**, used when the parent leaves `size` out, and the `?` in the type (`size?: number`) marks it optional.
+
+### What you can pass
+
+Props can be any JavaScript value. Strings can use quotes, everything else goes in braces:
+
+```tsx
+<ProfileCard
+  name="Asha Rao" // string
+  age={29} // number
+  isAdmin // boolean: same as isAdmin={true}
+  skills={["HTML", "CSS"]} // array
+  onSelect={() => console.log("selected")} // function
+/>
+```
+
+Passing a function as a prop is how a child tells its parent something happened, such as a click. You will use that constantly from the next lesson on.
+
+### Props are read-only
+
+A component must never change its own props. React freezes the props object in development, so this fails immediately:
+
+```tsx
+function Avatar(props: AvatarProps) {
+  props.name = props.name.toUpperCase();
+  // TypeError: Cannot assign to read only property 'name' of object '#<Object>'
+}
+```
+
+Make a new value instead: `const shout = name.toUpperCase();`. Data flows one way, parent to child. If a child needs to change something, the parent passes a function (or, next lesson, owns the state).
+
+## Children and composition
+
+Anything you put **between** a component's opening and closing tags arrives as a prop named `children`:
+
+```tsx
+// src/components/Card.tsx
+import type { ReactNode } from "react";
+
+type CardProps = {
+  title: string;
+  children: ReactNode;
+};
+
+export function Card({ title, children }: CardProps) {
+  return (
+    <section className="card">
+      <h2>{title}</h2>
+      {children}
+    </section>
+  );
+}
+```
+
+`ReactNode` is the type for "anything React can render" (text, elements, arrays, `null`). Now the card can wrap anything: `<Card title="Welcome"><p>Thanks!</p></Card>`.
+
+The `Card` doesn't know or care what is inside. This is **composition**: build general-purpose pieces (Card, Layout, Modal, Button) and combine them by nesting. It is React's answer to inheritance, and you will use it more than any other pattern.
+
+### Putting it together
+
+```tsx
+// src/components/ProfileCard.tsx
+import { Avatar } from "./Avatar";
+import { Card } from "./Card";
+
+type ProfileCardProps = {
+  name: string;
+  role: string;
+  skills: string[];
+};
+
+export function ProfileCard({ name, role, skills }: ProfileCardProps) {
+  return (
+    <Card title={name}>
+      <Avatar name={name} />
+      <p>{role}</p>
+      <p>Skills: {skills.join(", ")}</p>
+    </Card>
+  );
+}
+```
+
+```tsx
+// src/App.tsx
+import { ProfileCard } from "./components/ProfileCard";
+
+function App() {
+  return (
+    <>
+      <h1>Team</h1>
+      <ProfileCard name="Asha Rao" role="Frontend developer" skills={["HTML", "React"]} />
+      <ProfileCard name="Ben Ortiz" role="Designer" skills={["Figma", "CSS"]} />
+    </>
+  );
+}
+
+export default App;
+```
+
+Notice the tree: `App` contains `ProfileCard`, which contains `Card` and `Avatar`. Open React DevTools and you will see exactly this tree. Thinking in terms of this tree of components is the core React skill.
+
+<Callout type="tip" title="Components should be pure">
+Given the same props, a component should return the same JSX and should not change anything outside itself while rendering. That is why `StrictMode` runs each component twice in development. Side effects like fetching data get their own tool in lesson 6.
+</Callout>
+
+## Common mistakes
+
+- **Lowercase component names.** `<profileCard />` is treated as an HTML tag. Capitalise component names.
+- **Returning two elements** without a wrapper or fragment, or using `class`, `for` and `style="..."` instead of `className`, `htmlFor` and `style={{ ... }}`.
+- **Forgetting the braces** around non-string props: `age="29"` passes a string, `age={29}` a number.
+- **Missing required props.** TypeScript reports `Property 'name' is missing in type '{}'` as soon as you forget one.
+
+<Exercise title="Fix the JSX">
+This component has five problems. Find and fix all of them, without adding any wrapper element to the page.
+
+```tsx
+function banner() {
+  return (
+    <h1 class="title">Welcome</h1>
+    <label for="email">Email</label>
+    <input id="email" type="text">
+    <p style="color: red">Required field</p>
+  );
+}
+```
+
+<Solution>
+```tsx
+function Banner() {
+  return (
+    <>
+      <h1 className="title">Welcome</h1>
+      <label htmlFor="email">Email</label>
+      <input id="email" type="text" />
+      <p style={{ color: "red" }}>Required field</p>
+    </>
+  );
+}
+```
+
+The fixes: capitalise the component name, wrap the siblings in a fragment (no extra DOM element), `class` becomes `className`, `for` becomes `htmlFor`, `<input>` must be self-closed, and `style` takes an object.
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the output">
+What does the following render? Write the text that appears in the page.
+
+```tsx
+function App() {
+  const count = 0;
+  const items: string[] = [];
+  const user = null;
+
+  return (
+    <p>
+      A:{count} B:{items.length && "has items"} C:{user} D:{items.length > 0 && "has items"} E:{String(count === 0)}
+    </p>
+  );
+}
+```
+
+<Solution>
+`A:0 B:0 C: D: E:true`
+
+`A` prints `0` because numbers render. `B` also prints `0`: `items.length && "has items"` evaluates to `0` (the first falsy value), and React draws that number. `C` and `D` render nothing (`null` and `false`). `E` shows `true` because `String(true)` is a string; a bare boolean would render nothing.
+</Solution>
+</Exercise>
+
+<Exercise title="Compose a Layout">
+Build a `Layout` component with `header`, `children` and a footer that says "© 2026". The `header` prop is a `ReactNode`, so a parent can pass any JSX. Use it in `App` with a heading as the header and two paragraphs as the content.
+
+<Solution>
+```tsx
+// src/components/Layout.tsx
+import type { ReactNode } from "react";
+
+type LayoutProps = {
+  header: ReactNode;
+  children: ReactNode;
+};
+
+export function Layout({ header, children }: LayoutProps) {
+  return (
+    <div className="layout">
+      <header>{header}</header>
+      <main>{children}</main>
+      <footer>&copy; 2026</footer>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/App.tsx
+import { Layout } from "./components/Layout";
+
+function App() {
+  return (
+    <Layout header={<h1>My site</h1>}>
+      <p>First paragraph.</p>
+      <p>Second paragraph.</p>
+    </Layout>
+  );
+}
+
+export default App;
+```
+
+Props can hold JSX, not just text. This "slots" pattern, where a component accepts several pieces of JSX, is common in design systems.
+</Solution>
+</Exercise>

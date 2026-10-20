@@ -1,0 +1,398 @@
+---
+title: Refs, Context & useId
+summary: Hold values React doesn't track with `useRef`, share data without passing props through every level with `useContext`, and generate safe unique IDs with `useId`.
+order: 7
+takeaways:
+  - A ref is a box with a `current` property that survives re-renders, and changing it does not re-render the component, so use it for values the screen doesn't show.
+  - Never read or write `ref.current` while rendering; do it inside event handlers and effects.
+  - A ref attached to an element with the `ref` prop gives you the real DOM node, which is how you focus, scroll or measure it; in React 19 a function component can take `ref` as a normal prop.
+  - Context lets a provider share a value with any component below it, which fixes prop drilling; create it with `createContext`, provide it with `<ThemeContext value={...}>` and read it with `useContext`.
+  - When the context value changes, every component that reads it re-renders, so use context for slow-changing data such as theme, language or the signed-in user.
+  - The `useId` hook returns a unique ID that is the same on the server and the client, which you use to link labels and hints to inputs; never use it as a list key.
+videos:
+  - title: "useRef React Hook Explained in 11 Minutes: Learn React Hooks with Code Examples"
+    channel: "Shruti Kapoor"
+    duration: "10:58"
+    url: https://www.youtube.com/watch?v=hErOvJAJ0KY
+  - title: "useContext React 19 Tutorial – Avoid Prop Drilling & Master React Context API"
+    channel: "LearnAwesome"
+    duration: "4:23"
+    url: https://www.youtube.com/watch?v=PD3p5tmSpqg
+  - title: "Everything you need to know about useId Hook in React 18 | React Hooks"
+    channel: "Pratham Kumar"
+    duration: "4:51"
+    url: https://www.youtube.com/watch?v=4pGp68x6otE
+docs:
+  - title: "react.dev — useRef"
+    url: https://react.dev/reference/react/useRef
+  - title: "react.dev — Referencing Values with Refs"
+    url: https://react.dev/learn/referencing-values-with-refs
+  - title: "react.dev — useContext"
+    url: https://react.dev/reference/react/useContext
+  - title: "react.dev — Passing Data Deeply with Context"
+    url: https://react.dev/learn/passing-data-deeply-with-context
+  - title: "react.dev — useId"
+    url: https://react.dev/reference/react/useId
+---
+
+Three small hooks that every real React codebase uses. Refs handle the things state is bad at: timer IDs, focus and measuring elements. Context is the standard answer to "I'm passing the same prop through five components", and interviewers ask about it together with its performance trade-offs. `useId` is tiny but is the correct way to build accessible forms. This lesson was written for React 19 and TypeScript; you need `useState` (lesson 3) and effects (lesson 6).
+
+## useRef: a value React doesn't track
+
+`useRef(initial)` returns an object `{ current: initial }`. React gives you **the same object on every render**, and changing `current` does **not** trigger a re-render. Compare it with state:
+
+```tsx
+import { useRef, useState } from "react";
+
+export function Counters() {
+  const [stateCount, setStateCount] = useState(0);
+  const refCount = useRef(0);
+
+  return (
+    <div>
+      <button type="button" onClick={() => setStateCount(stateCount + 1)}>
+        state: {stateCount}
+      </button>
+      <button type="button" onClick={() => (refCount.current += 1)}>
+        ref
+      </button>
+      <p>Shown on screen: {refCount.current}</p>
+    </div>
+  );
+}
+```
+
+Click "ref" three times and the paragraph still says `Shown on screen: 0`, because nothing told React to render again. Click the "state" button once and the component re-renders, and now the paragraph shows 3. The ref held the right value all along; the screen just hadn't been updated.
+
+In short: both survive re-renders, but changing state re-renders and changing a ref does not. Use state for anything shown on screen, and a ref for values the screen doesn't depend on.
+
+<Callout type="warning" title="Don't read or write refs while rendering">
+Rendering has to be pure (lesson 6). Reading or writing `ref.current` in the component body makes the output unpredictable, so touch refs only in event handlers and effects. If a value appears on screen, it should be state.
+</Callout>
+
+### Refs for mutable values
+
+A good use is something you need to remember between renders but never display, such as the ID of a running timer. Here a stopwatch must stop the interval that `start` created:
+
+```tsx
+export function Stopwatch() {
+  const [seconds, setSeconds] = useState(0);
+  const intervalRef = useRef<number | undefined>(undefined);
+
+  function start() {
+    intervalRef.current = window.setInterval(() => {
+      setSeconds((s) => s + 1);
+    }, 1000);
+  }
+
+  function stop() {
+    clearInterval(intervalRef.current);
+  }
+
+  return (
+    <div>
+      <p>Seconds: {seconds}</p>
+      <button type="button" onClick={start}>Start</button>
+      <button type="button" onClick={stop}>Stop</button>
+    </div>
+  );
+}
+```
+
+Why not a plain variable like `let intervalId`? A plain variable is created fresh on **every render**. Each tick calls `setSeconds`, which re-renders, so by the time you click Stop the variable is `undefined` again, `clearInterval(undefined)` does nothing, and the stopwatch keeps counting. The ref's `current` lives outside the render, so `stop` always finds the right ID. The generic `useRef<number | undefined>(undefined)` follows lesson 5: the type must say what the box can hold.
+
+### Refs for DOM nodes
+
+The other use is reaching the real DOM element. Attach a ref with the `ref` prop and, after React has put the element on screen, `ref.current` points to it:
+
+```tsx
+export function FocusInput() {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function handleClick() {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }
+
+  return (
+    <>
+      <input ref={inputRef} defaultValue="Click the button" />
+      <button type="button" onClick={handleClick}>Focus the input</button>
+    </>
+  );
+}
+```
+
+`current` starts as `null` and React fills it in when the element mounts, which is why the code uses `?.`. Clicking the button focuses the input and highlights its text. Use DOM refs for things React's props can't express: `focus()`, `scrollIntoView()`, measuring with `getBoundingClientRect()`, or `play()` on a video. Don't use them to change what an element displays; that's what state is for.
+
+### Passing a ref to your own component
+
+In React 19, `ref` is an ordinary prop for function components, so a reusable component can hand its inner element to the parent without any wrapper:
+
+```tsx
+import type { ComponentProps } from "react";
+
+type FancyInputProps = ComponentProps<"input"> & { label: string };
+
+export function FancyInput({ label, ref, ...rest }: FancyInputProps) {
+  return (
+    <label>
+      {label}
+      <input ref={ref} {...rest} />
+    </label>
+  );
+}
+
+// parent: <FancyInput ref={inputRef} label="Search" />, then inputRef.current?.focus()
+```
+
+`ComponentProps<"input">` (from lesson 5) already includes `ref`. In code written for React 18 or earlier you will see `forwardRef(...)` doing this job; it was required then and still works, so recognise it when reading older code.
+
+## useContext: skip the prop drilling
+
+Imagine the theme (light or dark) lives in `App`, but only a button deep inside the toolbar needs it. Without context you pass `theme` through every component in between:
+
+```tsx
+<Page theme={theme} />          // Page doesn't use it, just forwards
+  <Toolbar theme={theme} />     // Toolbar doesn't either
+    <ThemeButton theme={theme} /> // finally used here
+```
+
+That is **prop drilling**. It's fine for one or two levels (and lifting state up, from lesson 4, is often the right answer), but it gets painful for data many components need. **Context** lets a component higher up provide a value that any component below can read directly. It takes three steps: create, provide, read.
+
+```tsx
+// ThemeContext.tsx
+import { createContext, useContext, useState } from "react";
+import type { ReactNode } from "react";
+
+type Theme = "light" | "dark";
+
+type ThemeContextValue = {
+  theme: Theme;
+  toggleTheme: () => void;
+};
+
+// 1. Create. `null` means "no provider above".
+const ThemeContext = createContext<ThemeContextValue | null>(null);
+
+// 2. Provide: holds the state and shares it with everything inside.
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setTheme] = useState<Theme>("light");
+
+  function toggleTheme() {
+    setTheme(theme === "light" ? "dark" : "light");
+  }
+
+  return <ThemeContext value={{ theme, toggleTheme }}>{children}</ThemeContext>;
+}
+
+// 3. Read, wrapped in a small custom hook.
+export function useTheme() {
+  const value = useContext(ThemeContext);
+  if (value === null) {
+    throw new Error("useTheme must be used inside <ThemeProvider>");
+  }
+  return value;
+}
+```
+
+Now any component can read the theme directly, and the components in between know nothing about it:
+
+```tsx
+function ThemeButton() {
+  const { theme, toggleTheme } = useTheme();
+  return <button type="button" onClick={toggleTheme}>Theme: {theme}</button>;
+}
+
+// <ThemeProvider><Page /></ThemeProvider>, where Page renders Toolbar, which renders ThemeButton
+```
+
+Clicking the button flips `light` to `dark` for every component reading the context. Points worth knowing:
+
+- **React 19 syntax.** You render the context itself as the provider, `<ThemeContext value={...}>`. Older code writes `<ThemeContext.Provider value={...}>`, which still works.
+- **Why `null` plus a throwing hook.** The default value is used only when there is no provider above. With `null`, a forgotten provider produces an immediate, clear error instead of silently wrong data, and TypeScript narrows the type for callers, so they never check for `null` themselves.
+- **The provider must be above the consumer.** A component can't read a provider that it renders itself.
+- **`use(ThemeContext)`** is an alternative to `useContext` that can also be called inside an `if`. The two behave the same otherwise.
+
+### What re-renders
+
+When the context `value` changes, React re-renders **every component that reads it**, wherever it sits. That's the trade-off to remember. Because the provider above takes `children` as a prop, the elements passed in don't change when the theme changes, so React skips components that don't read the context. In a test with `Page`, `Toolbar`, `ThemeButton` and a `Label` that reads the theme, toggling re-rendered only `ThemeButton` and `Label`, not `Page` or `Toolbar`.
+
+A provider that re-renders for other reasons creates a new `{ theme, toggleTheme }` object each time, which re-renders all consumers. Older guides wrap the value in `useMemo` for that; the React Compiler (lesson 17) does this for you. For now, keep provider state small and local.
+
+<Callout type="tip" title="Context is not a state manager">
+Use context for values that change rarely and that many components need: theme, language, the signed-in user. For data that changes constantly (a form, a game, a big shared store) every consumer re-renders on each change. Lesson 8 combines context with `useReducer`, and lesson 16 covers Zustand for global client state.
+</Callout>
+
+## useId: unique IDs for accessibility
+
+Labels must point at their inputs (`htmlFor` matching `id`) so clicking the label focuses the field and screen readers announce it. Hardcoding `id="email"` breaks as soon as the component appears twice, because HTML IDs must be unique. `useId` generates one per component instance:
+
+```tsx
+import { useId } from "react";
+
+export function TextField({ label, hint }: { label: string; hint?: string }) {
+  const id = useId();
+  const hintId = `${id}-hint`;
+
+  return (
+    <div>
+      <label htmlFor={id}>{label}</label>
+      <input id={id} aria-describedby={hint ? hintId : undefined} />
+      {hint && <p id={hintId}>{hint}</p>}
+    </div>
+  );
+}
+
+// <TextField label="Email" hint="We never share it." /> and <TextField label="Backup email" />
+```
+
+The two fields get different IDs (in this setup, `_r_0_` and `_r_1_`), so each label focuses its own input, and the first input is also described by its hint through `aria-describedby`. Call `useId` once and add a suffix for related IDs, as `hintId` does. The same ID is produced on the server and in the browser, which matters once you use Next.js. Don't rely on the exact format: it changes between React versions.
+
+<Callout type="warning" title="Not for keys, not for CSS selectors">
+`useId` is not for list `key`s (keys come from your data, as in lesson 3). The generated string can contain characters such as `:` that break CSS selectors, so don't build selectors from it.
+</Callout>
+
+## Common mistakes
+
+- **Showing `ref.current` in JSX** and wondering why the screen is stale. Use state for anything displayed.
+- **Using a plain `let` variable** to remember something between renders. It resets every render; use a ref (or state).
+- **Calling `useTheme()` outside the provider**, which throws with the custom hook above. Check where `<ThemeProvider>` sits.
+
+<Exercise title="Predict the output">
+The component below is rendered once. The user clicks "Add" three times. What does the screen show, and what does it show after the user clicks "Refresh"?
+
+```tsx
+function Demo() {
+  const clicks = useRef(0);
+  const [, setTick] = useState(0);
+  return (
+    <>
+      <button onClick={() => (clicks.current += 1)}>Add</button>
+      <button onClick={() => setTick((t) => t + 1)}>Refresh</button>
+      <p>Clicks: {clicks.current}</p>
+    </>
+  );
+}
+```
+
+<Solution>
+After three "Add" clicks the screen still shows `Clicks: 0`, because changing a ref doesn't re-render. Clicking "Refresh" updates state, which re-renders and reads the ref again: `Clicks: 3`. (Displaying a ref's value is also what the warning above says not to do: this component should use `useState`.)
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the stopwatch that won't stop">
+Clicking Stop does nothing and the seconds keep rising. Fix it without changing the JSX.
+
+```tsx
+function Stopwatch() {
+  const [seconds, setSeconds] = useState(0);
+  let intervalId: number | undefined;
+
+  function start() {
+    intervalId = window.setInterval(() => setSeconds((s) => s + 1), 1000);
+  }
+  function stop() {
+    clearInterval(intervalId);
+  }
+
+  return (
+    <>
+      <p>{seconds}</p>
+      <button onClick={start}>Start</button>
+      <button onClick={stop}>Stop</button>
+    </>
+  );
+}
+```
+
+<Solution>
+`intervalId` is a new variable on every render, so after the first tick re-renders the component, `stop` sees `undefined`. Keep the ID in a ref:
+
+```tsx
+const intervalRef = useRef<number | undefined>(undefined);
+// start: intervalRef.current = window.setInterval(() => setSeconds((s) => s + 1), 1000);
+// stop:  clearInterval(intervalRef.current);
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the duplicate IDs">
+Clicking the second "Accept terms" label ticks the **first** checkbox. Why, and how do you fix it?
+
+```tsx
+function Agree() {
+  return (
+    <>
+      <input type="checkbox" id="agree" />
+      <label htmlFor="agree">Accept terms</label>
+    </>
+  );
+}
+
+<Agree />;
+<Agree />;
+```
+
+<Solution>
+Both inputs have `id="agree"`, and IDs must be unique, so every `htmlFor="agree"` finds the first one. Generate the ID inside the component:
+
+```tsx
+function Agree() {
+  const id = useId();
+  return (
+    <>
+      <input type="checkbox" id={id} />
+      <label htmlFor={id}>Accept terms</label>
+    </>
+  );
+}
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Build an auth context">
+Create `AuthProvider` and a `useAuth` hook with `user: string | null`, `login(name: string)` and `logout()`. Then write a `Header` that shows "Hello, name" with a Log out button when signed in, and a "Log in as Asha" button otherwise. Make `useAuth` throw outside the provider.
+
+<Solution>
+```tsx
+import { createContext, useContext, useState } from "react";
+import type { ReactNode } from "react";
+
+type AuthValue = {
+  user: string | null;
+  login: (name: string) => void;
+  logout: () => void;
+};
+
+const AuthContext = createContext<AuthValue | null>(null);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<string | null>(null);
+  const value = { user, login: setUser, logout: () => setUser(null) };
+  return <AuthContext value={value}>{children}</AuthContext>;
+}
+
+export function useAuth() {
+  const value = useContext(AuthContext);
+  if (value === null) throw new Error("useAuth must be used inside <AuthProvider>");
+  return value;
+}
+
+export function Header() {
+  const { user, login, logout } = useAuth();
+  return user ? (
+    <p>
+      Hello, {user} <button onClick={logout}>Log out</button>
+    </p>
+  ) : (
+    <button onClick={() => login("Asha")}>Log in as Asha</button>
+  );
+}
+
+// <AuthProvider><Header /></AuthProvider>
+```
+
+`login: setUser` works because a state setter already has the type `(name: string) => void`.
+</Solution>
+</Exercise>

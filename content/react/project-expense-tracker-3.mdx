@@ -1,0 +1,525 @@
+---
+title: "Project: Expense Tracker, Part 3"
+summary: "Finish the expense tracker: write the summary functions and test them, keep the list's filters in the URL with useSearchParams, build a dashboard with spending by category, and break the code on purpose to find the gaps in your tests."
+order: 26
+takeaways:
+  - Put the calculations (filtering, totals, shares) in plain functions outside the components, because functions with no React in them are the easiest code to test.
+  - Keep filters in the URL with useSearchParams, so a filtered list can be shared and survives a refresh, and check what you read from it, because anyone can type anything.
+  - Compute the visible list while rendering from the full list and the filters, instead of storing a filtered copy that could drift out of sync.
+  - Setting a search parameter replaces all of them unless you copy the old ones first, and replace true keeps each keystroke out of the browser history.
+  - Breaking your code on purpose finds tests that cannot fail, so write the missing test when a change leaves the suite green.
+videos: []
+docs:
+  - title: "React Router — useSearchParams"
+    url: https://reactrouter.com/api/hooks/useSearchParams
+  - title: "MDN: URLSearchParams"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams
+  - title: "Testing Library — Queries by role"
+    url: https://testing-library.com/docs/queries/byrole/
+---
+
+The app can add, edit and delete, and nothing is lost on reload. What it cannot do yet is answer questions: how much did I spend on food in September, and where did this month's money go? This part adds the filters and the dashboard, and then tests them. It uses lesson 14 (search parameters), lesson 16 (selectors) and lesson 18 (testing), and continues in the same project.
+
+## Where you are
+
+Part 2 ends with the pages and the CRUD flows working. Part 3 covers the last requirements:
+
+- [ ] A list sorted newest first, filtered by category, month and a search word, with the filters kept in the URL
+- [ ] A dashboard with this month's total and the share of each category
+- [ ] The helpers and the main flows have tests
+
+## Stage 11: The summary functions
+
+Write the calculations as plain functions in `src/summary.ts`, with no React and no store inside them:
+
+- `Filters`, a type with `category` (a `Category` or `""`), `month` (`"2026-10"` or `""`) and `q` (a search text).
+- `filterExpenses(expenses, filters)`: keeps the expenses that match every active filter (the search ignores case and looks in the title), sorted newest first.
+- `totalCents(expenses)`.
+- `byCategory(expenses)`: one row per category that has spending, with its `total` and its `share` of the whole as a rounded percentage, biggest first.
+- `monthsIn(expenses)`: each month that has expenses, once, newest first.
+
+Then write `src/summary.test.ts` with a small list of three expenses in two months and two categories, and check each function, including the empty list for `byCategory`.
+
+<Solution>
+
+```ts
+// src/summary.ts
+import { CATEGORIES, type Category, type Expense } from "./schema";
+import { monthOf } from "./dates";
+
+export type Filters = { category: Category | ""; month: string; q: string };
+
+export function filterExpenses(expenses: Expense[], filters: Filters): Expense[] {
+  const q = filters.q.trim().toLowerCase();
+  return expenses
+    .filter((e) => !filters.category || e.category === filters.category)
+    .filter((e) => !filters.month || monthOf(e.date) === filters.month)
+    .filter((e) => !q || e.title.toLowerCase().includes(q))
+    .toSorted((a, b) => b.date.localeCompare(a.date)); // newest first; toSorted keeps the original
+}
+
+export function totalCents(expenses: Expense[]): number {
+  return expenses.reduce((sum, e) => sum + e.amount, 0);
+}
+
+export function byCategory(expenses: Expense[]) {
+  const total = totalCents(expenses);
+  return CATEGORIES.map((category) => {
+    const sum = totalCents(expenses.filter((e) => e.category === category));
+    return {
+      category,
+      total: sum,
+      share: total === 0 ? 0 : Math.round((sum / total) * 100),
+    };
+  })
+    .filter((row) => row.total > 0)
+    .toSorted((a, b) => b.total - a.total);
+}
+
+// The months that have expenses, newest first: ["2026-10", "2026-09"].
+export function monthsIn(expenses: Expense[]): string[] {
+  return [...new Set(expenses.map((e) => monthOf(e.date)))].toSorted().toReversed();
+}
+```
+
+```ts
+// src/summary.test.ts
+import { expect, test } from "vitest";
+import type { Expense } from "./schema";
+import { byCategory, filterExpenses, monthsIn, totalCents } from "./summary";
+
+const expenses: Expense[] = [
+  { id: "1", title: "Coffee beans", amount: 1200, category: "Food", date: "2026-10-03" },
+  { id: "2", title: "Bus pass", amount: 3000, category: "Transport", date: "2026-10-15" },
+  { id: "3", title: "Pizza", amount: 1800, category: "Food", date: "2026-09-28" },
+];
+const none = { category: "", month: "", q: "" } as const;
+
+test("filters combine, ignore case, and sort newest first", () => {
+  expect(filterExpenses(expenses, none).map((e) => e.id)).toEqual(["2", "1", "3"]);
+  expect(
+    filterExpenses(expenses, { ...none, category: "Food" }).map((e) => e.id),
+  ).toEqual(["1", "3"]);
+  expect(
+    filterExpenses(expenses, { ...none, month: "2026-10", q: "COFFEE" }).map((e) => e.id),
+  ).toEqual(["1"]);
+  expect(
+    filterExpenses(expenses, { ...none, month: "2026-09" }).map((e) => e.id),
+  ).toEqual(["3"]);
+});
+
+test("totals and category shares", () => {
+  expect(totalCents(expenses)).toBe(6000);
+  expect(byCategory(expenses)).toEqual([
+    { category: "Food", total: 3000, share: 50 },
+    { category: "Transport", total: 3000, share: 50 },
+  ]);
+  expect(byCategory([])).toEqual([]);
+});
+
+test("monthsIn lists each month once, newest first", () => {
+  expect(monthsIn(expenses)).toEqual(["2026-10", "2026-09"]);
+});
+```
+
+Every filter is written as "no filter set, or it matches", so an empty filter lets everything through and the filters combine with `filter` calls in a row. `filter` already returns a new array, so even `sort` would be safe here, but `toSorted` is a habit worth keeping (we tried `sort` in the sandbox and no test noticed, because nothing can tell the difference). `byCategory` goes through `CATEGORIES`, so the order of ties is fixed instead of depending on insertion order, and it skips categories with no spending. `monthsIn` uses a `Set` to drop duplicates, then sorts the `YYYY-MM` strings, which sort correctly as text.
+
+</Solution>
+
+## Stage 12: Filters in the URL
+
+Where should the filters live? Not in the store, and not in `useState`. The filters describe *how you are looking* at the list, and a person might want to send `/expenses?category=Food&month=2026-09` to someone, or reload the page and see the same view. The URL does both, and lesson 14 showed `useSearchParams` for exactly this.
+
+Two rules from that lesson apply. First, a value in the URL is typed by a human, so `?category=Pets&month=soon` must not break anything: write `readFilters(params)` in `src/filters.ts`, which turns a `URLSearchParams` into a `Filters` and ignores anything that is not a real category or a `YYYY-MM` month. Second, `setSearchParams` replaces all the parameters, so the change handler must copy the old ones, and it should use `{ replace: true }` so that typing does not put every letter into the browser history.
+
+Replace the whole of `src/pages/ExpensesPage.tsx`. Add a search box, a category select and a month select (built from `monthsIn`), a **Clear filters** button that appears only when a filter is active, and a line saying "2 of 3 expenses · Total $30.00" that is announced politely to screen readers. Show "No expenses match these filters." when the filtered list is empty.
+
+<Solution>
+
+```ts
+// src/filters.ts
+import { CATEGORIES } from "./schema";
+import type { Filters } from "./summary";
+
+// The URL is typed by humans, so check it: an unknown category or a broken month is ignored.
+export function readFilters(params: URLSearchParams): Filters {
+  const category = params.get("category");
+  const month = params.get("month") ?? "";
+  return {
+    category: CATEGORIES.find((c) => c === category) ?? "",
+    month: /^\d{4}-\d{2}$/.test(month) ? month : "",
+    q: params.get("q") ?? "",
+  };
+}
+```
+
+```tsx
+// src/pages/ExpensesPage.tsx
+import { Link, useSearchParams } from "react-router";
+import { formatDate, formatMonth } from "../dates";
+import { readFilters } from "../filters";
+import { formatMoney } from "../money";
+import { CATEGORIES } from "../schema";
+import { useExpenseStore } from "../store";
+import { filterExpenses, monthsIn, totalCents } from "../summary";
+
+export function ExpensesPage() {
+  const expenses = useExpenseStore((state) => state.expenses);
+  const remove = useExpenseStore((state) => state.remove);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filters = readFilters(searchParams);
+
+  function setFilter(key: "category" | "month" | "q", value: string) {
+    setSearchParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        if (value) next.set(key, value);
+        else next.delete(key);
+        return next;
+      },
+      { replace: true },
+    );
+  }
+
+  if (expenses.length === 0) {
+    return (
+      <>
+        <h2>Expenses</h2>
+        <p>
+          No expenses yet. <Link to="/expenses/new">Add your first one</Link>.
+        </p>
+      </>
+    );
+  }
+
+  const visible = filterExpenses(expenses, filters);
+  const hasFilters = Boolean(filters.category || filters.month || filters.q);
+
+  return (
+    <>
+      <h2>Expenses</h2>
+
+      <div role="search" aria-label="Filter expenses" className="filters">
+        <label>
+          Search
+          <input
+            type="search"
+            value={filters.q}
+            onChange={(e) => setFilter("q", e.target.value)}
+          />
+        </label>
+        <label>
+          Category
+          <select
+            value={filters.category}
+            onChange={(e) => setFilter("category", e.target.value)}
+          >
+            <option value="">All categories</option>
+            {CATEGORIES.map((category) => (
+              <option key={category}>{category}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Month
+          <select
+            value={filters.month}
+            onChange={(e) => setFilter("month", e.target.value)}
+          >
+            <option value="">All months</option>
+            {monthsIn(expenses).map((month) => (
+              <option key={month} value={month}>
+                {formatMonth(month)}
+              </option>
+            ))}
+          </select>
+        </label>
+        {hasFilters && (
+          <button type="button" onClick={() => setSearchParams({}, { replace: true })}>
+            Clear filters
+          </button>
+        )}
+      </div>
+
+      <p aria-live="polite">
+        {visible.length} of {expenses.length} expenses · Total{" "}
+        <strong>{formatMoney(totalCents(visible))}</strong>
+      </p>
+
+      {visible.length === 0 ? (
+        <p>No expenses match these filters.</p>
+      ) : (
+        <ul aria-label="Expenses">
+          {visible.map((expense) => (
+            <li key={expense.id}>
+              <span>
+                <strong>{expense.title}</strong>
+                <br />
+                {expense.category} · {formatDate(expense.date)}
+              </span>
+              <span>{formatMoney(expense.amount)}</span>
+              <Link
+                to={`/expenses/${expense.id}/edit`}
+                aria-label={`Edit ${expense.title}`}
+              >
+                Edit
+              </Link>
+              <button
+                type="button"
+                onClick={() => remove(expense.id)}
+                aria-label={`Delete ${expense.title}`}
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+```
+
+Add these rules to `src/index.css`, for the filter row and the bars of the next stage:
+
+```css
+.filters { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; }
+.bar-row { display: grid; grid-template-columns: 6rem 1fr 9rem; gap: 0.5rem; }
+.bar { background: #eee; border-radius: 4px; height: 0.75rem; align-self: center; }
+.bar > span { display: block; height: 100%; background: #3b6cf5; border-radius: 4px; }
+```
+
+The page keeps **one** copy of the data, the full list in the store, and computes `visible` from it while rendering. `filter` never goes inside a Zustand selector: a selector that returns a new array on every call loops forever in Zustand 5 (lesson 16). Selecting the whole list and filtering in the component is fine. The inputs are **controlled by the URL**: `value={filters.q}` reads from the address, and `onChange` writes to it. This does not lose characters, and a check in a real browser typing `bus pass` gave the address `/expenses?q=bus+pass` with one row left. An empty value deletes the key, so the URL stays clean when you clear a filter.
+
+</Solution>
+
+## Stage 13: The dashboard
+
+Replace the placeholder with `src/pages/DashboardPage.tsx`. It shows the current month's name, the month's total with the number of expenses, and a bar for each category (use `byCategory` on this month's expenses, and a `span` whose `width` is the share). Under the bars, show the all-time total with a link to the list. Handle two empty cases with a message each: no expenses at all, and no expenses this month.
+
+The bars are drawn with CSS only, so you need no chart library, and they are `aria-hidden` because the numbers next to them already say the same thing in text.
+
+<Solution>
+
+```tsx
+// src/pages/DashboardPage.tsx
+import { Link } from "react-router";
+import { formatMonth, monthOf, todayISO } from "../dates";
+import { formatMoney } from "../money";
+import { useExpenseStore } from "../store";
+import { byCategory, totalCents } from "../summary";
+
+export function DashboardPage() {
+  const expenses = useExpenseStore((state) => state.expenses);
+  const month = monthOf(todayISO());
+  const thisMonth = expenses.filter((e) => monthOf(e.date) === month);
+
+  if (expenses.length === 0) {
+    return (
+      <>
+        <h2>Dashboard</h2>
+        <p>
+          Nothing to show yet. <Link to="/expenses/new">Add an expense</Link> to get
+          started.
+        </p>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <h2>Dashboard</h2>
+      <section aria-labelledby="month-heading">
+        <h3 id="month-heading">{formatMonth(month)}</h3>
+        <p>
+          <strong>{formatMoney(totalCents(thisMonth))}</strong> spent in{" "}
+          {thisMonth.length} {thisMonth.length === 1 ? "expense" : "expenses"}
+        </p>
+
+        {thisMonth.length === 0 ? (
+          <p>No expenses this month yet.</p>
+        ) : (
+          <ul aria-label="Spending by category">
+            {byCategory(thisMonth).map((row) => (
+              <li key={row.category} className="bar-row">
+                <span>{row.category}</span>
+                <span className="bar" aria-hidden="true">
+                  <span style={{ width: `${row.share}%` }} />
+                </span>
+                <span>
+                  {formatMoney(row.total)} ({row.share}%)
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <p>
+        All time: {formatMoney(totalCents(expenses))} in {expenses.length} expenses.{" "}
+        <Link to="/expenses">See all</Link>
+      </p>
+    </>
+  );
+}
+```
+
+In `src/App.tsx`, import `DashboardPage` and use it in the index route in place of the placeholder `<h2>`:
+
+```tsx
+// src/App.tsx (the changed route)
+<Route index element={<DashboardPage />} />
+```
+
+`monthOf(todayISO())` gives `"2026-10"` for the current month without creating a `Date` object that could shift. The month is computed during rendering, so the page is right after midnight on the last day of a month without any extra work.
+
+</Solution>
+
+<Callout type="note" title="The shares can add up to 101%">
+Each share is rounded by itself, so three categories at 94.6%, 3.8% and 1.6% show as 95%, 4% and 2%, which is 101%. In the sandbox, a month with $750.00, $30.00 and $12.50 did exactly that. For a dashboard this is acceptable, and it is a good stretch goal to fix below.
+</Callout>
+
+## Stage 14: Test filters and dashboard
+
+Write two more test files, using `renderApp` from Part 2 and a small `seed` function that adds three expenses. In `src/filters.test.tsx`:
+
+1. Choosing a category narrows the list and the total.
+2. Typing in the search box filters it, the typed text stays in the box, and **Clear filters** brings everything back and empties the box.
+3. A URL such as `/expenses?category=Transport&month=2026-10` opens already filtered, with the selects showing those values.
+4. Nonsense in the URL (`?category=Pets&month=soon`) is ignored.
+5. A search that matches nothing shows the "no match" message.
+
+In `src/dashboard.test.tsx`: the dashboard is empty at first, and with two expenses this month and an old one, the bars show 75% and 25% and the all-time total includes the old expense. Build the expenses with `todayISO()`, so the test does not break when the month changes.
+
+<Solution>
+
+```tsx
+// src/filters.test.tsx
+import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { expect, test } from "vitest";
+import { useExpenseStore } from "./store";
+import { renderApp } from "./test-utils";
+
+function seed() {
+  const { add } = useExpenseStore.getState();
+  add({ title: "Coffee beans", amount: 1200, category: "Food", date: "2026-10-03" });
+  add({ title: "Bus pass", amount: 3000, category: "Transport", date: "2026-10-15" });
+  add({ title: "Pizza", amount: 1800, category: "Food", date: "2026-09-28" });
+}
+
+test("the category filter narrows the list and the total", async () => {
+  seed();
+  const user = userEvent.setup();
+  renderApp("/expenses");
+
+  await user.selectOptions(screen.getByLabelText("Category"), "Food");
+
+  expect(screen.getByText("2 of 3 expenses", { exact: false })).toBeInTheDocument();
+  expect(screen.queryByText("Bus pass")).not.toBeInTheDocument();
+  expect(screen.getByText("$30.00")).toBeInTheDocument();
+});
+
+test("typing in the search box filters, and Clear filters resets", async () => {
+  seed();
+  const user = userEvent.setup();
+  renderApp("/expenses");
+
+  await user.type(screen.getByLabelText("Search"), "piz");
+  expect(screen.getByLabelText("Search")).toHaveValue("piz");
+  expect(screen.getAllByRole("listitem")).toHaveLength(1);
+
+  await user.click(screen.getByRole("button", { name: "Clear filters" }));
+  expect(screen.getAllByRole("listitem")).toHaveLength(3);
+  expect(screen.getByLabelText("Search")).toHaveValue("");
+});
+
+test("filters live in the URL, so a shared link opens already filtered", () => {
+  seed();
+  renderApp("/expenses?category=Transport&month=2026-10");
+  expect(screen.getByLabelText("Category")).toHaveValue("Transport");
+  expect(screen.getAllByRole("listitem")).toHaveLength(1);
+});
+
+test("a nonsense value in the URL is ignored", () => {
+  seed();
+  renderApp("/expenses?category=Pets&month=soon");
+  expect(screen.getAllByRole("listitem")).toHaveLength(3);
+});
+
+test("filters that match nothing say so", async () => {
+  seed();
+  const user = userEvent.setup();
+  renderApp("/expenses");
+  await user.type(screen.getByLabelText("Search"), "zzz");
+  expect(screen.getByText("No expenses match these filters.")).toBeInTheDocument();
+});
+```
+
+```tsx
+// src/dashboard.test.tsx
+import { screen, within } from "@testing-library/react";
+import { expect, test } from "vitest";
+import { todayISO } from "./dates";
+import { useExpenseStore } from "./store";
+import { renderApp } from "./test-utils";
+
+test("is empty at first", () => {
+  renderApp("/");
+  expect(screen.getByText(/Nothing to show yet/)).toBeInTheDocument();
+});
+
+test("sums this month by category and ignores older months", () => {
+  useExpenseStore.setState({
+    expenses: [
+      { id: "1", title: "Rent", amount: 7500, category: "Housing", date: todayISO() },
+      { id: "2", title: "Taxi", amount: 2500, category: "Transport", date: todayISO() },
+      { id: "3", title: "Old", amount: 99900, category: "Fun", date: "2020-01-01" },
+    ],
+  });
+  renderApp("/");
+
+  const bars = screen.getByRole("list", { name: "Spending by category" });
+  const rows = within(bars).getAllByRole("listitem");
+  expect(rows[0]).toHaveTextContent("Housing$75.00 (75%)");
+  expect(rows[1]).toHaveTextContent("Transport$25.00 (25%)");
+  expect(screen.getByText(/All time: \$1,099.00/)).toBeInTheDocument();
+});
+```
+
+Run `npx vitest run`: 35 tests pass (6 files). The "shared link" test is the reason for putting the filters in the URL, so test it: `MemoryRouter initialEntries` starts the app on that address, which is the same as someone opening the link. Typing `piz` into the search box and then reading it back with `toHaveValue("piz")` proves that the controlled input keeps what you type.
+
+</Solution>
+
+## Break it on purpose
+
+Make each change, run `npx vitest run`, check that the named test goes red, and undo it. These are the results in the sandbox:
+
+| Break this | Result |
+| ---------- | ------ |
+| In `filterExpenses`, remove `.toLowerCase()` from the search text | The "filters combine, ignore case" test fails |
+| In `filterExpenses`, remove the month filter | The same test fails, **but only after** the `month: "2026-09"` line was added |
+| In `readFilters`, stop checking the month format | The nonsense-in-the-URL test fails |
+| In `ExpensesPage`, use `defaultValue` instead of `value` on the search box | The Clear filters test fails: the box keeps its text |
+| In `DashboardPage`, remove the this-month filter | The dashboard test fails: the old expense is counted |
+| In `ExpensesPage`, remove `{ replace: true }` | **No test fails** |
+
+Two rows are lessons. The month filter was first tested only with a month that every expense in the test already matched, so deleting the filter changed nothing, and the suite stayed green until a test used a month that excludes something. And `replace: true` cannot be seen by `MemoryRouter`, which has no Back button. Check that one by hand: type a few letters in the search box, press the browser's Back button, and you should leave the page, not step back through each letter.
+
+## Stretch goals and checking your work
+
+- **Shares that add up to 100:** change `byCategory` to the largest remainder method (round everything down, then give the missing points to the rows with the biggest remainders), and test that the shares always sum to 100.
+- **Undo delete:** keep the last deleted expense in a `useState` and show an "Undo" button for a few seconds.
+- **Sort option in the URL:** add `?sort=amount` and a select to sort by amount instead of date.
+- **Monthly chart:** a bar for each of the last six months on the dashboard, using `monthsIn` and `totalCents`.
+- **Export:** a button that downloads the filtered list as a CSV file (remember to put quotes around titles that contain commas).
+
+Before calling the project done, run:
+
+```bash
+npx tsc -b
+npm run lint
+npx vitest run
+npm run build
+```
+
+All four should finish without errors, with 35 tests passing. Push the project to a GitHub repository with a short README and a screenshot of the dashboard. This is your third React portfolio piece. Its parts are the ones interviewers ask about: a form with validation, state that survives a reload, routing with URL state, and tests that you have seen fail.
