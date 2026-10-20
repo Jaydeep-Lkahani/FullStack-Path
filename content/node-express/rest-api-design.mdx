@@ -1,0 +1,282 @@
+---
+title: REST API Design
+summary: Design an API that other developers can guess, with nouns for URLs, the right method for each action, the right status code for each answer, and safe handling of retries.
+order: 10
+takeaways:
+  - "A REST API names things (resources) with plural nouns in the URL, and uses the HTTP method as the verb, so `POST /todos` creates and `DELETE /todos/5` deletes."
+  - "GET only reads and is safe to repeat, PUT and DELETE are idempotent (repeating them leaves the same result), and POST is not, so a retried POST can create a duplicate."
+  - "PUT replaces a whole resource and needs every field, while PATCH changes only the fields you send."
+  - "The status code is the first thing a client checks: 201 with a `Location` header for a created resource, 204 for no body, 400 for a bad request, 404 for a missing one, 409 for a conflict."
+  - "Use one response shape everywhere, such as `data` for success and `error` with a code and a message for failures, so clients can handle every endpoint the same way."
+videos:
+  - title: "9 Must-Know REST API Design Principles for Developers"
+    channel: "ByteMonk"
+    duration: "10:00"
+    url: https://www.youtube.com/watch?v=pJ83mmqcvoQ
+  - title: "HTTP Status Codes Explained In 5 Minutes"
+    channel: "ByteByteGo"
+    duration: "5:07"
+    url: https://www.youtube.com/watch?v=qmpUfWN7hh4
+docs:
+  - title: "MDN: HTTP request methods"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods
+  - title: "MDN: HTTP response status codes"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status
+  - title: "RFC 9110: HTTP Semantics"
+    url: https://www.rfc-editor.org/rfc/rfc9110
+---
+
+Anyone can make an Express route that returns JSON. Designing an API that a stranger can use without reading your code is a different skill, and it is what interviews and code reviews look at: are the URLs predictable, does a failed request say why, is it safe to retry? The frontend lessons (TanStack Query, forms) and every later backend lesson (validation, auth, tests) depend on the rules you set here.
+
+This is the thinking before the code. It uses the todo API from the earlier lessons as its running example, and the next three lessons put it into practice: `rest-api-build` writes the routes in Express 5, `pagination-and-versioning` adds lists that scale and a way to change the API safely, and `openapi-and-bruno` documents and tests it.
+
+## What "REST" means in practice
+
+**REST** (Representational State Transfer) is a style for building APIs on top of HTTP. The ideas that matter in daily work are few:
+
+- **Resources.** Everything the API talks about is a *thing* with its own URL: a todo, a user, an order. The JSON you send and receive is a *representation* of that thing.
+- **A uniform interface.** You do not invent a new protocol per API. You use the standard HTTP methods and status codes, so any client knows what `GET` or a `404` means.
+- **Stateless requests.** Each request carries everything the server needs (an id, a token). The server does not remember "the previous request" of a client.
+
+Most APIs called "REST" are really "JSON over HTTP, following these conventions". Nobody checks the purity; what counts is that your API is consistent and boring in the good sense.
+
+## REST, RPC and GraphQL
+
+REST is one of three styles you will meet, and interviews like the comparison:
+
+| Style | Shape | Example | Good at |
+| ----- | ----- | ------- | ------- |
+| REST | many URLs, one per resource; the method is the verb | `PATCH /todos/7` | caching, simple tools, public APIs |
+| RPC | many named actions; usually always `POST` | `POST /markTodoDone` | actions that are not about data, internal calls |
+| GraphQL | one URL; the client sends a query that names the fields it wants | `POST /graphql` | screens that need data from many places at once |
+
+This course builds REST APIs with Express. You will also see RPC again: a Next.js Server Action is a function call over HTTP, and that is RPC in a modern costume. GraphQL is a good tool when many different clients need different slices of the same data, but it moves complexity (caching, limits, authorization per field) to the server.
+
+## Resources and URLs
+
+Name the **thing**, not the action. The HTTP method already says what to do with it.
+
+```text
+GET    /todos          list todos
+POST   /todos          create a todo
+GET    /todos/7        read todo 7
+PUT    /todos/7        replace todo 7
+PATCH  /todos/7        change some fields of todo 7
+DELETE /todos/7        delete todo 7
+```
+
+The rules that keep URLs guessable:
+
+| Do                                                 | Don't                                  |
+| -------------------------------------------------- | -------------------------------------- |
+| Plural nouns: `/todos`                             | Verbs: `/getTodos`, `/createTodo`      |
+| One style, lowercase, with hyphens: `/blog-posts`  | Mixed styles: `/BlogPosts`, `/blog_posts` |
+| Ids in the path: `/todos/7`                        | Ids in the query: `/todos?id=7`        |
+| Filters in the query: `/todos?done=true`           | Filters in the path: `/todos/done`     |
+| Nest one level for ownership: `/users/3/todos`     | Deep chains: `/users/3/todos/7/tags/2` |
+
+For the last row: when a todo belongs to a user, `/users/3/todos` reads naturally, but once a thing has its own id you can reach it directly at `/todos/7`. Deep nesting makes URLs long and forces clients to know every parent id.
+
+What about actions that do not fit create/read/update/delete, such as "send this invoice by email"? Prefer to model the result as a resource or a field (`PATCH /invoices/9` with `{ "status": "sent" }`). If you cannot, a verb sub-resource is acceptable and common: `POST /invoices/9/send`. Use it sparingly.
+
+## The methods
+
+Two properties of methods decide how clients and proxies may treat them:
+
+- A method is **safe** if it only reads and changes nothing on the server.
+- A method is **idempotent** if sending it once or ten times leaves the server in the same state.
+
+| Method   | Meaning                  | Safe | Idempotent | Body in request |
+| -------- | ------------------------ | ---- | ---------- | --------------- |
+| `GET`    | read                     | yes  | yes        | no              |
+| `POST`   | create (or run an action) | no   | **no**     | yes             |
+| `PUT`    | replace the whole thing  | no   | yes        | yes             |
+| `PATCH`  | change some fields       | no   | not guaranteed | yes         |
+| `DELETE` | remove                   | no   | yes        | no              |
+
+Idempotency matters because networks fail. If a request times out, the client cannot tell whether the server received it, so it retries. A retried `PUT` or `DELETE` is harmless. A retried `POST` may create two todos, or charge a card twice. (Real payment APIs solve this with an `Idempotency-Key` header: the client sends a unique key, and the server answers a repeated key with the first result.) This also explains why browsers will happily re-fetch a `GET` but ask before re-submitting a `POST` form.
+
+## Status codes
+
+The status code tells the client what happened before it reads any body. Pick the most specific one, and always send JSON for errors, in one shape (see "Designing the response" below).
+
+| Code | Name | Use it when |
+| ---- | ---- | ----------- |
+| `200` | OK | a read or update succeeded and you return a body |
+| `201` | Created | `POST` made something new; add a `Location` header with its URL |
+| `204` | No Content | success with nothing to return, typically `DELETE` |
+| `400` | Bad Request | the request is malformed or fails validation |
+| `401` | Unauthorized | the client is not logged in (`authentication` lesson) |
+| `403` | Forbidden | logged in, but not allowed (`authorization-oauth` lesson) |
+| `404` | Not Found | no such resource |
+| `405` | Method Not Allowed | the URL exists but not for this method |
+| `409` | Conflict | the request clashes with current state, such as a duplicate title |
+| `415` | Unsupported Media Type | wrong `Content-Type`, for example not JSON |
+| `422` | Unprocessable Content | valid JSON, but the values break a rule (some teams use this instead of `400` for validation) |
+| `429` | Too Many Requests | rate limit hit (`security` lesson) |
+| `500` | Internal Server Error | a bug or outage on the server |
+
+The first digit is the quick check: `2xx` worked, `4xx` is the client's mistake (do not retry unchanged), `5xx` is the server's fault (a retry may help). Two classic mix-ups are worth knowing for interviews: `401` means "I do not know who you are" and `403` means "I know who you are, and no", and returning `200` with `{ "error": ... }` in the body is wrong, because clients, caches and monitoring tools read the status, not your JSON.
+
+Two details to remember: `POST` answers `201 Created` with a `Location` header holding the URL of the new thing (for example `Location: /todos/4`), and `DELETE` answers `204` and sends no body at all.
+
+## PUT versus PATCH
+
+Both change an existing todo, but they mean different things.
+
+- **`PUT` replaces.** The body is the complete new version. A missing field is not "keep the old value", it is an error (or it resets to a default).
+- **`PATCH` merges.** The body holds only the fields to change; everything else stays.
+
+```text
+todo 1 is { "id": 1, "title": "Learn routes", "done": false }
+
+PUT   /todos/1   { "title": "Learn routes again", "done": true }   -> the new whole todo
+PUT   /todos/1   { "title": "Learn routes again" }                 -> 400, done is missing
+PATCH /todos/1   { "done": true }                                  -> title is kept, done changes
+```
+
+In practice frontends use `PATCH` far more than `PUT`, because a form usually changes one or two fields, and a client that sends `PUT` must know every field (including ones added later). Sending the same `PUT` twice leaves the todo identical. `PATCH` is only idempotent when it sets values (`{ "done": true }`); a patch that means "add 1 to the count" would not be.
+
+## Idempotency, seen
+
+You can check the table of methods with a short script that stands in for the server:
+
+```ts
+// idempotent.ts
+interface Todo {
+  id: number;
+  title: string;
+  done: boolean;
+}
+
+const todos: Todo[] = [{ id: 1, title: "Learn routes", done: false }];
+let nextId = 2;
+
+// like POST /todos
+function create(title: string) {
+  todos.push({ id: nextId++, title, done: false });
+}
+
+// like PUT or PATCH /todos/1 with { "done": true }
+function setDone(id: number, done: boolean) {
+  todos.find((todo) => todo.id === id)!.done = done;
+}
+
+// like DELETE /todos/1
+function remove(id: number): boolean {
+  const index = todos.findIndex((todo) => todo.id === id);
+  if (index === -1) return false;
+  todos.splice(index, 1);
+  return true;
+}
+
+create("Water plants");
+create("Water plants");
+console.log("after two creates:", todos.length, "todos");
+
+setDone(1, true);
+setDone(1, true);
+console.log("after setting done twice:", todos[0]);
+
+console.log("first delete:", remove(1), "second delete:", remove(1));
+console.log("todos left:", todos.length);
+```
+
+```text
+after two creates: 3 todos
+after setting done twice: { id: 1, title: 'Learn routes', done: true }
+first delete: true second delete: false
+todos left: 2
+```
+
+Creating twice made two todos (3 in total), so a retried `POST` has a cost. Setting `done` twice left the same state as once. The last two lines are the subtle one: after the first delete the todo is gone, and the second call finds nothing. A real API answers `404` the second time, and that is **still** called idempotent, because idempotency is about the **state of the server** (the todo is gone either way), not about getting the same response. If a real API has a natural unique field, such as a unique title, a retried `POST` can be rejected with `409` instead of creating a duplicate, but not every resource has one.
+
+## Designing the response
+
+Method, URL and status are half of the design. The other half is what the JSON looks like, and the rule is **one shape everywhere**:
+
+```json
+{ "data": { "id": 4, "title": "Write docs", "done": false, "createdAt": "2026-10-20T17:02:48.846Z" } }
+```
+
+```json
+{ "error": { "code": "NOT_FOUND", "message": "No todo with id 99" } }
+```
+
+- **Wrap success in `data`.** A bare array or object works today, but the day you need to add `meta` (a total, a page number, a warning) you would have to change the type of the response, which breaks every client. An envelope leaves room.
+- **Fail in one shape.** A client that reads `error.code` can handle every failure of every endpoint with the same code. This is the format the `express-error-handling` lesson built.
+- **Name fields in camelCase,** the style JavaScript clients expect, and keep one style for the whole API.
+- **Send dates as ISO 8601 strings in UTC** (`2026-10-20T17:02:48.846Z`). `JSON.stringify` makes this from a `Date`, and every language can parse it.
+- **Send money as integers in the smallest unit** (`1999` cents), never as `19.99`, for the same reason you met in the expense tracker: floating point numbers cannot hold most decimals exactly.
+- **Describe resources, not database rows.** Return the fields a client needs. A password hash, an internal flag or another user's email must never appear, even if the row has them.
+
+## Common mistakes
+
+- Putting verbs in URLs (`/deleteTodo/5`) or using `POST` for everything, which throws away the meaning of the methods.
+- Answering `200` for every outcome and hiding the real result in the body.
+- Returning `404` for a *validation* problem, or `400` for a missing resource. The status should name the category of the problem.
+- Changing data in a `GET` handler. Browsers, link previews and crawlers fetch `GET` URLs freely, so a `GET /todos/5/delete` can be triggered by anything that loads a page.
+- Changing the shape of a response for one endpoint "because it is easier there". Clients pay for every exception.
+
+<Exercise title="Fix the URLs">
+This API works, but its design breaks the rules above. Rewrite each line as a method plus URL, and name the status code the success answer should have.
+
+```text
+POST /createTodo                  creates a todo
+GET  /getTodoById?id=7            reads todo 7
+POST /todos/7/delete              deletes todo 7
+GET  /todos/finished              lists the finished todos
+POST /updateTodo/7                changes only the title of todo 7
+```
+
+<Solution>
+```text
+POST   /todos                 -> 201 Created, with a Location header
+GET    /todos/7               -> 200 OK
+DELETE /todos/7               -> 204 No Content
+GET    /todos?done=true       -> 200 OK
+PATCH  /todos/7               -> 200 OK, body { "title": "..." }
+```
+
+Each URL now names a thing (`/todos`, `/todos/7`), and the method is the verb. `finished` is a *filter* on the collection, so it goes in the query string, not in the path. The fifth uses `PATCH` because only one field changes; `PUT` would have required the whole todo.
+</Solution>
+</Exercise>
+
+<Exercise title="Pick the status code">
+Which status code should each answer use?
+
+1. `POST /todos` with the body `{ "title": 42 }`
+2. `GET /todos/999`, and no todo 999 exists
+3. A visitor who is not logged in calls `GET /me`
+4. A logged-in regular user calls `DELETE /users/3`, which only admins may do
+5. `POST /todos` creates a todo successfully
+6. `POST /todos` sends a title that already exists, and titles must be unique
+7. `GET /todos` fails because the database is down
+
+<Solution>
+1. `400`: the body is not valid (a title must be a string). Some teams use `422` for "valid JSON, invalid values"; pick one and keep it.
+2. `404`: the resource does not exist.
+3. `401`: the server does not know who the visitor is.
+4. `403`: the server knows who the user is, and the answer is still no.
+5. `201`, with a `Location` header pointing at the new todo.
+6. `409`: the request is fine on its own, but clashes with the current state.
+7. `500` (or `503` if you know the service is temporarily unavailable). The client did nothing wrong, so it is never a `4xx`.
+</Solution>
+</Exercise>
+
+<Exercise title="Design a library API">
+A library app has books, members and loans (a member borrows a book and later returns it). Write down the method and URL for: listing all books, adding a book, changing a book's title, listing one member's loans, borrowing a book, and returning it. Say what status each success answer has.
+
+<Solution>
+```text
+GET    /books                    -> 200, a list (add ?q=... to search)
+POST   /books                    -> 201, with a Location header
+PATCH  /books/12                 -> 200, body { "title": "..." }
+GET    /members/3/loans          -> 200, the loans that belong to member 3
+POST   /loans                    -> 201, body { "memberId": 3, "bookId": 12 }
+PATCH  /loans/45                 -> 200, body { "returnedAt": "2026-10-20T10:00:00Z" }
+```
+
+A loan is a resource of its own: borrowing *creates* one (`POST /loans`) and returning *updates* it (`PATCH /loans/45`), so no verb like `/borrow` is needed. The nested URL `/members/3/loans` is a good fit for "the loans of one member", while a single loan can be reached directly at `/loans/45` without the member id. Other designs are fine if they follow the same rules: nouns, the right method, one level of nesting.
+</Solution>
+</Exercise>

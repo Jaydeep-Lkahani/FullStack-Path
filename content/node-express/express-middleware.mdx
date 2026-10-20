@@ -1,0 +1,347 @@
+---
+title: Express Middleware and Routers
+summary: Understand how a request flows through Express middleware, write your own, and split an API into routers mounted under path prefixes.
+order: 8
+takeaways:
+  - "Middleware is a function `(req, res, next)` that either answers the request or calls `next()` to pass it on."
+  - "Express runs middleware and routes in the order you registered them, so the order of `app.use` calls decides what runs."
+  - "A middleware that neither responds nor calls `next()` makes the request hang."
+  - "`express.Router` lets you keep each resource in its own file and mount it under a path prefix with `app.use`."
+  - "A final `app.use` with no path works as the 404 handler, and splitting `app.ts` from `server.ts` lets tests import the app without opening a port."
+videos:
+  - title: "Learn Express Middleware In 14 Minutes"
+    channel: "Web Dev Simplified"
+    duration: "14:48"
+    url: https://www.youtube.com/watch?v=lY6icfhap2o
+docs:
+  - title: "Express — Using middleware"
+    url: https://expressjs.com/en/guide/using-middleware.html
+  - title: "Express — Writing middleware"
+    url: https://expressjs.com/en/guide/writing-middleware/
+  - title: "Express — Routing (express.Router)"
+    url: https://expressjs.com/en/guide/routing.html
+  - title: "Express 5.x API reference"
+    url: https://expressjs.com/en/5x/api.html
+---
+
+In `express-basics` you answered requests with routes. Real APIs need work that every route shares: logging, reading bodies, checking a key, handling errors. Express does this with **middleware**, and once you understand it, most of Express (and of the packages around it, like `cors` and `helmet`) stops being magic. This lesson continues the todo API from the last one, written for Express 5.3 and Node 24, and ends with the project split into files that the later lessons (error handling, validation, auth, tests) build on.
+
+## Middleware
+
+**Middleware** is the central idea of Express. A middleware is a function with three parameters, `(req, res, next)`. It can read or change `req` and `res`, and then it must do **one** of two things: send a response, or call `next()` to hand the request to the next function in the chain.
+
+```text
+request -> logger -> express.json() -> router -> handler -> response
+              |            |
+              +-- each one calls next() to pass the request on
+```
+
+Here is a logger that prints one line per request, including the status code and how long it took:
+
+```ts
+// src/middleware/logger.ts
+import type { NextFunction, Request, Response } from "express";
+
+export function logger(req: Request, res: Response, next: NextFunction) {
+  const start = performance.now();
+
+  res.on("finish", () => {
+    const ms = (performance.now() - start).toFixed(1);
+    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms`);
+  });
+
+  next();
+}
+```
+
+The `finish` event fires after the response has been sent, which is why the status code is known there. The function runs at the start of a request, calls `next()`, and the closure (`start`) is waiting when the response ends. This is the closure idea from `javascript-core` working in a server.
+
+Register it with `app.use`:
+
+```ts
+app.use(logger);
+app.use(express.json());
+```
+
+```text
+POST /todos 201 6.2ms
+GET /todos/99 404 0.2ms
+```
+
+### Order matters
+
+Express runs middleware and routes **in the order you registered them**. Everything above a route can affect it, and everything below it cannot if the route already answered:
+
+```ts
+app.use((req, res, next) => {
+  console.log("A");
+  next();
+  console.log("A after");
+});
+app.use("/todos", (req, res, next) => {
+  console.log("B");
+  next();
+});
+app.get("/todos", (req, res) => {
+  console.log("C");
+  res.send("done");
+});
+app.get("/todos", (req, res) => {
+  console.log("D");
+});
+```
+
+`GET /todos` prints `A`, `B`, `C`, `A after`. `D` never runs because the handler for `C` answered and did not call `next()`. `A after` prints when `next()` returns, which is the moment the later handlers have finished their synchronous work. For `GET /other`, only `A` and `A after` print, and Express answers with its default 404 page.
+
+Three rules follow:
+
+- Put middleware that every route needs (logging, `express.json()`) **above** the routes.
+- A middleware that neither responds nor calls `next()` makes the request hang forever.
+- Call `next()` exactly once, and do not write code after it that expects the request to be finished.
+
+### Short-circuiting
+
+A middleware can stop the chain by sending a response itself. This one rejects requests that do not claim to send JSON:
+
+```ts
+// src/middleware/requireJson.ts
+import type { NextFunction, Request, Response } from "express";
+
+export function requireJson(req: Request, res: Response, next: NextFunction) {
+  if (!req.is("application/json")) {
+    res.status(415).json({ error: "Send a JSON body with Content-Type: application/json" });
+    return;
+  }
+  next();
+}
+```
+
+You can attach middleware to a single route by putting it before the handler: `app.post("/todos", requireJson, createTodo)`. You can also pass several in a row. Status `415` means "unsupported media type".
+
+### Built-in and third-party middleware
+
+Express 5 ships a few: `express.json()` (JSON bodies), `express.urlencoded()` (HTML form bodies, with `extended` off by default now), `express.static("public")` (serves files from a folder) and `express.text()`/`express.raw()`. Most other features come from npm packages that follow the same `(req, res, next)` shape: `cors`, `helmet`, `morgan`, `cookie-parser`. You will use several of them in later lessons.
+
+## Routers
+
+Putting every route in one file works for ten routes and not for a hundred. An **`express.Router`** is a mini app with its own routes and middleware that you mount under a path prefix. Move the todo routes into their own file:
+
+```ts
+// src/routes/todos.ts
+import { Router } from "express";
+import { requireJson } from "../middleware/requireJson.ts";
+import { addTodo, todos } from "../todos.ts";
+
+export const todosRouter = Router();
+
+// GET /todos?done=true
+todosRouter.get("/", (req, res) => {
+  const { done } = req.query;
+  if (done === "true" || done === "false") {
+    res.json(todos.filter((todo) => todo.done === (done === "true")));
+    return;
+  }
+  res.json(todos);
+});
+
+// GET /todos/2
+todosRouter.get("/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const todo = todos.find((todo) => todo.id === id);
+  if (!todo) {
+    res.status(404).json({ error: `No todo with id ${req.params.id}` });
+    return;
+  }
+  res.json(todo);
+});
+
+// POST /todos  { "title": "..." }
+todosRouter.post("/", requireJson, (req, res) => {
+  const title: unknown = req.body?.title;
+  if (typeof title !== "string" || title.trim() === "") {
+    res.status(400).json({ error: "title must be a non-empty string" });
+    return;
+  }
+  res.status(201).json(addTodo(title.trim()));
+});
+
+// DELETE /todos/2
+todosRouter.delete("/:id", (req, res) => {
+  const index = todos.findIndex((todo) => todo.id === Number(req.params.id));
+  if (index === -1) {
+    res.status(404).json({ error: `No todo with id ${req.params.id}` });
+    return;
+  }
+  todos.splice(index, 1);
+  res.status(204).end();
+});
+```
+
+The paths in the router are **relative to where it is mounted**. Now the app, in its own file so the next lessons can import it for tests without starting a server:
+
+```ts
+// src/app.ts
+import express from "express";
+import { logger } from "./middleware/logger.ts";
+import { todosRouter } from "./routes/todos.ts";
+
+export const app = express();
+
+app.use(logger);
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.json({ name: "todo-api", docs: "/todos" });
+});
+
+app.use("/todos", todosRouter);
+
+app.use((req, res) => {
+  res.status(404).json({ error: `Cannot ${req.method} ${req.path}` });
+});
+```
+
+```ts
+// src/server.ts
+import { app } from "./app.ts";
+
+const port = Number(process.env.PORT ?? 3000);
+
+app.listen(port, (error) => {
+  if (error) throw error;
+  console.log(`Listening on http://localhost:${port}`);
+});
+```
+
+Run it with the dev script from `node-dev-workflow`, `node --env-file=.env --watch src/server.ts`, and try it:
+
+```bash
+curl http://localhost:4200/todos/2
+curl -i http://localhost:4200/nope
+```
+
+```text
+{"id":2,"title":"Learn middleware","done":false}
+HTTP/1.1 404 Not Found
+{"error":"Cannot GET /nope"}
+```
+
+The last `app.use` has no path and no `next`, so it catches every request that no route answered. That makes it the **404 handler**, and it must be the last registration. The `app.ts`/`server.ts` split (building the app in one file and listening in another) is a habit worth keeping: tests can import `app` without opening a port.
+
+<Callout type="note" title="Path syntax changed in Express 5">
+Wildcards need a name: `app.get("/*splat", ...)` instead of `"/*"`, and the old form now throws `Missing parameter name` at startup. Optional parts use braces: `/files/:file{.:ext}` matches `/files/report` and `/files/report.pdf`. A `*splat` match arrives in `req.params.splat` as an array of segments.
+</Callout>
+
+## Types for Express
+
+`@types/express` types the arguments for you when the handler is written inline, as above: `req.params.id` is a `string`, and `req.body` is `any`. When you write the handler as a separate function or middleware, import the types:
+
+```ts
+import type { NextFunction, Request, Response } from "express";
+```
+
+With `verbatimModuleSyntax` on, the `type` keyword is required on imports that only bring in types, so that Node's type stripping can erase them. You can describe the params with a generic, as in `Request<{ id: string }>`, but it only documents the shape and does not check anything at runtime. Real checks come from validation (a later lesson).
+
+
+## Common mistakes
+
+- Registering `express.json()` after the routes that need it, so `req.body` is `undefined` there.
+- Putting the 404 handler first, so every request gets a 404.
+- Not calling `next()` in a middleware, and wondering why requests hang.
+- Calling `next()` and then also sending a response, which causes `Cannot set headers after they are sent to the client`.
+- Writing code after `next()` that expects the request to be finished.
+
+<Exercise title="Predict the middleware output">
+Given the app below, what does the server print for `GET /a`, and what does the client receive? Then what changes if you move the `app.use("/a", ...)` block below the `app.get`?
+
+```ts
+const app = express();
+
+app.use((req, res, next) => {
+  console.log("one");
+  next();
+});
+app.get("/a", (req, res) => {
+  console.log("two");
+  res.send("A");
+});
+app.use("/a", (req, res, next) => {
+  console.log("three");
+  next();
+});
+```
+
+<Solution>
+The server prints `one` and `two`, and the client receives `A`. The `/a` route answers and does not call `next()`, so `three` is never reached. If you move the `app.use("/a", ...)` block above the `app.get`, it prints `one`, `three`, `two`, because the middleware is now earlier in the chain. Order of registration is the order of execution.
+</Solution>
+</Exercise>
+
+
+<Exercise title="Add a request id">
+Write a middleware `requestId` that reads the `x-request-id` header or, when it is missing, creates one with `randomUUID()` from `node:crypto`. It sets the same value as an `X-Request-Id` response header and logs `[id] METHOD url`. Register it for the whole app.
+
+<Solution>
+```ts
+import { randomUUID } from "node:crypto";
+import express from "express";
+import type { NextFunction, Request, Response } from "express";
+
+function requestId(req: Request, res: Response, next: NextFunction) {
+  const id = req.get("x-request-id") ?? randomUUID();
+  res.set("X-Request-Id", id);
+  console.log(`[${id}] ${req.method} ${req.originalUrl}`);
+  next();
+}
+
+const app = express();
+app.use(requestId);
+```
+
+```bash
+curl -i http://localhost:4200/                              # X-Request-Id: 8f4d382f-...
+curl -i -H "x-request-id: abc" http://localhost:4200/       # X-Request-Id: abc
+```
+
+The middleware only adds information and passes the request on with `next()`. Passing along an id from the caller lets you follow one request across several services in the logs, a technique you will meet again in the `uploads-config-logging` lesson.
+</Solution>
+</Exercise>
+
+<Exercise title="Protect writes with an API key">
+Write a middleware `requireApiKey` that lets `GET` requests through, and for every other method requires an `x-api-key` header equal to the `API_KEY` environment variable. Otherwise it answers `401` with `{ error }`. Mount it only on `/todos`, add a public `GET /health` route that is not protected, and make sure that a server started without `API_KEY` rejects writes instead of allowing them.
+
+<Solution>
+```ts
+import express from "express";
+import type { NextFunction, Request, Response } from "express";
+import { todosRouter } from "./routes/todos.ts";
+
+function requireApiKey(req: Request, res: Response, next: NextFunction) {
+  if (req.method === "GET") {
+    next();
+    return;
+  }
+  const key = process.env.API_KEY;
+  if (!key || req.get("x-api-key") !== key) {
+    res.status(401).json({ error: "Missing or wrong API key" });
+    return;
+  }
+  next();
+}
+
+const app = express();
+app.use(express.json());
+app.get("/health", (req, res) => {
+  res.json({ ok: true, uptime: Math.round(process.uptime()) });
+});
+app.use("/todos", requireApiKey, todosRouter);
+```
+
+```bash
+API_KEY=secret123 node src/server.ts
+curl -X DELETE http://localhost:4200/todos/1                          # 401
+curl -X DELETE -H "x-api-key: secret123" http://localhost:4200/todos/1  # 204
+```
+
+The `!key` check matters: without it, a missing `API_KEY` makes the comparison `undefined !== undefined`, which is `false`, so a request with no header would pass. Always fail closed. Real authentication (passwords, sessions) is the subject of a later lesson; a shared key like this only suits simple internal tools.
+</Solution>
+</Exercise>

@@ -1,0 +1,420 @@
+---
+title: Pagination, Filtering and Versioning
+summary: Let clients filter, sort and page through a list without loading everything, and change an API over time without breaking the clients that already use it.
+order: 12
+takeaways:
+  - "A list endpoint must never return everything: take `page` and `limit` (with a maximum) from the query string, and send back `meta` with the total."
+  - "Check every query value, and check `sort` against a list of allowed fields, because query strings are untrusted input like any other."
+  - "Offset pagination (`page`) is simple but can skip or repeat items when data changes between requests, while cursor pagination continues after the last item the client saw."
+  - "Adding a field or an endpoint is safe, but removing or renaming a field, or changing its type, is a breaking change."
+  - "A breaking change belongs in a new version such as `/v2`, and the old version should announce its end with `Deprecation` and `Sunset` headers."
+videos:
+  - title: "API Pagination: Making Billions of Products Scrolling Possible"
+    channel: "ByteByteGo"
+    duration: "3:12"
+    url: https://www.youtube.com/watch?v=14K_a2kKTxU
+  - title: "Pagination in MySQL - offset vs. cursor"
+    channel: "PlanetScale"
+    duration: "13:20"
+    url: https://www.youtube.com/watch?v=zwDIN04lIpc
+docs:
+  - title: "Express 5.x API: req.query"
+    url: https://expressjs.com/en/5x/api.html
+  - title: "MDN: Link header"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Link
+  - title: "RFC 8594: The Sunset HTTP Header Field"
+    url: https://www.rfc-editor.org/rfc/rfc8594
+---
+
+A list that works with 3 todos breaks with 3 million rows: the response is huge, slow, and the browser freezes while rendering it. And a real API lives for years while its clients (a website, a phone app that users never update) keep calling it, so you need a way to change it without breaking them. This lesson adds both to the todo API from `rest-api-build`: filtering, sorting and pagination on the list endpoint, and a `/v1` version prefix with a plan for `/v2`. Written for Express 5.3 and Node 24.
+
+The todo store now starts with 25 todos, so there is something to page through:
+
+```ts
+// src/todos.ts (replaces the three hard-coded todos)
+export const todos: Todo[] = Array.from({ length: 25 }, (_, i) => ({
+  id: i + 1,
+  title: `Task ${String(i + 1).padStart(2, "0")}`,
+  done: i % 3 === 0,
+  createdAt: new Date(Date.UTC(2026, 9, i + 1, 9)).toISOString(),
+}));
+
+let nextId = todos.length + 1;
+```
+
+## Filtering and sorting with the query string
+
+Filters and sorting do not identify a resource, they shape a list, so they go in the **query string** of the collection URL:
+
+```text
+GET /v1/todos?done=false&q=task&sort=-createdAt&page=2&limit=5
+```
+
+Read `?done=false` as "only todos that are not done", `q` as a text search in the title, and `sort=-createdAt` as "newest first" (a leading `-` means descending, a convention you will see in many APIs). Query values arrive as strings, or as arrays and objects when the client repeats a key (`?limit=1&limit=2`), so each one must be checked. A small file does the parsing and answers `400` with the name of the bad parameter:
+
+```ts
+// src/listQuery.ts
+import { badRequest } from "./errors.ts";
+import type { ListQuery, SortField } from "./todos.ts";
+
+const SORT_FIELDS: SortField[] = ["id", "title", "createdAt"];
+const DEFAULT_LIMIT = 10;
+const MAX_LIMIT = 100;
+
+// a query value can be a string, an array (?a=1&a=2) or an object (?a[b]=1)
+function single(value: unknown, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw badRequest(`${name} must be given once`, { param: name });
+  }
+  return value;
+}
+
+function integer(
+  value: string | undefined,
+  name: string,
+  fallback: number,
+  max?: number,
+): number {
+  if (value === undefined) return fallback;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1 || (max !== undefined && number > max)) {
+    const range = max === undefined ? "1 or more" : `from 1 to ${max}`;
+    throw badRequest(`${name} must be a whole number ${range}`, { param: name });
+  }
+  return number;
+}
+
+export function parseListQuery(query: Record<string, unknown>): ListQuery {
+  const done = single(query.done, "done");
+  if (done !== undefined && done !== "true" && done !== "false") {
+    throw badRequest("done must be true or false", { param: "done" });
+  }
+
+  // "-createdAt" means descending, "createdAt" ascending
+  const sortParam = single(query.sort, "sort") ?? "id";
+  const descending = sortParam.startsWith("-");
+  const field = descending ? sortParam.slice(1) : sortParam;
+  if (!SORT_FIELDS.includes(field as SortField)) {
+    const allowed = SORT_FIELDS.join(", ");
+    throw badRequest(`sort must be one of: ${allowed} (prefix - for descending)`, {
+      param: "sort",
+    });
+  }
+
+  return {
+    done: done === undefined ? undefined : done === "true",
+    q: single(query.q, "q"),
+    sort: { field: field as SortField, direction: descending ? -1 : 1 },
+    page: integer(single(query.page, "page"), "page", 1),
+    limit: integer(single(query.limit, "limit"), "limit", DEFAULT_LIMIT, MAX_LIMIT),
+  };
+}
+```
+
+The `sort` value is checked against a **list of allowed fields**. Never pass a query value straight into a sort or, later, into a database query: with a real database, an unchecked field name is an injection hole. The same goes for `limit`, which has a **maximum**. Without one, `?limit=1000000` makes the server do exactly the work you wanted to avoid.
+
+## Pagination: the offset way
+
+The simplest scheme is **offset pagination**: the client asks for page `n` of `limit` items, and the server skips `(n - 1) * limit` items. The data layer applies the filter, the sort, and then the page:
+
+```ts
+// src/todos.ts (added)
+export type SortField = "id" | "title" | "createdAt";
+
+export interface ListQuery {
+  done?: boolean;
+  q?: string;
+  sort: { field: SortField; direction: 1 | -1 };
+  page: number;
+  limit: number;
+}
+
+export function listTodos(query: ListQuery): { items: Todo[]; total: number } {
+  const { done, q, sort, page, limit } = query;
+
+  const matching = todos.filter(
+    (todo) =>
+      (done === undefined || todo.done === done) &&
+      (q === undefined || todo.title.toLowerCase().includes(q.toLowerCase())),
+  );
+
+  matching.sort((a, b) => {
+    const left = a[sort.field];
+    const right = b[sort.field];
+    return (left < right ? -1 : left > right ? 1 : 0) * sort.direction;
+  });
+
+  const start = (page - 1) * limit;
+  return { items: matching.slice(start, start + limit), total: matching.length };
+}
+```
+
+The order of the three steps matters: **filter first, then sort, then slice**. Slicing before filtering would give pages with a random number of results. The route turns the result into the response, with a `meta` object next to `data`:
+
+```ts
+// src/routes/todos.ts (the list route, and a new import)
+import { parseListQuery } from "../listQuery.ts";
+
+// GET /todos?done=true&q=task&sort=-createdAt&page=2&limit=5
+todosRouter.get("/", (req, res) => {
+  const query = parseListQuery(req.query);
+  const { items, total } = listTodos(query);
+
+  res.json({
+    data: items,
+    meta: {
+      page: query.page,
+      limit: query.limit,
+      total,
+      totalPages: Math.ceil(total / query.limit),
+    },
+  });
+});
+```
+
+(The import line for the data layer changes from `todos` to `listTodos`.) This is why the last lesson put the list inside `{ "data": [...] }` from the start: adding `meta` now changes nothing for clients that only read `data`. Had the list been a bare array, adding the page information would break every client. Here is what the API returns:
+
+```bash
+curl -s "localhost:4200/v1/todos" | jq -c '.meta, (.data | map(.id))'
+curl -s "localhost:4200/v1/todos?page=3&limit=10" | jq -c '.meta, (.data | map(.id))'
+curl -s "localhost:4200/v1/todos?done=true&sort=-createdAt&limit=3" | jq -c '.meta, (.data | map([.id, .done]))'
+curl -s "localhost:4200/v1/todos?page=9" | jq -c .
+```
+
+```text
+{"page":1,"limit":10,"total":25,"totalPages":3}
+[1,2,3,4,5,6,7,8,9,10]
+{"page":3,"limit":10,"total":25,"totalPages":3}
+[21,22,23,24,25]
+{"page":1,"limit":3,"total":9,"totalPages":3}
+[[25,true],[22,true],[19,true]]
+{"data":[],"meta":{"page":9,"limit":10,"total":25,"totalPages":3}}
+```
+
+(`jq` is a command-line JSON tool; `brew install jq` if you do not have it.) A page past the end gets `200` with an empty list, not a `404`: the collection exists, it just has nothing on that page. Bad input is rejected:
+
+```text
+?limit=500          400  limit must be a whole number from 1 to 100
+?page=0             400  page must be a whole number 1 or more
+?sort=password      400  sort must be one of: id, title, createdAt (prefix - for descending)
+?limit=1&limit=2    400  limit must be given once
+```
+
+### Where offset pagination breaks
+
+Offset pagination has two weaknesses. On a big database table, `OFFSET 100000` still reads and throws away 100,000 rows, so deep pages get slow. And if data changes between two requests, items **shift**. This script loads page 1 (5 items), deletes todo 1, and then loads page 2 both ways (the cursor way is explained next):
+
+```ts
+// drift.ts: ids 1 to 10, five per page
+let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+const page1 = ids.slice(0, 5);
+const lastSeen = page1.at(-1)!; // the cursor: "after id 5"
+console.log("page 1:        ", page1);
+
+// meanwhile somebody deletes todo 1
+ids = ids.filter((id) => id !== 1);
+
+console.log("page 2 offset: ", ids.slice(5, 10)); // skip 5 items: id 6 is lost
+console.log("page 2 cursor: ", ids.filter((id) => id > lastSeen).slice(0, 5));
+```
+
+```text
+page 1:         [ 1, 2, 3, 4, 5 ]
+page 2 offset:  [ 7, 8, 9, 10 ]
+page 2 cursor:  [ 6, 7, 8, 9, 10 ]
+```
+
+With the offset, the client **never sees todo 6**. If an item was added instead of deleted, it would see an item twice. For a feed that changes all the time (messages, notifications, a social timeline), that is not acceptable.
+
+## Pagination: the cursor way
+
+**Cursor pagination** does not say "skip 5", it says "give me the 5 items *after this one*". The server answers with a `nextCursor`, and the client sends it back to get the next page. To try it without touching the list route, here is a small separate `/feed` endpoint (it runs as its own tiny app on another port, and reuses `todos`, `badRequest` and the error handler):
+
+```ts
+// the cursor is opaque: clients pass it back without looking inside
+const encode = (id: number) => Buffer.from(JSON.stringify({ id })).toString("base64url");
+
+function decode(cursor: string): number {
+  try {
+    const { id } = JSON.parse(Buffer.from(cursor, "base64url").toString());
+    if (Number.isInteger(id)) return id;
+  } catch {}
+  throw badRequest("cursor is not valid", { param: "cursor" });
+}
+
+// GET /feed?limit=3&cursor=...
+app.get("/feed", (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 10, 100);
+  const after = typeof req.query.cursor === "string" ? decode(req.query.cursor) : 0;
+
+  // ask for one more than we return: if it exists, there is a next page
+  const rows = todos.filter((todo) => todo.id > after).slice(0, limit + 1);
+  const data = rows.slice(0, limit);
+  const nextCursor = rows.length > limit ? encode(data.at(-1)!.id) : null;
+
+  res.json({ data, meta: { limit, nextCursor } });
+});
+```
+
+Two ideas carry it. The query asks for **one row more** than the page size: if that extra row exists, there is a next page, and no separate `COUNT` query is needed. And the cursor is **opaque**: it is base64 of `{ "id": 3 }`, but clients are told to treat it as a meaningless token, so you can later change what is inside (add a sort key, say) without breaking anyone. Fetching two pages:
+
+```bash
+curl -s "localhost:4202/feed?limit=3"
+curl -s "localhost:4202/feed?limit=3&cursor=eyJpZCI6M30"
+curl -s "localhost:4202/feed?cursor=garbage"
+```
+
+```text
+{"data":[{id 1},{id 2},{id 3}],"meta":{"limit":3,"nextCursor":"eyJpZCI6M30"}}
+{"data":[{id 4},{id 5},{id 6}],"meta":{"limit":3,"nextCursor":"eyJpZCI6Nn0"}}
+400  {"error":{"code":"BAD_REQUEST","message":"cursor is not valid","details":{"param":"cursor"}}}
+```
+
+(The `{id 1}` entries stand for whole todo objects.) The price of cursors: no "jump to page 17" and no total count, and sorting by anything but a unique, ordered field needs a compound cursor. A good rule: **page numbers for admin tables and small data, cursors for infinite scroll and feeds**. Real APIs often also send a `Link` header with `rel="next"`, which GitHub's API does.
+
+With PostgreSQL the same two ideas are `LIMIT 10 OFFSET 20` for pages and `WHERE id > 3 ORDER BY id LIMIT 11` for cursors, and an index on the sort column keeps the cursor query fast on any page (the `databases` module covers indexes).
+
+## Versioning
+
+Your API is a **contract**. A website you ship today can be cached in a browser for months, and a phone app can stay on an old version for years, so a change that is fine on the server may break clients you cannot update. What counts as breaking?
+
+| Change | Breaking? |
+| ------ | --------- |
+| Add a new endpoint | no |
+| Add a new optional field to a response (`priority`) | no, if clients ignore unknown fields |
+| Add a new optional query parameter | no |
+| Remove or rename a field (`title` to `name`) | **yes** |
+| Change a field's type (`id` from number to string) | **yes** |
+| Make an optional request field required | **yes** |
+| Change a status code or the error shape | **yes** |
+| Change the meaning of an existing field | **yes** |
+
+When you must make a breaking change, you ship a **new version** and keep the old one running for a while. The most common way, and the one to use by default, is a **version in the URL path**:
+
+```ts
+// src/routes/v1.ts
+import { Router } from "express";
+import { todosRouter } from "./todos.ts";
+
+export const v1Router = Router();
+
+v1Router.use("/todos", todosRouter);
+```
+
+```ts
+// src/app.ts (changed lines)
+import { v1Router } from "./routes/v1.ts";
+
+app.get("/", (req, res) => {
+  res.json({ name: "todo-api", versions: ["v1"] });
+});
+
+app.use("/v1", v1Router);
+```
+
+The routers from `express-middleware` pay off here: a `v2` is a new `v2Router` that can reuse the parts that did not change. The `Location` header from `POST` now says `/v1/todos/26` by itself, because it is built from `req.baseUrl`. The old `localhost:4200/todos` answers `404`, since the unversioned URL no longer exists.
+
+Other schemes exist: a header (`Accept: application/vnd.todo.v2+json`) or a query parameter (`?version=2`). They keep URLs clean but are harder to try in a browser and to spot in logs. Public APIs differ here (Stripe and GitHub both use a version header, many others use the path), and the path is the beginner-friendly choice.
+
+Versioning rules that save pain:
+
+- Add things without a new version; only breaking changes need `/v2`.
+- Support the old version for a stated period and **announce** the end. Two standard headers do this automatically: `Deprecation` and `Sunset` (the date it stops working), plus a `Link` to the replacement.
+- Do not version per endpoint. Version the whole API.
+
+```ts
+import type { RequestHandler } from "express";
+
+function deprecated(sunsetDate: string, successor: string): RequestHandler {
+  return (req, res, next) => {
+    res.set("Deprecation", "true");
+    res.set("Sunset", new Date(sunsetDate).toUTCString());
+    res.set("Link", `<${successor}>; rel="successor-version"`);
+    next();
+  };
+}
+
+app.use("/v1", deprecated("2027-06-30", "/v2/todos"), v1Router);
+```
+
+```text
+HTTP/1.1 200 OK
+Deprecation: true
+Sunset: Wed, 30 Jun 2027 00:00:00 GMT
+Link: </v2/todos>; rel="successor-version"
+```
+
+A client or monitoring tool can read these headers and warn its developers long before the day it breaks.
+
+## Common mistakes
+
+- Returning an unbounded list. Always paginate, and always cap `limit`.
+- Pagination without a **stable sort**. If two todos can share the sort value, their order may change between pages; add a tiebreaker such as `id`.
+- Passing `sort` or a filter name from the query string into code or a database query without checking it against a list.
+- Putting a new required field into an existing version, which breaks every client that does not send it.
+
+<Exercise title="Predict the page">
+The store has 25 todos with ids 1 to 25, and `done` is true for ids 1, 4, 7, 10, 13, 16, 19, 22 and 25. What do `data` (as a list of ids) and `meta` contain for `GET /v1/todos?done=true&limit=4&page=3`?
+
+<Solution>
+Nine todos match `done=true`, so with `limit=4` there are `Math.ceil(9 / 4) = 3` pages. Page 3 starts at offset `(3 - 1) * 4 = 8`, which is the ninth match only:
+
+```text
+data: [25]
+meta: { "page": 3, "limit": 4, "total": 9, "totalPages": 3 }
+```
+
+The filter runs **before** the slice, so `total` counts the matches (9), not all todos (25). If the two steps were reversed, the page would be cut from ids 9 to 12 first and filtered after, leaving only `[10]`, and `total` would be wrong too.
+</Solution>
+</Exercise>
+
+<Exercise title="Add a createdAfter filter">
+Add `?createdAfter=2026-10-20` to the list endpoint: only todos created after that date are returned. A value that is not a date must give `400` with `details: { param: "createdAfter" }`.
+
+<Solution>
+Parse it with the other query values, keep it as a `Date`, and use it in the filter:
+
+```ts
+// src/listQuery.ts (in parseListQuery, before the sort handling)
+const createdAfter = single(query.createdAfter, "createdAfter");
+if (createdAfter !== undefined && Number.isNaN(Date.parse(createdAfter))) {
+  throw badRequest("createdAfter must be a date like 2026-10-10", {
+    param: "createdAfter",
+  });
+}
+
+// ...and in the returned object:
+createdAfter: createdAfter === undefined ? undefined : new Date(createdAfter),
+```
+
+```ts
+// src/todos.ts: add `createdAfter?: Date;` to ListQuery, read it in listTodos,
+// and add one more condition to the filter:
+(createdAfter === undefined || new Date(todo.createdAt) > createdAfter),
+```
+
+`?createdAfter=2026-10-23&sort=-id&limit=3` returns ids `25, 24, 23` with `total: 3`, and `?createdAfter=soon` returns `400`. `Date.parse` returns `NaN` for text it cannot read, which is why the check uses `Number.isNaN`. A new optional filter is not a breaking change, so it stays in `v1`.
+</Solution>
+</Exercise>
+
+<Exercise title="Breaking or not?">
+For each change, say whether it needs a new API version, and why.
+
+1. The `GET /v1/todos/:id` response gets a new field, `updatedAt`.
+2. `done` is replaced by `status`, a string that is `"open"` or `"done"`.
+3. `POST /v1/todos` now also accepts an optional `dueDate`.
+4. `POST /v1/todos` now requires a `dueDate`.
+5. A duplicate title now answers `422` instead of `409`.
+6. `id` changes from a number (`7`) to a string (`"td_7"`).
+
+<Solution>
+1. **Not breaking.** Clients that do not know `updatedAt` ignore it.
+2. **Breaking.** Removing `done` breaks every client that reads it. A safe route is to add `status` first, keep `done` for a while, and remove it in `v2`.
+3. **Not breaking.** An optional input changes nothing for clients that do not send it.
+4. **Breaking.** Every existing client that does not send `dueDate` would start getting `400`.
+5. **Breaking.** Clients may switch on the status code, and error shapes and codes are part of the contract.
+6. **Breaking.** Clients that compare ids with numbers, store them in number columns or build URLs from them can fail. Changing a type is the same as removing the old field and adding a new one.
+</Solution>
+</Exercise>

@@ -1,0 +1,279 @@
+---
+title: A TypeScript Dev Workflow for Node
+summary: Restart a TypeScript server on every save, keep your commands in npm scripts, know when tsx is worth installing, and build plain JavaScript when a host needs it.
+order: 6
+takeaways:
+  - "`node --watch` restarts the process whenever the entry file, a file it imports or the env file changes, so you need no extra tool."
+  - "`node --env-file=.env` loads your settings, and a syntax error makes `--watch` wait for the next save instead of dying."
+  - Put `dev`, `start` and `typecheck` in `package.json` scripts, and run `typecheck` in CI because Node never checks types.
+  - "`tsx` runs enums and extensionless imports that native Node rejects, but it does not check types either."
+  - "`rewriteRelativeImportExtensions` lets `tsc` build a `dist/` folder of plain JavaScript when a host needs it."
+videos:
+  - title: "4 ways  to run TypeScript in Node.js"
+    channel: "pozy"
+    duration: "9:37"
+    url: https://www.youtube.com/watch?v=jfeeFs0b0f8
+docs:
+  - title: "Node.js — Command-line options (--watch, --env-file)"
+    url: https://nodejs.org/api/cli.html
+  - title: "Node.js — Running TypeScript natively"
+    url: https://nodejs.org/en/learn/typescript/run-natively
+  - title: "tsx on GitHub"
+    url: https://github.com/privatenumber/tsx
+---
+
+Writing a file and running it once is not how you work. In real projects you save, the server restarts, and you want one command to check types before you commit. This lesson builds that daily setup on top of `node-typescript` (lesson 5), so you should already know that Node strips types without checking them, and you should have the tsconfig from that lesson. It was written for Node 24 and TypeScript 7.
+
+## A small server
+
+Put the pieces together in a project that has a tiny HTTP server (you built the plain version of this in `node-runtime`). It uses the `src/config.ts` file from the last lesson:
+
+```text
+my-app/
+├── .env
+├── package.json
+├── tsconfig.json
+└── src/
+    ├── config.ts
+    ├── todo.ts
+    └── server.ts
+```
+
+```ts
+// src/todo.ts
+export interface Todo {
+  id: number;
+  title: string;
+  done: boolean;
+}
+
+export function makeTodo(title: string, id: number): Todo {
+  return { id, title, done: false };
+}
+```
+
+```ts
+// src/server.ts
+import http from "node:http";
+import { config } from "./config.ts";
+import { makeTodo } from "./todo.ts";
+
+const server = http.createServer((req, res) => {
+  const todo = makeTodo(`${config.greeting} from ${req.url}`, 1);
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(todo));
+});
+
+server.listen(config.port, () => {
+  console.log(`Listening on http://localhost:${config.port}`);
+});
+```
+
+```text
+# .env
+PORT=4100
+GREETING=Hello
+```
+
+### Restart on every save with `--watch`
+
+While you develop, you want the server to restart whenever you save a file. Node does this itself:
+
+```bash
+node --env-file=.env --watch src/server.ts
+```
+
+```text
+Listening on http://localhost:4100
+Change detected in '/.../my-app/src/config.ts'
+Restarting 'src/server.ts'
+Listening on http://localhost:4100
+```
+
+`--env-file=.env` loads your variables (lesson 1), and `--watch` restarts the whole process when the entry file, **any file it imports**, or the `.env` file changes. It follows the imports, so you do not list the files. Two details: every restart is a new process (so memory is cleared, which is what you want), and when the code has a syntax error Node prints the error and waits instead of dying:
+
+```text
+SyntaxError [ERR_INVALID_TYPESCRIPT_SYNTAX]: Unexpected token `=`. ...
+Failed running 'src/server.ts'. Waiting for file changes before restarting...
+```
+
+Fix the file, save, and the server starts again. If you want to watch other folders (for example a `templates` folder that is read at runtime and not imported), add `--watch-path=./templates`.
+
+### Put the commands in `package.json`
+
+You will type these constantly, so name them:
+
+```json
+{
+  "name": "my-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env --watch src/server.ts",
+    "start": "node src/server.ts",
+    "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}
+```
+
+```bash
+npm run dev          # development: restarts on save
+npm run typecheck    # tsc, using noEmit from tsconfig.json
+node --run typecheck # the same, using Node's built-in script runner
+```
+
+`node --run <script>` runs a `package.json` script without starting npm, which saves a few hundred milliseconds. Use `npm run` if you prefer; they do the same job. Typing `tsc` with `noEmit: true` is the "check only" command from earlier. Add `npm run typecheck` to your CI so a type error blocks the merge, since Node itself will never complain.
+
+## When to use `tsx`
+
+**`tsx`** is a small tool that runs TypeScript files by compiling them on the fly with esbuild. It is the replacement for the older `ts-node`, which is slow and has trouble with ES modules. Try the files that Node rejected:
+
+```bash
+npm install --save-dev tsx
+npx tsx src/enum.ts       # 1
+npx tsx src/param.ts      # Point { x: 1, y: 2 }
+npx tsx watch src/server.ts
+```
+
+`tsx` runs enums and parameter properties, and it lets you import `./types` without the extension. Like Node, it **does not check types**. It also has its own `watch` command.
+
+For a new project, start with plain Node, because it needs no dependency, behaves the same everywhere, and keeps you honest about what is erasable. Choose `tsx` when:
+
+- you have an older codebase with enums, namespaces or extensionless imports that you cannot change yet;
+- you must support an older Node version (before 22.18);
+- you need a feature of the TypeScript compiler that Node ignores, such as `paths` aliases (Node does not read `tsconfig.json` at all).
+
+## Building plain JavaScript when you must
+
+Some hosting setups and libraries want JavaScript files in a `dist/` folder. Add a second config that lets `tsc` write them, and rewrite the `.ts` import paths to `.js` on the way out:
+
+```json
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  }
+}
+```
+
+```bash
+npx tsc -p tsconfig.build.json
+node dist/server.js
+```
+
+Look inside `dist/server.js` and you will find `import { config } from "./config.js"`, the same code with the types removed and the extension fixed. For an Express API on a modern Node host (the Render deploy in Phase 3), you can skip this step and run `node src/server.ts` directly. If the host's Node is older than 22.18, build first.
+
+<Callout type="warning" title="Type stripping is not type safety at the edges">
+Types describe what you hope the data looks like. Node has no idea whether `JSON.parse(text)` or a request body matches your `Todo` interface. Data from outside your program needs runtime validation, which is the `validation` lesson in this module (Zod).
+</Callout>
+
+## Common mistakes
+
+- Assuming `--watch` type checks. It restarts the program on save, and only `npm run typecheck` checks the types.
+- Installing `tsx` out of habit, and then writing enums and extensionless imports that break the day you remove it.
+- Committing `.env` to git. Add it to `.gitignore` and commit a `.env.example` instead.
+- Building to `dist/` on a host that already runs `.ts` files, which adds a step and a folder for nothing.
+
+<Exercise title="Why is it on port 3000?">
+Your `.env` file says `PORT=4100`, and `src/config.ts` reads `process.env.PORT`, but `npm run dev` prints `Listening on http://localhost:3000`. Find and fix the bug.
+
+```json
+{
+  "scripts": {
+    "dev": "node --watch src/server.ts"
+  }
+}
+```
+
+<Solution>
+```json
+{
+  "scripts": {
+    "dev": "node --env-file=.env --watch src/server.ts"
+  }
+}
+```
+
+Node does not read `.env` files by itself. Without `--env-file=.env`, `process.env.PORT` is `undefined`, so the `?? 3000` fallback in `readConfig` quietly wins. The file was never wrong, the command was. Once the flag is there, the output is `Listening on http://localhost:4100`.
+</Solution>
+</Exercise>
+
+<Exercise title="A required environment variable">
+Write `requireEnv(name: string): string` that returns the value of an environment variable and throws an error with the message `Missing environment variable NAME` if it is missing or empty. Use it for `API_KEY`, run it once with and once without a `.env` file, and make sure `tsc` accepts it.
+
+<Solution>
+```ts
+// ex/env.ts
+export function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (value === undefined || value === "") {
+    throw new Error(`Missing environment variable ${name}`);
+  }
+  return value;
+}
+
+const apiKey = requireEnv("API_KEY");
+console.log(`key has ${apiKey.length} characters`);
+```
+
+```bash
+node ex/env.ts                          # Error: Missing environment variable API_KEY
+echo API_KEY=abc123 > ex/.env
+node --env-file=ex/.env ex/env.ts       # key has 6 characters
+npx tsc                                 # no output: the types are fine
+```
+
+The check for `undefined` is what lets TypeScript narrow `string | undefined` to `string` at the `return`, so there is no `as string`. The program stops at startup with a clear message instead of failing later with `Cannot read properties of undefined`.
+</Solution>
+</Exercise>
+
+<Exercise title="Set up a project from scratch">
+In an empty folder, create a TypeScript Node project that has a `src/index.ts` printing the value of `process.env.GREETING`, a `.env` file, and three npm scripts: `dev` (restart on save with the `.env` file), `start`, and `typecheck`. Check that saving `src/index.ts` restarts the program, and that `npm run typecheck` passes.
+
+<Solution>
+```bash
+mkdir my-app && cd my-app
+npm init -y
+npm pkg set type=module
+npm pkg set scripts.dev="node --env-file=.env --watch src/index.ts"
+npm pkg set scripts.start="node --env-file=.env src/index.ts"
+npm pkg set scripts.typecheck="tsc"
+npm install --save-dev typescript @types/node@24
+mkdir src
+echo "GREETING=Hello from Node" > .env
+```
+
+```ts
+// src/index.ts
+const greeting: string = process.env.GREETING ?? "Hello";
+console.log(greeting);
+```
+
+```json
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "types": ["node"],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+```
+
+`npm run dev` prints `Hello from Node` and then `Completed running 'src/index.ts'. Waiting for file changes before restarting...`. Edit and save `src/index.ts` and the message prints again. `npm run typecheck` prints nothing, which means success. Changing `.env` also restarts the program, because `--watch` watches the env file too. Remember to add `.env` to `.gitignore`.
+</Solution>
+</Exercise>

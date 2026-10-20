@@ -1,0 +1,336 @@
+---
+title: Express Basics
+summary: Start an Express 5 server and build a small JSON API with routes, path parameters, query strings and request bodies.
+order: 7
+takeaways:
+  - "Express is a thin layer over Node's `http` module: you register routes, and each request is matched against them from top to bottom."
+  - "A route is a method plus a path plus a handler, and the handler reads the request from `req` and must end the response with `res.json`, `res.send` or `res.end`."
+  - "Path parameters live in `req.params` and are always strings, so convert them yourself."
+  - "Query strings live in `req.query`, where a value can be a string or an array of strings, so check its type before using it."
+  - "The body lives in `req.body`, which is `undefined` until you add `express.json()`, and nothing in it can be trusted."
+videos:
+  - title: "Express Crash Course"
+    channel: "Traversy Media"
+    duration: "1:46:10"
+    url: https://www.youtube.com/watch?v=CnH3kAXSrmU
+docs:
+  - title: "Express — Hello world"
+    url: https://expressjs.com/en/starter/hello-world.html
+  - title: "Express — Routing"
+    url: https://expressjs.com/en/guide/routing.html
+  - title: "Express — Moving to Express 5"
+    url: https://expressjs.com/en/guide/migrating-5.html
+  - title: "Express 5.x API reference"
+    url: https://expressjs.com/en/5x/api.html
+---
+
+Express is the most widely used Node web framework, and it shows up in job descriptions, in tutorials, and in the code of many companies. Even if you end up on Next.js, the ideas here (routes, middleware, status codes) carry over, because Next.js route handlers and `proxy.ts` are built on the same request and response model. Every later lesson in this module adds one layer on top of what you build now. This lesson covers routes and reading requests; the next one, `express-middleware`, covers middleware and routers.
+
+This lesson was written for **Express 5.3** and Node 24. Many tutorials, and probably the Traversy video above (published in May 2024, before Express 5 became the default), use Express 4. The code is almost identical, and where Express 5 behaves differently this lesson says so. The sandbox code runs TypeScript directly, as in `node-typescript` and `node-dev-workflow`.
+
+## Your first server
+
+Create a project and install Express together with its types:
+
+```bash
+mkdir todo-api && cd todo-api
+npm init -y
+npm pkg set type=module
+npm install express@5
+npm install --save-dev typescript @types/node@24 @types/express@5
+```
+
+Use the same `tsconfig.json` as in `node-typescript`, then write the smallest server:
+
+```ts
+// src/hello.ts
+import express from "express";
+
+const app = express();
+
+app.get("/", (req, res) => {
+  res.send("Hello from Express");
+});
+
+app.listen(4200, (error) => {
+  if (error) throw error;
+  console.log("Listening on http://localhost:4200");
+});
+```
+
+```bash
+node src/hello.ts
+curl http://localhost:4200/
+```
+
+```text
+Hello from Express
+```
+
+`express()` creates the **app**: an object that holds your list of routes and middleware. `app.get("/", handler)` says "when a `GET` request arrives for `/`, call this function". The handler receives two objects: `req` (the request: URL, headers, body) and `res` (the response you build). `app.listen` starts the server on a port. In Express 5 the callback receives an error if the port cannot be opened (for example `EADDRINUSE`, when another program already uses it), and you decide what to do. In Express 4 that error was thrown for you.
+
+Under the hood this is `http.createServer` from `node-runtime`. Express adds the routing table and a friendlier `req` and `res`.
+
+<Callout type="warning" title="Every request needs exactly one response">
+If your handler never calls `res.send`, `res.json` or `res.end`, the browser waits until it times out. If it calls them twice, Node throws `Cannot set headers after they are sent to the client`. Make each code path end with one response, and `return` right after sending in an early exit.
+</Callout>
+
+## Routes
+
+A **route** is a combination of an HTTP method, a path and a handler. Express has a method for each HTTP verb:
+
+```ts
+app.get("/todos", listTodos);        // read
+app.post("/todos", createTodo);      // create
+app.patch("/todos/:id", updateTodo); // change part of one
+app.put("/todos/:id", replaceTodo);  // replace one
+app.delete("/todos/:id", deleteTodo);// remove
+```
+
+Express checks routes from top to bottom and runs the first handler that matches and answers. A request for `POST /todos` never reaches the `app.get("/todos")` route because the method differs.
+
+### Sending a response
+
+```ts
+res.send("<h1>hi</h1>");      // text/html
+res.send({ a: 1 });           // an object is sent as JSON
+res.json({ a: 1 });           // always JSON: use this for APIs
+res.status(201).json(todo);   // set the status first, then send
+res.sendStatus(204);          // status and its standard text, no body
+res.status(204).end();        // status with an empty body
+```
+
+Use `res.json` in APIs so the intent is clear. Pick the status code on purpose: `200` OK, `201` created, `204` no content, `400` the client sent something wrong, `404` not found. The next lessons treat status codes in depth.
+
+<Callout type="note" title="Express 5 removed the shortcuts">
+`res.json(obj, 201)`, `res.send(404)` and `res.redirect(url, 301)` no longer work. Chain `res.status(201).json(obj)`, call `res.sendStatus(404)`, and put the status first in `res.redirect(301, url)`.
+</Callout>
+
+## Reading the request
+
+Data arrives in three places. Let's build a todo API step by step. Put the routes below in one file, `src/server.ts`, for now. First the data, in a plain module (a database comes later in the course):
+
+```ts
+// src/todos.ts
+export interface Todo {
+  id: number;
+  title: string;
+  done: boolean;
+}
+
+let nextId = 4;
+
+export const todos: Todo[] = [
+  { id: 1, title: "Learn routes", done: true },
+  { id: 2, title: "Learn middleware", done: false },
+  { id: 3, title: "Build an API", done: false },
+];
+
+export function addTodo(title: string): Todo {
+  const todo: Todo = { id: nextId++, title, done: false };
+  todos.push(todo);
+  return todo;
+}
+```
+
+### Path parameters: `req.params`
+
+A segment that starts with a colon is a **parameter**. Express captures it into `req.params`:
+
+```ts
+app.get("/users/:userId/posts/:postId", (req, res) => {
+  res.json(req.params);
+});
+```
+
+```text
+GET /users/7/posts/42   ->   {"userId":"7","postId":"42"}
+```
+
+Parameters are **always strings**, so convert them yourself. A common mistake is comparing `todo.id === req.params.id` (number against string), which never matches:
+
+```ts
+app.get("/todos/:id", (req, res) => {
+  const id = Number(req.params.id);
+  const todo = todos.find((todo) => todo.id === id);
+  if (!todo) {
+    res.status(404).json({ error: `No todo with id ${req.params.id}` });
+    return;
+  }
+  res.json(todo);
+});
+```
+
+`Number("abc")` is `NaN`, which matches no todo, so `/todos/abc` gets a 404 as well. The `return` after sending the error stops the handler from also running `res.json(todo)`.
+
+### Query string: `req.query`
+
+Everything after `?` is parsed into `req.query`:
+
+```ts
+app.get("/q", (req, res) => {
+  res.json(req.query);
+});
+```
+
+```text
+GET /q?name=ana&tag=a&tag=b   ->   {"name":"ana","tag":["a","b"]}
+```
+
+Values are strings, **or an array of strings** when the key repeats. Express 5 uses the simple parser, so `?x[y]=1` stays a plain key named `x[y]` (Express 4 turned it into a nested object). Check the type before you trust it:
+
+```ts
+app.get("/todos", (req, res) => {
+  const { done } = req.query;
+  if (done === "true" || done === "false") {
+    res.json(todos.filter((todo) => todo.done === (done === "true")));
+    return;
+  }
+  res.json(todos);
+});
+```
+
+`?done=true&done=false` gives an array, so neither check matches and the full list comes back. In the `validation` lesson Zod will do this checking for you.
+
+### The body: `req.body`
+
+For `POST` and `PATCH` the client sends data in the body, usually as JSON. Express does not read the body unless you ask. Add the built-in **`express.json()`** middleware (what middleware is exactly comes in the next lesson; for now, it is a function that runs before your routes and fills in `req.body`):
+
+```ts
+app.use(express.json()); // above the routes that read req.body
+
+app.post("/todos", (req, res) => {
+  const title: unknown = req.body?.title;
+  if (typeof title !== "string" || title.trim() === "") {
+    res.status(400).json({ error: "title must be a non-empty string" });
+    return;
+  }
+  res.status(201).json(addTodo(title.trim()));
+});
+```
+
+```bash
+curl -X POST http://localhost:4200/todos \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Ship it"}'
+```
+
+```text
+{"id":4,"title":"Ship it","done":false}
+```
+
+`express.json()` only parses requests with `Content-Type: application/json`. For anything else, and when you forget the middleware, `req.body` is `undefined` (Express 4 gave `{}`). That is why the code reads `req.body?.title` and then checks the type: **nothing from the client can be trusted**, and the TypeScript type of `req.body` is `any`, so the compiler cannot help you.
+
+<Callout type="warning" title="Forgetting the Content-Type header">
+`curl -d '{"title":"x"}'` without `-H "Content-Type: application/json"` sends the body as a form, `express.json()` skips it, and `req.body` is `undefined`. If a body "disappears", check the header first.
+</Callout>
+
+
+## Common mistakes
+
+- Forgetting `return` after an early `res.status(...).json(...)`, so the handler goes on and sends a second response.
+- Registering `express.json()` after the routes that need it, so `req.body` is `undefined` there.
+- Comparing `req.params.id` (a string) with a number.
+- Trusting `req.query` and `req.body` without checking their types.
+- Mutating `req.query` (`req.query.page = 1`): in Express 5 it is read-only. Copy the values into your own variable.
+
+<Exercise title="Predict the response">
+With this route, what JSON does each request get back?
+
+```ts
+app.get("/shop/:category/:id", (req, res) => {
+  res.json({ params: req.params, query: req.query });
+});
+```
+
+1. `GET /shop/shoes/42?size=9`
+2. `GET /shop/shoes/42?size=9&size=10`
+3. `GET /shop/shoes`
+
+<Solution>
+1. `{"params":{"category":"shoes","id":"42"},"query":{"size":"9"}}`. Both `id` and `size` are strings, not numbers.
+2. `{"params":{"category":"shoes","id":"42"},"query":{"size":["9","10"]}}`. A repeated key becomes an array of strings.
+3. This route does not match at all, because there is no second segment. Express answers with its default `404` page, and the handler never runs.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the missing body">
+`POST /notes` with `{"text":"hi"}` crashes with `Cannot destructure property 'text' of 'req.body' as it is undefined`. Find the bug and fix it.
+
+```ts
+app.post("/notes", (req, res) => {
+  const { text } = req.body;
+  notes.push(text);
+  res.status(201).json({ text });
+});
+
+app.use(express.json());
+```
+
+<Solution>
+```ts
+app.use(express.json()); // above the routes that read req.body
+
+app.post("/notes", (req, res) => {
+  const text: unknown = req.body?.text;
+  if (typeof text !== "string") {
+    res.status(400).json({ error: "text must be a string" });
+    return;
+  }
+  notes.push(text);
+  res.status(201).json({ text });
+});
+```
+
+The middleware was registered after the route, so for this request it never ran and `req.body` stayed `undefined`. Moving it up fixes the crash. The `?.` and the `typeof` check also turn a missing or wrong body into a `400` response instead of a crash.
+</Solution>
+</Exercise>
+
+<Exercise title="Toggle a todo">
+Add `PATCH /todos/:id` to your app. It flips `done` on the todo and returns the updated todo, or a `404` with `{ error }` when the id does not exist. Test it with `curl -X PATCH`.
+
+<Solution>
+```ts
+// src/server.ts
+app.patch("/:id", (req, res) => {
+  const todo = todos.find((todo) => todo.id === Number(req.params.id));
+  if (!todo) {
+    res.status(404).json({ error: `No todo with id ${req.params.id}` });
+    return;
+  }
+  todo.done = !todo.done;
+  res.json(todo);
+});
+```
+
+```bash
+curl -X PATCH http://localhost:4200/todos/1
+```
+
+```text
+{"id":1,"title":"Learn routes","done":false}
+```
+
+The `find` returns the object stored in the array, so changing `todo.done` changes the stored data. With a database you would run an `UPDATE` instead.
+</Solution>
+</Exercise>
+
+<Exercise title="Search todos by title">
+Change `GET /todos` so that `?search=learn` returns only the todos whose title contains the text, ignoring upper and lower case. Without `search`, return everything. A repeated `?search=a&search=b` should be treated as no filter.
+
+<Solution>
+```ts
+app.get("/todos", (req, res) => {
+  const { search } = req.query;
+  if (typeof search === "string") {
+    const text = search.toLowerCase();
+    res.json(todos.filter((todo) => todo.title.toLowerCase().includes(text)));
+    return;
+  }
+  res.json(todos);
+});
+```
+
+`GET /todos?search=LEARN` returns the first two todos, and `?search=zzz` returns `[]` (an empty list is a normal answer, not a 404). The `typeof search === "string"` check is what handles a missing value (`undefined`) and a repeated key (an array) with the same line.
+</Solution>
+</Exercise>

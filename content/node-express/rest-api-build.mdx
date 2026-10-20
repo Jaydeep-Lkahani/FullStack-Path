@@ -1,0 +1,386 @@
+---
+title: Build a REST API in Express
+summary: Write create, read, update and delete routes for the todo API with checked input, the right status codes and a Location header, then try every case with curl.
+order: 11
+takeaways:
+  - "Route handlers describe only the happy path, and every failure is a thrown `HttpError`, so the shared error handler gives all failures the same JSON shape."
+  - "A function that turns the untrusted request body into a clean object, field by field, keeps clients from setting fields such as `id` (mass assignment)."
+  - "`POST` answers 201 with a `Location` header built from `req.baseUrl`, `DELETE` answers 204 with no body, and a missing todo is a 404."
+  - "`PUT` needs every field and `PATCH` needs at least one, so one input function with a mode can serve create, replace and update."
+  - "With curl, `-d` needs a `Content-Type: application/json` header, or the API answers 415."
+  - "Express answers 404 instead of 405 for a wrong method, unless you add a catch-all route that sets an `Allow` header."
+videos: []
+docs:
+  - title: "Express — Routing"
+    url: https://expressjs.com/en/guide/routing.html
+  - title: "Express 5.x API: res.location"
+    url: https://expressjs.com/en/5x/api.html
+  - title: "MDN: Location header"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Location
+  - title: "MDN: Allow header"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Allow
+---
+
+In `rest-api-design` you chose the rules: nouns in the URLs, the right method for each action, the right status for each answer, one response shape. Now you write them as code. This lesson continues the todo API from `express-error-handling` (the `HttpError` class, the error handler and the `requireJson` middleware stay as they are), written for Express 5.3 and Node 24. By the end it has all five CRUD routes, input that is checked before anything is changed, and a curl session that exercises every status code in the design.
+
+One new error helper goes next to `notFound`, for the "title already exists" case:
+
+```ts
+// src/errors.ts (added)
+export const conflict = (message: string) => new HttpError(409, "CONFLICT", message);
+```
+
+## The data layer
+
+The todo store grows a little: todos get a `createdAt`, and the functions the routes need.
+
+```ts
+// src/todos.ts
+export interface Todo {
+  id: number;
+  title: string;
+  done: boolean;
+  createdAt: string;
+}
+
+export interface TodoInput {
+  title?: string;
+  done?: boolean;
+}
+
+let nextId = 4;
+
+export const todos: Todo[] = [
+  { id: 1, title: "Learn routes", done: true, createdAt: "2026-10-01T09:00:00.000Z" },
+  { id: 2, title: "Learn middleware", done: false, createdAt: "2026-10-02T09:00:00.000Z" },
+  { id: 3, title: "Design an API", done: false, createdAt: "2026-10-03T09:00:00.000Z" },
+];
+
+export function findTodo(id: number): Todo | undefined {
+  return todos.find((todo) => todo.id === id);
+}
+
+export function titleTaken(title: string, exceptId?: number): boolean {
+  const wanted = title.toLowerCase();
+  return todos.some((todo) => todo.id !== exceptId && todo.title.toLowerCase() === wanted);
+}
+
+export function createTodo(input: TodoInput): Todo {
+  const todo: Todo = {
+    id: nextId++,
+    title: input.title ?? "",
+    done: input.done ?? false,
+    createdAt: new Date().toISOString(),
+  };
+  todos.push(todo);
+  return todo;
+}
+
+export function deleteTodo(id: number): boolean {
+  const index = todos.findIndex((todo) => todo.id === id);
+  if (index === -1) return false;
+  todos.splice(index, 1);
+  return true;
+}
+```
+
+Dates are strings in ISO 8601 form (`2026-10-01T09:00:00.000Z`, always UTC). That is what `JSON.stringify` produces from a `Date`, and every language can parse it.
+
+## Reading and checking the input
+
+Before the routes, one function turns the untrusted request body into a clean `TodoInput`. Its `mode` says which rules apply, and the three modes will explain the difference between `PUT` and `PATCH` in a moment:
+
+```ts
+// src/todoInput.ts
+import { badRequest } from "./errors.ts";
+import type { TodoInput } from "./todos.ts";
+
+// create: title required. replace (PUT): title and done required. update (PATCH): at least one.
+export type InputMode = "create" | "replace" | "update";
+
+export function parseId(value: string): number {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id < 1) {
+    throw badRequest(`"${value}" is not a valid id`, { param: "id" });
+  }
+  return id;
+}
+
+export function parseTodoInput(body: unknown, mode: InputMode): TodoInput {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw badRequest("The body must be a JSON object");
+  }
+  const input = body as Record<string, unknown>;
+  const result: TodoInput = {};
+
+  if (input.title !== undefined) {
+    if (
+      typeof input.title !== "string" ||
+      input.title.trim() === "" ||
+      input.title.length > 200
+    ) {
+      throw badRequest("title must be a string of 1 to 200 characters", {
+        field: "title",
+      });
+    }
+    result.title = input.title.trim();
+  } else if (mode !== "update") {
+    throw badRequest("title is required", { field: "title" });
+  }
+
+  if (input.done !== undefined) {
+    if (typeof input.done !== "boolean") {
+      throw badRequest("done must be true or false", { field: "done" });
+    }
+    result.done = input.done;
+  } else if (mode === "replace") {
+    throw badRequest("done is required when replacing a todo", { field: "done" });
+  }
+
+  if (mode === "update" && Object.keys(result).length === 0) {
+    throw badRequest("Send at least one of: title, done");
+  }
+
+  return result; // only the fields we know: `id` or `createdAt` in the body are ignored
+}
+```
+
+The last line is a security habit, not a detail. `result` is built **field by field**. If the code did `Object.assign(todo, req.body)` instead, a client could send `{ "id": 1, "createdAt": "1999-01-01" }` (or, in a real API, `{ "role": "admin" }`) and overwrite fields it must never control. This bug is called **mass assignment**. The `validation` lesson replaces this hand-written function with Zod, which keeps the same rule.
+
+## The routes
+
+```ts
+// src/routes/todos.ts
+import { Router } from "express";
+import { conflict, notFound } from "../errors.ts";
+import { requireJson } from "../middleware/requireJson.ts";
+import { parseId, parseTodoInput } from "../todoInput.ts";
+import { createTodo, deleteTodo, findTodo, titleTaken, todos } from "../todos.ts";
+import type { Todo } from "../todos.ts";
+
+export const todosRouter = Router();
+
+function getTodo(idParam: string): Todo {
+  const todo = findTodo(parseId(idParam));
+  if (!todo) throw notFound(`No todo with id ${idParam}`);
+  return todo;
+}
+
+// GET /todos?done=true
+todosRouter.get("/", (req, res) => {
+  const { done } = req.query;
+  const data =
+    done === "true" || done === "false"
+      ? todos.filter((t) => t.done === (done === "true"))
+      : todos;
+  res.json({ data });
+});
+
+// GET /todos/2
+todosRouter.get("/:id", (req, res) => {
+  res.json({ data: getTodo(req.params.id) });
+});
+
+// POST /todos  { "title": "..." }
+todosRouter.post("/", requireJson, (req, res) => {
+  const input = parseTodoInput(req.body, "create");
+  if (titleTaken(input.title!)) {
+    throw conflict(`A todo called "${input.title}" already exists`);
+  }
+
+  const todo = createTodo(input);
+  res.status(201).location(`${req.baseUrl}/${todo.id}`).json({ data: todo });
+});
+
+// PUT /todos/2  { "title": "...", "done": true }  replaces the whole todo
+todosRouter.put<{ id: string }>("/:id", requireJson, (req, res) => {
+  const todo = getTodo(req.params.id);
+  const input = parseTodoInput(req.body, "replace");
+  if (titleTaken(input.title!, todo.id)) {
+    throw conflict(`A todo called "${input.title}" already exists`);
+  }
+
+  todo.title = input.title!;
+  todo.done = input.done!;
+  res.json({ data: todo });
+});
+
+// PATCH /todos/2  { "done": true }  changes only the fields you send
+todosRouter.patch<{ id: string }>("/:id", requireJson, (req, res) => {
+  const todo = getTodo(req.params.id);
+  const input = parseTodoInput(req.body, "update");
+  if (input.title !== undefined && titleTaken(input.title, todo.id)) {
+    throw conflict(`A todo called "${input.title}" already exists`);
+  }
+
+  Object.assign(todo, input);
+  res.json({ data: todo });
+});
+
+// DELETE /todos/2
+todosRouter.delete("/:id", (req, res) => {
+  const todo = getTodo(req.params.id);
+  deleteTodo(todo.id);
+  res.status(204).end();
+});
+```
+
+`app.ts` mounts it with `app.use("/todos", todosRouter)` as before. Three details worth noticing:
+
+- The routes only describe the happy path. Every failure is a `throw` of an `HttpError` (from `express-error-handling`), so the shared error handler gives every failure the same JSON shape.
+- `todosRouter.put<{ id: string }>` is a TypeScript hint. When a route has a middleware before the handler, TypeScript can no longer work out from `"/:id"` that `req.params.id` is a string, so the generic says it.
+- `Object.assign(todo, input)` is safe here **only because** `input` came out of `parseTodoInput`, which holds just `title` and `done`.
+
+## Trying it by hand with curl
+
+Start the server (`npm run dev`) and use `curl`, a command-line HTTP client that is installed on macOS and Linux. The flags you need:
+
+- `-i` prints the status line and response headers before the body.
+- `-X POST` sets the method (for `GET` it is the default).
+- `-H "Content-Type: application/json"` sets a header. **Always send this with a JSON body**: `-d` alone sends `application/x-www-form-urlencoded`, and our `requireJson` middleware answers `415`.
+- `-d '{"title":"Write docs"}'` is the body, in single quotes so the shell leaves the double quotes alone.
+- `-s` hides the progress bar, and `-w ' %{http_code}\n'` prints the status code after the body.
+
+```bash
+curl -i -X POST -H "Content-Type: application/json" -d '{"title":"Write docs"}' localhost:4200/todos
+```
+
+```text
+HTTP/1.1 201 Created
+Location: /todos/4
+Content-Type: application/json; charset=utf-8
+Content-Length: 90
+
+{"data":{"id":4,"title":"Write docs","done":false,"createdAt":"2026-10-20T17:02:48.846Z"}}
+```
+
+### PUT and PATCH
+
+The difference between replacing and changing is visible in three calls on todo 1:
+
+```bash
+curl -s -X PUT -H "Content-Type: application/json" -d '{"title":"Learn routes again"}' localhost:4200/todos/1
+curl -s -X PUT -H "Content-Type: application/json" -d '{"title":"Learn routes again","done":false}' localhost:4200/todos/1
+curl -s -X PATCH -H "Content-Type: application/json" -d '{"done":true}' localhost:4200/todos/1
+```
+
+```text
+400  {"error":{"code":"BAD_REQUEST","message":"done is required when replacing a todo","details":{"field":"done"}}}
+200  {"data":{"id":1,"title":"Learn routes again","done":false,"createdAt":"2026-10-01T09:00:00.000Z"}}
+200  {"data":{"id":1,"title":"Learn routes again","done":true,"createdAt":"2026-10-01T09:00:00.000Z"}}
+```
+
+The first call is rejected because `PUT` needs the whole todo. The second replaces it. The third changes one field and keeps the rest, which is why a client can send `PATCH` without knowing the other fields.
+
+### The other cases
+
+Each line is one more request, and what it printed:
+
+```text
+POST  {"title":"write DOCS"}                 409  {"error":{"code":"CONFLICT","message":"A todo called \"write DOCS\" already exists"}}
+POST  {"done":true}                          400  {"error":{"code":"BAD_REQUEST","message":"title is required","details":{"field":"title"}}}
+POST  {"title":"Sneaky","id":999}            201  {"data":{"id":5,"title":"Sneaky","done":false,...}}
+PATCH {"done":"yes"}                         400  {"error":{"code":"BAD_REQUEST","message":"done must be true or false","details":{"field":"done"}}}
+PATCH {}                                     400  {"error":{"code":"BAD_REQUEST","message":"Send at least one of: title, done"}}
+DELETE /todos/3                              204
+DELETE /todos/3 (again)                      404  {"error":{"code":"NOT_FOUND","message":"No todo with id 3"}}
+GET /todos/abc                               400  {"error":{"code":"BAD_REQUEST","message":"\"abc\" is not a valid id","details":{"param":"id"}}}
+PUT /todos (no id)                           404  {"error":{"code":"NOT_FOUND","message":"Cannot PUT /todos"}}
+```
+
+Look at the third line: the client sent `"id": 999` and the new todo got id `5`, because `parseTodoInput` ignored the field. And the last line shows a flaw: the URL `/todos` exists, so a `PUT` there should answer `405 Method Not Allowed` with an `Allow` header, not a `404`. The last exercise fixes that.
+
+## Common mistakes
+
+- Copying `req.body` into your data (`Object.assign(todo, req.body)`), which lets clients write fields they should not control.
+- Changing data **before** all the input is checked. If a handler sets `todo.title` and then fails on `done`, the todo is left half updated. Check everything first, then change.
+- Sending `curl -d` without the `Content-Type` header and wondering why the API answers `415`.
+- Reading `req.params.id` and passing it straight on. It is a string, and `"abc"` is not an id: convert and check it once, in one place (`parseId`).
+
+<Exercise title="Predict the status codes">
+Starting from the three todos in `src/todos.ts` (ids 1, 2, 3), the client sends these requests in order. What status does each get?
+
+```text
+1. PATCH  /todos/2   {"done": true}
+2. PATCH  /todos/2   {"done": true}
+3. DELETE /todos/2
+4. DELETE /todos/2
+5. PUT    /todos/2   {"title": "Back again", "done": false}
+6. POST   /todos     {"title": "learn routes"}
+```
+
+<Solution>
+1. `200`: todo 2 becomes done.
+2. `200`: the same patch again changes nothing more, which is what idempotent means.
+3. `204`: the todo is deleted and there is no body.
+4. `404`: it is already gone. The server state is the same as after request 3, only the answer differs.
+5. `404`: `PUT` in this API replaces an **existing** todo, and todo 2 no longer exists. (Some APIs let `PUT` create a resource at a known URL, answering `201`. This one does not, because ids are made by the server.)
+6. `409`: a todo titled "Learn routes" already exists (todo 1), and the title check ignores upper and lower case.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug: the writable id">
+A teammate wrote this `PATCH` handler to save lines. Explain what a client can break with it, and rewrite the second line so it cannot.
+
+```ts
+todosRouter.patch("/:id", requireJson, (req, res) => {
+  const todo = getTodo(req.params.id as string);
+  Object.assign(todo, req.body);
+  res.json({ data: todo });
+});
+```
+
+<Solution>
+`req.body` is whatever JSON the client sent, so `PATCH /todos/2` with `{ "id": 1 }` changes todo 2's id to `1`, now clashing with the real todo 1, and `{ "createdAt": "1999-01-01", "title": 42 }` overwrites the creation date and puts a number in a string field. The handler also never checks types, so `{ "done": "yes" }` stores a string. This is **mass assignment**. The fix is to copy only fields that were checked, which is what `parseTodoInput` does:
+
+```ts
+todosRouter.patch<{ id: string }>("/:id", requireJson, (req, res) => {
+  const todo = getTodo(req.params.id);
+  Object.assign(todo, parseTodoInput(req.body, "update")); // only title and done come out
+  res.json({ data: todo });
+});
+```
+
+`parseTodoInput` builds a new object with just `title` and `done`, each checked, so every other key in the body is dropped.
+</Solution>
+</Exercise>
+
+<Exercise title="Return 405 with an Allow header">
+`PUT /todos` and `POST /todos/1` currently answer `404`, but the URLs exist. Make them answer `405` with the JSON error code `METHOD_NOT_ALLOWED` and an `Allow` header that lists the methods the URL does support. `GET /todos` and the other working routes must not change.
+
+<Solution>
+Add two catch-all routes at the **end** of the router, after the real ones. A request only reaches them if no earlier route handled its method:
+
+```ts
+// src/routes/todos.ts (added at the bottom)
+import type { RequestHandler } from "express";
+import { HttpError } from "../errors.ts";
+
+function notAllowed(allowed: string): RequestHandler {
+  return (req, res) => {
+    res.set("Allow", allowed);
+    if (req.method === "OPTIONS") {
+      res.status(204).end(); // "what can I do here?" is a valid question
+      return;
+    }
+    throw new HttpError(405, "METHOD_NOT_ALLOWED", `${req.method} is not allowed here`);
+  };
+}
+
+todosRouter.all("/", notAllowed("GET, HEAD, POST"));
+todosRouter.all("/:id", notAllowed("GET, HEAD, PUT, PATCH, DELETE"));
+```
+
+```bash
+curl -i -X PUT localhost:4200/todos
+```
+
+```text
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, HEAD, POST
+{"error":{"code":"METHOD_NOT_ALLOWED","message":"PUT is not allowed here"}}
+```
+
+`GET` and `HEAD` still work, because the `GET` route answers first and Express serves `HEAD` through it. The `OPTIONS` branch is there because `.all` would otherwise swallow it; answering `204` with the `Allow` header is what a browser or tool expects. The `cors` package in the `security` lesson handles `OPTIONS` before your routes ever see it.
+</Solution>
+</Exercise>

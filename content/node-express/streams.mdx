@@ -1,0 +1,328 @@
+---
+title: Streams
+summary: Process big files and HTTP bodies chunk by chunk with readable, writable and transform streams, and connect them safely with pipeline.
+order: 4
+takeaways:
+  - A stream hands you data in small chunks, so memory stays flat whether the file is 1 MB or 10 GB, while `readFile` loads everything at once.
+  - Use `for await` on a readable stream, and wrap it in `node:readline` when you need whole lines.
+  - Backpressure means a fast producer must wait for a slow consumer, which `write()` signals by returning `false` and the `drain` event by saying it is ready again.
+  - Use `pipeline` from `node:stream/promises` to connect streams, because it handles backpressure, errors and cleanup for you.
+  - An HTTP response is a writable stream and `fetch` returns a readable one, so big downloads and uploads never need to fit in memory.
+videos:
+  - title: "Node.js Streams - Part 1 (Beginner) - Introduction to Read/Write Streams - Backpressuring and Pipes"
+    channel: "Code Academia"
+    duration: "8:45"
+    url: https://www.youtube.com/watch?v=p6A1q_uFeo4
+  - title: "Learn Node.js Streams in 25 minutes | NodeJS Tutorials for Beginners"
+    channel: "Dipesh Malvia"
+    duration: "25:01"
+    url: https://www.youtube.com/watch?v=EcznOgzOdxI
+docs:
+  - title: "Node.js — Stream"
+    url: https://nodejs.org/api/stream.html
+  - title: "Node.js — Backpressuring in streams"
+    url: https://nodejs.org/learn/modules/backpressuring-in-streams
+  - title: "Node.js — Readline"
+    url: https://nodejs.org/api/readline.html
+---
+
+Streams are the tool that lets a server send a 2 GB video or process a huge log without running out of memory, and "what is a stream?" is a standard Node interview question. Express uses them to send files, and the `uploads-config-logging` lesson uses them for uploads and logs. This lesson was written for Node 24 and builds on `files-and-paths` (lesson 3): you should be comfortable with `readFile`, `writeFile` and `node:path`.
+
+## Why streams?
+
+The examples below use a 220 MB text file called `big.log` with 3 million log lines. Create it first by running the `make-big.mjs` script from the section "Writable streams and backpressure" further down (it takes a few seconds), then come back here.
+
+`readFile` loads the **entire** file into memory. For a config file that is perfect. For a 220 MB log file, watch what happens (the first line of each pair is the memory at the start, the second at the end):
+
+```js
+// memory.mjs   (run: node memory.mjs readFile   or   node memory.mjs stream)
+import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+
+const mb = () => Math.round(process.memoryUsage().rss / 1024 / 1024);
+console.log("start:", mb(), "MB");
+
+if (process.argv[2] === "readFile") {
+  const text = await readFile("big.log", "utf8");
+  console.log("lines:", text.split("\n").length - 1);
+} else {
+  let bytes = 0;
+  for await (const chunk of createReadStream("big.log")) bytes += chunk.length;
+  console.log("bytes:", bytes);
+}
+console.log("end:", mb(), "MB");
+```
+
+```text
+readFile: start: 46 MB   end: 752 MB
+stream:   start: 46 MB   end: 70 MB
+```
+
+Your numbers will differ, but the shape will not. Reading the whole file used over 700 MB for a 220 MB file (a string needs extra room and `split` makes a second copy), and with a smaller memory limit it crashes with "JavaScript heap out of memory". The stream never held more than a few chunks, so memory stayed flat. Memory also matters on a server: 50 users each downloading a 200 MB file with `readFile` need 10 GB, while 50 streams need almost nothing.
+
+A **stream** is data that arrives over time, in pieces called **chunks**. Node uses streams for files, HTTP requests and responses, TCP sockets, compression, and `process.stdin` and `process.stdout`.
+
+## Readable streams
+
+`createReadStream` gives you a **readable** stream. The simplest way to use it is `for await`:
+
+```js
+// chunks.mjs
+import { createReadStream } from "node:fs";
+
+let count = 0;
+for await (const chunk of createReadStream("big.log")) {
+  if (count === 0) console.log(chunk.length, Buffer.isBuffer(chunk));   // 65536 true
+  count++;
+}
+console.log("chunks:", count);    // 3525
+```
+
+Each chunk is a Buffer of up to 64 KB (the default `highWaterMark`; pass `{ highWaterMark: 1024 * 1024 }` for 1 MB chunks, which gives 221 chunks). The loop waits for each chunk before asking for the next one, so the file is read at the speed your code can handle it.
+
+A chunk is a random slice of bytes, and it will cut a line in the middle. To work with lines, wrap the stream in `node:readline`:
+
+```js
+// count-lines.mjs
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+
+const lines = createInterface({ input: createReadStream("big.log"), crlfDelay: Infinity });
+
+let total = 0;
+for await (const line of lines) {
+  total++;
+}
+console.log(total);   // 3000000
+```
+
+This reads 3 million lines in about half a second on my laptop, with flat memory. For a small file, `(await open(file)).readLines()` from `node:fs/promises` does the same in one call. Leaving the loop early with `break` closes the file, so "read the first 10 lines of a huge file" stays fast (the `head` exercise).
+
+## Writable streams and backpressure
+
+`createWriteStream` gives you a **writable** stream. You call `write()` for each piece and `end()` when you are done:
+
+```js
+// make-big.mjs
+import { createWriteStream } from "node:fs";
+import { once } from "node:events";
+
+const out = createWriteStream("big.log");
+const line = "2026-10-20T10:00:00Z INFO request handled in 12ms path=/api/notes status=200\n";
+
+for (let i = 0; i < 3_000_000; i++) {
+  if (!out.write(line)) await once(out, "drain");   // wait when the buffer is full
+}
+out.end();
+await once(out, "finish");
+```
+
+`write()` returns `false` when its internal buffer is full (the limit is `out.writableHighWaterMark`, 64 KB by default). That is **backpressure**: the writer is slower than the producer, and it says "stop, let me catch up". The `drain` event says "ready again". Without the `await once(out, "drain")` line, the loop would pile all 3 million lines into memory, and you would have the `readFile` problem again, this time while writing.
+
+Remember backpressure as the rule of streams: **a fast producer must wait for a slow consumer**. Writing it by hand is easy to get wrong, which is why you almost never do. You let `pipeline` do it.
+
+## `pipeline`: connect streams safely
+
+Streams can be chained: read a file, compress it, write the result. Use `pipeline` from `node:stream/promises`:
+
+```js
+// gzip.mjs
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
+
+try {
+  await pipeline(createReadStream("big.log"), createGzip(), createWriteStream("big.log.gz"));
+  console.log("compressed");     // 220 MB became 766 KB, with flat memory
+} catch (err) {
+  console.error("pipeline failed:", err.message);
+}
+```
+
+`pipeline` connects the streams in order, respects backpressure between each pair, and returns a promise that resolves when the last stream finishes. If any stream fails (a missing source file, a full disk), it rejects with the error **and destroys all the other streams**, so no file handles leak.
+
+You will see older code with `.pipe()`: `source.pipe(gzip).pipe(destination)`. It also handles backpressure, but it does not forward errors along the chain or close the other streams when one fails. Treat `.pipe()` as legacy and write `pipeline`.
+
+### Transforming data on the way through
+
+A middle step can change the data. The shortest way to write one is an async generator, because `pipeline` accepts it as a step:
+
+```js
+// transform.mjs
+import { createReadStream, createWriteStream } from "node:fs";
+import { createInterface } from "node:readline";
+import { pipeline } from "node:stream/promises";
+
+async function* onlySlowRequests(lines) {
+  for await (const line of lines) {
+    const ms = Number(/in (\d+)ms/.exec(line)?.[1]);
+    if (ms > 10) yield `${line}\n`;     // yield = send this chunk onward
+  }
+}
+
+const lines = createInterface({ input: createReadStream("big.log"), crlfDelay: Infinity });
+await pipeline(lines, onlySlowRequests, createWriteStream("slow.log"));
+```
+
+The generator receives the lines, keeps the ones slower than 10 ms and yields them to the file (every line in our test log says 12 ms, so all of them pass; change the number to see the filter work). Because it is lazy, only a few lines are in memory at any moment. When you need a reusable component, the class version is `new Transform({ transform(chunk, encoding, callback) { callback(null, chunk.toString().toUpperCase()); } })` from `node:stream`. Beware that a chunk can end in the middle of a word or line, so a Transform that depends on line boundaries should be fed from `readline`, as above.
+
+## Streams and HTTP
+
+An HTTP response is a writable stream, and an incoming request is a readable one. So sending a big file is one `pipeline`:
+
+```js
+// serve.mjs
+import http from "node:http";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const { size } = await stat("big.log");
+    res.writeHead(200, { "Content-Type": "text/plain", "Content-Length": size });
+    await pipeline(createReadStream("big.log"), res);
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      res.writeHead(404).end("Not found");
+    } else if (!res.headersSent) {
+      res.writeHead(500).end("Server error");
+    } else {
+      res.destroy(err);   // too late to change the status code; drop the connection
+    }
+  }
+});
+server.listen(3100);
+```
+
+Running `curl -s -o /dev/null -w "%{http_code} %{size_download}\n" localhost:3100` prints `200 231000000`, and the server process stayed around 115 MB. Notice the last branch: once the first bytes are sent the status code is gone, so the only honest thing left is to cut the connection. In Express, `res.sendFile(path)` and `res.download(path)` do this streaming for you; you will use them in `express-basics`.
+
+The other direction works too. The global `fetch` returns the body as a web stream, and `Readable.fromWeb` converts it so you can save a download without holding it in memory:
+
+```js
+// download.mjs
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+
+const res = await fetch("http://localhost:3100");
+if (!res.ok) throw new Error(`HTTP ${res.status}`);
+await pipeline(Readable.fromWeb(res.body), createWriteStream("download.log"));
+```
+
+<Callout type="note" title="Streams are not always the answer">
+For a file under a few megabytes (config, JSON data, a template), `readFile` is simpler and just as good. Reach for a stream when a file can be big or its size is not under your control (uploads, logs, exports), when you want to start sending before everything is ready, or when you chain steps such as compression.
+</Callout>
+
+## Common mistakes
+
+- Reading a file of unknown size with `readFile`, or sending it to a user that way.
+- Ignoring the result of `write()`, which fills memory when the consumer is slower than the producer.
+- Using `.pipe()` and forgetting that an error in the middle leaves the other streams open. Use `pipeline`.
+- Splitting chunks on `"\n"` yourself. A chunk can end in the middle of a line; use `readline`.
+- Forgetting that after the first bytes of an HTTP response are sent, you can no longer change the status code.
+
+<Exercise title="Count matching lines">
+Write `countMatches(file, text)` that returns how many lines of a file contain `text`. It must work on a file of any size without loading it, and it must reject with the original error if the file is missing.
+
+<Solution>
+```js
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+
+export async function countMatches(file, text) {
+  const lines = createInterface({ input: createReadStream(file), crlfDelay: Infinity });
+  let count = 0;
+  for await (const line of lines) {
+    if (line.includes(text)) count++;
+  }
+  return count;
+}
+
+console.log(await countMatches("big.log", "path=/api/notes"));   // 3000000
+await countMatches("nope.log", "x").catch((err) => console.log(err.code));   // ENOENT
+```
+
+The `readline` interface turns chunks into whole lines, and `for await` reads at the speed of your loop. A missing file makes the stream emit an error, which `for await` throws, so the returned promise rejects with `ENOENT`.
+</Solution>
+</Exercise>
+
+<Exercise title="Compress and restore">
+Write a script that gzips `big.log` into `copy.gz`, then unzips `copy.gz` into `restored.log`, both with `pipeline`. Finally check that `restored.log` has exactly the same bytes as `big.log`, and delete the two extra files.
+
+<Solution>
+```js
+import { createReadStream, createWriteStream } from "node:fs";
+import { readFile, rm } from "node:fs/promises";
+import { pipeline } from "node:stream/promises";
+import { createGzip, createGunzip } from "node:zlib";
+
+await pipeline(createReadStream("big.log"), createGzip(), createWriteStream("copy.gz"));
+await pipeline(createReadStream("copy.gz"), createGunzip(), createWriteStream("restored.log"));
+
+const [a, b] = await Promise.all([readFile("big.log"), readFile("restored.log")]);
+console.log("identical:", a.equals(b));   // identical: true
+await rm("copy.gz");
+await rm("restored.log");
+```
+
+Compressing and decompressing are separate pipelines, because the second needs the first to be finished. Reading both files whole at the end is fine for a one-off check on a 220 MB file, but a stream-friendly check would compare hashes (`createHash` from `node:crypto`) instead.
+</Solution>
+</Exercise>
+
+<Exercise title="Write your own head">
+Write `head.mjs` so that `node head.mjs big.log 5` prints only the first 5 lines of a file and then stops. It must finish at once even for a multi-gigabyte file, and it must not read the rest of the file.
+
+<Solution>
+```js
+// head.mjs
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
+
+const [file, count = "10"] = process.argv.slice(2);
+const limit = Number(count);
+
+const stream = createReadStream(file);
+const lines = createInterface({ input: stream, crlfDelay: Infinity });
+
+let printed = 0;
+for await (const line of lines) {
+  console.log(line);
+  if (++printed >= limit) break;   // leaving the loop stops the reading
+}
+stream.destroy();                  // make sure the file is closed
+```
+
+On the 220 MB log, `node head.mjs big.log 2` finishes in about 0.03 seconds. Reading is lazy: the stream only reads the next 64 KB when the loop asks for it, so `break` stops after the first chunk. Compare that with `readFile`, which would load all 220 MB before you could look at line 1.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the copy function">
+This function reports success even when the source file is missing, and it can leave the destination open. Rewrite it so that `copyFile("nope", "out.txt")` rejects with the original error and everything is cleaned up.
+
+```js
+import { createReadStream, createWriteStream } from "node:fs";
+
+export function copyFile(from, to) {
+  return new Promise((resolve) => {
+    createReadStream(from).pipe(createWriteStream(to)).on("finish", resolve);
+  });
+}
+```
+
+<Solution>
+```js
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
+
+export async function copyFile(from, to) {
+  await pipeline(createReadStream(from), createWriteStream(to));
+}
+
+await copyFile("big.log", "c.log");                                  // resolves
+await copyFile("nope", "d.log").catch((e) => console.log(e.code));   // ENOENT
+```
+
+`.pipe()` does not forward errors: when the source fails, the promise never settles and the destination stays open. `pipeline` rejects with the error and destroys both streams. (In real code, `copyFile` from `node:fs/promises` copies a file in one call. The point here is how errors travel through streams.)
+</Solution>
+</Exercise>

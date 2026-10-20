@@ -1,0 +1,391 @@
+---
+title: TypeScript in Node.js
+summary: Run .ts files directly with Node, understand what type stripping can and cannot do, and set up a tsconfig that matches how Node really works.
+order: 5
+takeaways:
+  - Node 24 runs `.ts` files directly by erasing the type annotations, with no build step and no flag.
+  - Node never checks types, so `tsc --noEmit` is the separate step that catches type errors, in your editor and in CI.
+  - Node can only erase syntax, so enums, namespaces and constructor parameter properties fail, and `erasableSyntaxOnly` makes tsc warn you early.
+  - Imports must name the real file with its `.ts` extension, and types must be imported with `import type` or `type`.
+  - A tsconfig for Node needs the `nodenext` module setting, the `node` types and `noEmit`, and `process.env` values are typed as `string | undefined`.
+videos:
+  - title: "Don't miss out on Node.js' native TypeScript support! NO COMPILER NEEDED!"
+    channel: "Maximilian Schwarzmüller"
+    duration: "11:21"
+    url: https://www.youtube.com/watch?v=hr3OJA3QTO8
+  - title: "How to use TypeScript in Node.js in 2026"
+    channel: "Tom Dohnal"
+    duration: "11:32"
+    url: https://www.youtube.com/watch?v=6Y-v3a4xZHU
+docs:
+  - title: "Node.js — Modules: TypeScript"
+    url: https://nodejs.org/api/typescript.html
+  - title: "Node.js — Running TypeScript natively"
+    url: https://nodejs.org/en/learn/typescript/run-natively
+  - title: "TSConfig reference — erasableSyntaxOnly"
+    url: https://www.typescriptlang.org/tsconfig/#erasableSyntaxOnly
+---
+
+Nearly every Node.js job today uses TypeScript, and the Express lessons that follow are written in it, so you need a setup that just works. For years that meant a build step or a tool like `ts-node`. Node can now run TypeScript itself, and knowing exactly what it does, and what it skips, is a favourite interview question. This lesson was written for Node 24 and TypeScript 7 (the config also works on TypeScript 5.8 and newer), and it assumes you know the basics from `typescript-basics/types-and-interfaces`. The next lesson, `node-dev-workflow`, turns this into a daily setup with `--watch`, npm scripts and `tsx`.
+
+## Running a `.ts` file
+
+Create a folder with a `package.json` that contains `{ "type": "module" }` (from `node-runtime`, lesson 1) and this file:
+
+```ts
+// src/hello.ts
+interface User {
+  name: string;
+  age: number;
+}
+
+function greet(user: User): string {
+  return `Hello ${user.name}, you are ${user.age}`;
+}
+
+const ada: User = { name: "Ada", age: 36 };
+console.log(greet(ada));
+```
+
+```bash
+node src/hello.ts
+```
+
+```text
+Hello Ada, you are 36
+```
+
+No flag, no install. On Node 24 (and on 22.18 or newer) this just works. The idea is called **type stripping**: before running the file, Node removes everything that is only TypeScript (`interface`, `: string`, `: User`) and runs what is left, which is plain JavaScript. It does not rewrite your code or move it around. It replaces the types with blank space, so line and column numbers stay the same and an error in `src/boom.ts` line 7 really is on line 7.
+
+### Node does not check types
+
+This is the most important fact in the lesson. Stripping means the types are thrown away, not checked:
+
+```ts
+// src/wrong.ts
+const age: number = "forty"; // a type error
+console.log(age * 2);
+```
+
+```bash
+node src/wrong.ts
+```
+
+```text
+NaN
+```
+
+Node ran it happily and printed `NaN`. The type checker is a separate program, `tsc`, and you ask it to look without producing files:
+
+```bash
+npx tsc --noEmit src/wrong.ts
+```
+
+```text
+src/wrong.ts(2,7): error TS2322: Type 'string' is not assignable to type 'number'.
+```
+
+So you always need two tools: **Node runs the code, `tsc` checks it**. Your editor runs `tsc`'s checks while you type, and CI runs `tsc` before every merge. We set up `tsc` below, and the next lesson wires both into npm scripts.
+
+## What Node cannot strip
+
+Stripping only works for syntax that can be **erased** and still leave valid JavaScript. A few TypeScript features create real JavaScript code, so there is nothing to erase:
+
+```ts
+// src/enum.ts
+enum Color {
+  Red,
+  Green,
+}
+console.log(Color.Green);
+```
+
+```text
+SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: TypeScript enum is not supported in strip-only mode
+```
+
+The same error appears for these three features:
+
+- `enum` declarations.
+- Constructor **parameter properties**: `constructor(public x: number)`.
+- `namespace` (and `module`) blocks that contain code.
+
+All three have a plain replacement, and most TypeScript teams are moving away from them anyway:
+
+```ts
+// Instead of an enum: a const object and a type made from it
+const Color = { Red: "red", Green: "green" } as const;
+type Color = (typeof Color)[keyof typeof Color]; // "red" | "green"
+
+// Instead of a parameter property: declare the field, then assign it
+class Point {
+  x: number;
+  y: number;
+
+  constructor(x: number, y: number) {
+    this.x = x;
+    this.y = y;
+  }
+}
+```
+
+The `as const` object gives you `Color.Red` at runtime and a union type at compile time, which is everything an enum offered. A union of string values also prints readable values in logs and JSON, where a numeric enum prints `1`.
+
+If you really have to run code with these features, `node --experimental-transform-types src/enum.ts` makes Node generate the missing code. It prints `1` for the file above, but it also prints an experimental warning and is slower, so treat it as an escape hatch, not a default.
+
+### Two rules for imports
+
+Because Node does not interpret your TypeScript, imports follow Node's own rules, not the looser ones you may have seen in other TypeScript projects.
+
+**Rule 1: write the real file name, with the `.ts` extension.**
+
+```ts
+// src/imp/a.ts
+import { defaultTitle } from "./types"; // wrong
+import { defaultTitle } from "./types.ts"; // right
+```
+
+The wrong line fails with `ERR_MODULE_NOT_FOUND: Cannot find module '.../types'`. Node does not guess extensions in ES modules. It looks for a file called exactly `types`, and there is none.
+
+**Rule 2: import types with the `type` keyword.**
+
+```ts
+// src/imp/types.ts
+export interface Todo {
+  id: number;
+  title: string;
+  done: boolean;
+}
+export const defaultTitle = "Untitled";
+```
+
+```ts
+// src/imp/b.ts
+import { Todo, defaultTitle } from "./types.ts"; // wrong
+import { type Todo, defaultTitle } from "./types.ts"; // right
+import type { Todo } from "./types.ts"; // right when you import only types
+```
+
+The wrong line fails at runtime with `SyntaxError: The requested module './types.ts' does not provide an export named 'Todo'`. Node erases the `interface`, so the file really has no export called `Todo`. But `import { Todo }` still asks for it. Writing `type` tells Node to erase that import too.
+
+<Callout type="note" title="Packages in node_modules are not stripped">
+Node refuses to strip types from files inside `node_modules` (the error is `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`). Your own code can be TypeScript, but a package you install has to ship JavaScript. Almost all of them do, plus a `.d.ts` file with the types.
+</Callout>
+
+## A tsconfig that matches Node
+
+`tsc` needs a `tsconfig.json` that describes how Node behaves. Install the checker and Node's type definitions, which tell TypeScript what `process`, `node:fs` and the rest look like:
+
+```bash
+npm install --save-dev typescript @types/node@24
+```
+
+Match the `@types/node` major version to your Node version (24 here), so the types describe the functions you really have. Now create the config:
+
+```json
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "types": ["node"],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
+```
+
+| Option | What it does for a Node project |
+| --- | --- |
+| `target: "esnext"` | Node 24 understands modern JavaScript, so tsc does not need to rewrite anything. |
+| `module: "nodenext"` | Follow Node's own module rules: `package.json` `type`, explicit file extensions, `import.meta`. |
+| `types: ["node"]` | Load the `@types/node` definitions. Without this line, `process` is an error (see below). |
+| `noEmit: true` | Check only. Node runs the `.ts` files, so tsc must not write `.js` files. |
+| `allowImportingTsExtensions: true` | Allow `from "./todo.ts"`, which Rule 1 requires. |
+| `erasableSyntaxOnly: true` | Report an error for enums, namespaces and parameter properties, the things Node cannot strip. |
+| `verbatimModuleSyntax: true` | Report an error when a type is imported without `type` (Rule 2). |
+| `strict: true` | The strict checks you already know. |
+| `skipLibCheck: true` | Skip re-checking the `.d.ts` files of your packages, which is faster and avoids errors you cannot fix. |
+
+The two options in the middle are what make `tsc` and Node agree. Here is a file that breaks both rules, and what `npx tsc` says (Node would also fail at runtime):
+
+```ts
+// src/bad.ts
+import { Todo, makeTodo } from "./todo.ts";
+
+enum Level {
+  Low,
+  High,
+}
+
+class Box {
+  constructor(public value: number) {}
+}
+```
+
+```text
+src/bad.ts(1,10): error TS1484: 'Todo' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+src/bad.ts(3,6): error TS1294: This syntax is not allowed when 'erasableSyntaxOnly' is enabled.
+src/bad.ts(9,15): error TS1294: This syntax is not allowed when 'erasableSyntaxOnly' is enabled.
+```
+
+You find out in your editor, as a red underline, instead of when the server crashes.
+
+### Why `types: ["node"]` matters
+
+Newer TypeScript versions load no global type packages unless you list them. Without `"types": ["node"]`, even `process.env` is an error:
+
+```text
+src/index.ts(3,21): error TS2591: Cannot find name 'process'. Do you need to install type definitions for node? Try `npm i --save-dev @types/node` and then add 'node' to the types field in your tsconfig.
+```
+
+If you ever see "Cannot find name 'process'" (or `Buffer`), the fix is this line, not a new import.
+
+### Environment variables are `string | undefined`
+
+With the types installed, TypeScript knows that `process.env.API_KEY` may not exist:
+
+```ts
+// src/envtype.ts
+const secret: string = process.env.API_KEY;
+```
+
+```text
+src/envtype.ts(1,7): error TS2322: Type 'string | undefined' is not assignable to type 'string'.
+```
+
+That error is TypeScript being correct: a missing variable is the most common production mistake. Do not silence it with `as string`. Read all your variables in one place, check them once, and export a typed object. We will reuse this file in the Express lessons:
+
+```ts
+// src/config.ts
+interface Config {
+  port: number;
+  greeting: string;
+}
+
+function readConfig(env: NodeJS.ProcessEnv): Config {
+  const port = Number(env.PORT ?? 3000);
+  if (!Number.isInteger(port)) {
+    throw new Error(`PORT must be a whole number, got "${env.PORT}"`);
+  }
+  return { port, greeting: env.GREETING ?? "Hello" };
+}
+
+export const config: Config = readConfig(process.env);
+```
+
+`NodeJS.ProcessEnv` is the type of `process.env` from `@types/node`. Every other file imports `config` and gets a real `number` for `port`. Later we replace the hand-written checks with Zod.
+
+## Common mistakes
+
+- Thinking `node file.ts` checks types. It never does. Run `npx tsc` before you commit.
+- Leaving out the `.ts` extension in an import, or leaving out `type` when importing an interface.
+- Using `enum` or `constructor(private x: string)` out of habit. Turn on `erasableSyntaxOnly` and the editor warns you at once.
+- Forgetting `"types": ["node"]` and then "fixing" `Cannot find name 'process'` by installing something else.
+- Silencing `string | undefined` from `process.env` with `as string` instead of checking it once at startup.
+
+<Exercise title="Predict the output">
+No tools are involved, just reading. Which of these two commands prints something, which prints an error, and why?
+
+```ts
+// price.ts
+const price: number = "12.50";
+console.log(price + 1);
+```
+
+```bash
+node price.ts
+npx tsc --noEmit price.ts
+```
+
+<Solution>
+`node price.ts` prints `12.501`. Node erases `: number` and runs `const price = "12.50"; console.log(price + 1);`, and a string plus a number is string concatenation. No error appears.
+
+`npx tsc --noEmit price.ts` prints `error TS2322: Type 'string' is not assignable to type 'number'.` and does not run the code at all.
+
+This is the lesson in two commands: Node runs, `tsc` checks, and a project needs both.
+</Solution>
+</Exercise>
+
+<Exercise title="Make it strippable">
+This file fails with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` under `node`. Rewrite it so it runs with plain `node` and still gives `role` a type that only allows `"admin"` and `"member"`.
+
+```ts
+enum Role {
+  Admin = "admin",
+  Member = "member",
+}
+
+class Account {
+  constructor(
+    public name: string,
+    public role: Role,
+  ) {}
+}
+
+console.log(new Account("Ada", Role.Admin));
+```
+
+<Solution>
+```ts
+// ex/enum-fixed.ts
+const Role = {
+  Admin: "admin",
+  Member: "member",
+} as const;
+
+type Role = (typeof Role)[keyof typeof Role];
+
+class Account {
+  name: string;
+  role: Role;
+
+  constructor(name: string, role: Role) {
+    this.name = name;
+    this.role = role;
+  }
+}
+
+const ada = new Account("Ada", Role.Admin);
+console.log(ada);
+```
+
+```text
+Account { name: 'Ada', role: 'admin' }
+```
+
+The object and the type may share the name `Role` because one lives in the value world and the other in the type world. `tsc` with `erasableSyntaxOnly` reports nothing for this version, while the original shows `TS1294` for both the enum and the parameter properties.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the two imports">
+`npx tsc` and `node` both complain about this file. Fix it without changing `todo.ts`, which exports `interface Todo` and `makeTodo`.
+
+```ts
+// src/main.ts
+import { Todo, makeTodo } from "./todo";
+
+const first: Todo = makeTodo("Learn Node", 1);
+console.log(first);
+```
+
+<Solution>
+```ts
+// src/main.ts
+import { type Todo, makeTodo } from "./todo.ts";
+
+const first: Todo = makeTodo("Learn Node", 1);
+console.log(first);
+```
+
+```text
+{ id: 1, title: 'Learn Node', done: false }
+```
+
+There were two separate mistakes. The path `./todo` has no extension, so Node cannot find the file (`ERR_MODULE_NOT_FOUND`) and `tsc` says `TS2835: Relative import paths need explicit file extensions`. And `Todo` is only a type, so without `type` Node looks for an export that was erased (`does not provide an export named 'Todo'`) and `tsc` reports `TS1484`.
+</Solution>
+</Exercise>

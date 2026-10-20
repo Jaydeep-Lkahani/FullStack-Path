@@ -1,0 +1,397 @@
+---
+title: Express Error Handling
+summary: Catch every error in one place, send clients a consistent JSON error, and keep internal details out of production responses.
+order: 9
+takeaways:
+  - "Express catches errors thrown in routes and middleware and passes them to the first error-handling middleware that comes after."
+  - "An error-handling middleware has exactly four parameters, `(err, req, res, next)`, and must be registered after every route and the 404 handler."
+  - "In Express 5, a rejected promise or a throw inside an `async` handler reaches the error handler by itself, with no try/catch and no wrapper."
+  - "Errors thrown inside callbacks and timers are not caught: wrap them and call `next(error)` yourself, or move to promises."
+  - "A custom `HttpError` class with a status and a code lets one handler turn any error into the same JSON shape, and unknown errors become a generic 500 that is logged but never leaked."
+videos:
+  - title: "How to Use Express Error Handler (With Typescript)"
+    channel: "Coding in Flow"
+    duration: "0:40"
+    url: https://www.youtube.com/watch?v=hz8wxsj4f6Y
+  - title: "#91 Global Error Handling Middleware | Error Handling in Express | A Complete NODE JS Course"
+    channel: "procademy"
+    duration: "13:53"
+    url: https://www.youtube.com/watch?v=WXa1yzLR3hw
+docs:
+  - title: "Express — Error handling"
+    url: https://expressjs.com/en/guide/error-handling.html
+  - title: "Express — Migrating to Express 5 (rejected promises)"
+    url: https://expressjs.com/en/guide/migrating-5.html
+  - title: "MDN: HTTP response status codes"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status
+---
+
+Every API fails sometimes: a client sends broken JSON, an id does not exist, the database goes away. What matters is what the client sees when it does. A good API answers with a clear status and a predictable JSON body; a careless one sends an HTML page with a stack trace. Interviews ask how you handle errors in Express, and every lesson after this one (validation, auth, tests) builds on the handler you create here. This lesson continues the todo API from `express-middleware`, written for Express 5.3 and Node 24.
+
+## What Express does with an error today
+
+Start with the default behaviour. This tiny app has a route that throws and a route that reads a JSON body:
+
+```ts
+// ex/default.ts
+import express from "express";
+
+const app = express();
+app.use(express.json());
+
+app.get("/boom", (req, res) => {
+  throw new Error("something broke");
+});
+app.post("/echo", (req, res) => {
+  res.json(req.body);
+});
+```
+
+```bash
+curl -i localhost:4300/boom
+curl -i -X POST -H "Content-Type: application/json" -d '{"a":' localhost:4300/echo
+```
+
+```text
+HTTP/1.1 500 Internal Server Error
+Content-Type: text/html; charset=utf-8
+<pre>Error: something broke<br> &nbsp; &nbsp;at file:///.../ex/default.ts:7:9 ...
+
+400, also text/html: <pre>SyntaxError: Unexpected end of JSON input<br> ...
+```
+
+Express caught both errors by itself (a throw in a route does not crash the server), but the **default error handler** answered with an HTML page, and in development it includes the **stack trace** with file paths on your machine. With `NODE_ENV=production` the page shrinks to `Internal Server Error`, but it is still HTML. A frontend that calls `response.json()` on this will itself throw. We want JSON, always, and in the same shape.
+
+## Sending an error to Express
+
+There are two ways to hand an error to Express, and they end up in the same place:
+
+```ts
+app.get("/a", (req, res) => {
+  throw new Error("thrown");        // 1. throw (works in sync code)
+});
+
+app.get("/b", (req, res, next) => {
+  next(new Error("passed on"));     // 2. next(error)
+});
+```
+
+When you call `next` with an argument, Express **skips every normal middleware and route** after the current one and looks for an **error-handling middleware**. If it finds none, the default handler above answers. The one exception is `next("route")` (and `"router"`), which are special and not errors.
+
+## Error-handling middleware
+
+An error-handling middleware is an ordinary middleware with **four** parameters. The first is the error:
+
+```ts
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  res.status(500).json({ error: err.message });
+});
+```
+
+Express tells it apart from a normal middleware **by counting the parameters** (`fn.length === 4`). Two rules follow, and both are classic interview questions:
+
+- It must declare all four parameters, even if you never use `next`.
+- It must be registered **after** the routes and middleware that can fail. An error only travels forward, to handlers registered later.
+
+<Callout type="warning" title="Three parameters is not an error handler">
+`(err, req, res) => { ... }` has three parameters, so Express treats it as a normal middleware that never receives errors, and you silently get the default HTML page again. Registering the handler *above* the routes does the same. Exercise 1 shows one.
+</Callout>
+
+## Async errors in Express 5
+
+In Express 4, a rejected promise in an `async` handler was **not** caught: the request hung until it timed out, and every handler needed a `try/catch` that called `next(error)`. That is why older tutorials wrap each handler in a helper like `asyncHandler` (the longer video above predates Express 5, so expect to see it). **Express 5 fixes this.** If a handler or middleware returns a promise and it rejects, or an `async` function throws, Express calls `next(error)` for you:
+
+```ts
+// src/routes/todos.ts
+todosRouter.get("/:id", async (req, res) => {
+  const todo = await findTodo(Number(req.params.id));  // may reject
+  if (!todo) throw notFound(`No todo with id ${req.params.id}`);
+  res.json(todo);
+});
+```
+
+There is no `try/catch` and no wrapper. In the sandbox, `findTodo` pretends to be a database call, waits 10 ms, and rejects for the id `13`. That rejection reaches the error handler like any other error. Delete the `asyncHandler` wrappers when you read older code on Express 5; they are harmless but no longer needed.
+
+### What Express cannot catch
+
+Express only sees errors that come back through the handler's return value or `throw` *while the handler is running*. Code that runs **later**, from a callback or a timer, is outside that call:
+
+```ts
+// ex/callback.ts
+app.get("/lost", (req, res) => {
+  setTimeout(() => {
+    throw new Error("thrown inside a timer"); // nobody is waiting for this
+  }, 10);
+});
+
+app.get("/fixed", (req, res, next) => {
+  setTimeout(() => {
+    try {
+      throw new Error("thrown inside a timer");
+    } catch (error) {
+      next(error); // hand it to Express yourself
+    }
+  }, 10);
+});
+```
+
+`GET /fixed` returns a 500 from the error handler. `GET /lost` **kills the whole Node process** with an uncaught exception, so every other user is cut off too. The cure is to avoid callback APIs: use `fs/promises`, `await` and `async` handlers, where a failure becomes a rejection that Express does catch. When you must use a callback, call `next(error)` in the failure branch. As a last line of defence, many teams also listen to `process.on("uncaughtException")` and `"unhandledRejection"` to log the error, and then let a process manager restart the app, because the state after an uncaught error is unreliable.
+
+## A custom error class
+
+To answer with the right status, a thrown error has to carry one. Make a small class that extends `Error`:
+
+```ts
+// src/errors.ts
+export class HttpError extends Error {
+  status: number;
+  code: string;
+  details?: unknown;
+
+  constructor(status: number, code: string, message: string, details?: unknown) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export const badRequest = (message: string, details?: unknown) =>
+  new HttpError(400, "BAD_REQUEST", message, details);
+
+export const notFound = (message: string) => new HttpError(404, "NOT_FOUND", message);
+```
+
+Each error has three parts for three audiences. The `status` is for HTTP clients and proxies, the `code` is a stable word that frontend code can switch on (it never changes when you reword a message), and the `message` is for humans. `details` is optional extra data such as which field was wrong. The fields are written out one by one instead of `constructor(public status: number)` because Node's type stripping does not support parameter properties, which is why `erasableSyntaxOnly` is on in the tsconfig from `node-typescript`.
+
+A handler can now say what went wrong in one line:
+
+```ts
+if (!todo) throw notFound(`No todo with id ${req.params.id}`);
+```
+
+## One handler, one JSON shape
+
+The error handler converts **any** error into an `HttpError` and sends it in one fixed shape:
+
+```ts
+// src/middleware/errorHandler.ts
+import type { ErrorRequestHandler } from "express";
+import { HttpError } from "../errors.ts";
+
+// body-parser (inside express.json()) throws errors that carry a `type` string
+function bodyParserType(err: unknown): string | undefined {
+  if (typeof err === "object" && err !== null && "type" in err && typeof err.type === "string") {
+    return err.type;
+  }
+  return undefined;
+}
+
+function toHttpError(err: unknown): HttpError {
+  if (err instanceof HttpError) return err;
+
+  switch (bodyParserType(err)) {
+    case "entity.parse.failed":
+      return new HttpError(400, "INVALID_JSON", "Request body is not valid JSON");
+    case "entity.too.large":
+      return new HttpError(413, "PAYLOAD_TOO_LARGE", "Request body is too large");
+  }
+
+  // anything else is a bug or a failure we did not plan for
+  return new HttpError(500, "INTERNAL_ERROR", "Something went wrong");
+}
+
+export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
+  // too late to send JSON: the response has already started
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+
+  const httpError = toHttpError(err);
+
+  if (httpError.status >= 500) {
+    console.error(`${req.method} ${req.originalUrl} failed:`, err);
+  }
+
+  res.status(httpError.status).json({
+    error: {
+      code: httpError.code,
+      message: httpError.message,
+      ...(httpError.details !== undefined && { details: httpError.details }),
+    },
+  });
+};
+```
+
+Read it in three parts:
+
+1. **Known errors** (`HttpError`) pass straight through. These are the failures you planned for, so their message is safe to show.
+2. **Errors from Express's own middleware** are translated. `express.json()` fails with a `SyntaxError` for bad JSON and with a "payload too large" error for bodies over 100 kB; both carry a `type` string, and we map them to friendly 4xx answers. `err` is typed `any` by `ErrorRequestHandler`, so the small type guard checks the shape instead of trusting it.
+3. **Everything else** is a bug or an outage (a `TypeError`, a lost database connection). The client gets a generic `500` with `Something went wrong`, and the real error goes to the log with `console.error`. Never send `err.message` or `err.stack` to the client for these: they can reveal file paths, SQL, library versions and secrets. Log it on the server, where only you can read it (the `uploads-config-logging` lesson replaces `console.error` with a real logger). Some APIs also add the stack to the JSON in development; that is risky if a server is ever started without `NODE_ENV=production`, so this one leaves it in the log only.
+
+The `res.headersSent` check handles a rare case. If an error happens after the response has begun (half a streamed file has been sent), you can no longer change the status or send JSON. Calling `next(err)` hands it to Express's default handler, which closes the connection safely instead of throwing `Cannot set headers after they are sent`.
+
+## Wiring it up, including the 404
+
+Two pieces change in `app.ts`. The 404 handler no longer answers by itself; it creates an error, so a missing route has the same JSON shape as every other failure. Then the error handler goes **last**:
+
+```ts
+// src/app.ts
+import express from "express";
+import { notFound } from "./errors.ts";
+import { errorHandler } from "./middleware/errorHandler.ts";
+import { logger } from "./middleware/logger.ts";
+import { todosRouter } from "./routes/todos.ts";
+
+export const app = express();
+
+app.use(logger);
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  res.json({ name: "todo-api", docs: "/todos" });
+});
+
+app.use("/todos", todosRouter);
+
+// nothing answered: turn it into an error so it gets the same JSON shape
+app.use((req, res, next) => {
+  next(notFound(`Cannot ${req.method} ${req.path}`));
+});
+
+// must be last
+app.use(errorHandler);
+```
+
+The routes can now throw instead of building their own error responses. In `todos.ts`, `throw badRequest("title must be a non-empty string", { field: "title" })` replaces the old `res.status(400).json(...)`, and `requireJson` calls `next(new HttpError(415, ...))`. Try it:
+
+```bash
+curl -i localhost:4200/todos/99
+curl -i localhost:4200/nope
+curl -i localhost:4200/todos/13
+curl -i -X POST -H "Content-Type: application/json" -d '{"title":' localhost:4200/todos
+curl -i -X POST -H "Content-Type: application/json" -d '{"title":""}' localhost:4200/todos
+curl -i -X POST -d "title=x" localhost:4200/todos
+```
+
+```text
+404  {"error":{"code":"NOT_FOUND","message":"No todo with id 99"}}
+404  {"error":{"code":"NOT_FOUND","message":"Cannot GET /nope"}}
+500  {"error":{"code":"INTERNAL_ERROR","message":"Something went wrong"}}
+400  {"error":{"code":"INVALID_JSON","message":"Request body is not valid JSON"}}
+400  {"error":{"code":"BAD_REQUEST","message":"title must be a non-empty string","details":{"field":"title"}}}
+415  {"error":{"code":"UNSUPPORTED_MEDIA_TYPE","message":"Send Content-Type: application/json"}}
+```
+
+The `500` for `/todos/13` hides the cause from the client; the terminal where the server runs shows the real error (`connection to the database was lost`, with its stack trace).
+
+A frontend can now handle every failure the same way: read `response.status`, then `error.code` and `error.message` from the body.
+
+## Common mistakes
+
+- Giving the error handler three parameters, or registering it before the routes. It is then skipped and the default HTML page appears.
+- Throwing inside `setTimeout` or an old-style callback and expecting Express to catch it. It crashes the process.
+- Sending `err.message` or `err.stack` for unexpected errors, which leaks internals.
+
+<Exercise title="Predict what the client gets">
+This app has an error handler. What status and body does `GET /boom` return, and why?
+
+```ts
+const app = express();
+
+app.get("/boom", (req, res) => {
+  throw new Error("something broke");
+});
+
+app.use((err: Error, req: Request, res: Response) => {
+  res.status(500).json({ error: err.message });
+});
+```
+
+<Solution>
+It returns `500` with an **HTML** page that contains `Error: something broke` and a stack trace (in development), not the JSON body. The handler has three parameters, so Express counts it as a normal middleware, not an error handler. The thrown error skips it and goes to Express's default handler. The fix is to add the fourth parameter, `next: NextFunction`, even though it is unused. Registering the handler above the route has the same symptom.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the crashing route">
+This route works when `config.json` exists, but when the file is missing the whole server process dies. Explain why and rewrite it so a missing file gives a `404` JSON error through the shared handler, and other failures give a `500`.
+
+```ts
+import { readFile } from "node:fs";
+
+app.get("/config", (req, res) => {
+  readFile("config.json", "utf8", (error, text) => {
+    res.json(JSON.parse(text));
+  });
+});
+```
+
+<Solution>
+The callback runs *after* the handler has returned. When the file is missing, `text` is `undefined`, `JSON.parse(undefined)` throws, and nothing is waiting to catch it, so Node ends the process with an uncaught exception. Using the promise version of `readFile` in an `async` handler makes every failure a rejection that Express 5 forwards:
+
+```ts
+import { readFile } from "node:fs/promises";
+import { notFound } from "../src/errors.ts";
+
+app.get("/config", async (req, res) => {
+  try {
+    const text = await readFile("config.json", "utf8");
+    res.json(JSON.parse(text));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      throw notFound("config.json does not exist");
+    }
+    throw error; // anything else: let the error handler decide (a 500)
+  }
+});
+```
+
+The `try/catch` is not there to rescue Express; it is there to translate one specific error code (`ENOENT`, covered in `files-and-paths`) into a better answer. Everything else is rethrown.
+</Solution>
+</Exercise>
+
+<Exercise title="Validate ids and detect duplicates">
+Add two things to the todo routes: (1) `GET /todos/abc` and `GET /todos/0` should return `400` with `details: { param: "id" }`, and (2) `POST /todos` with a title that already exists (ignoring upper and lower case) should return `409` with the code `CONFLICT`. Add a `conflict` helper next to `notFound`.
+
+<Solution>
+```ts
+// src/errors.ts
+export const conflict = (message: string) => new HttpError(409, "CONFLICT", message);
+```
+
+```ts
+// src/routes/todos.ts (changed parts)
+import { badRequest, conflict, notFound } from "../errors.ts";
+
+function parseId(value: string): number {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id < 1) {
+    throw badRequest(`"${value}" is not a valid id`, { param: "id" });
+  }
+  return id;
+}
+
+todosRouter.get("/:id", async (req, res) => {
+  const todo = await findTodo(parseId(req.params.id));
+  if (!todo) throw notFound(`No todo with id ${req.params.id}`);
+  res.json(todo);
+});
+
+todosRouter.post("/", requireJson, (req, res) => {
+  const title: unknown = req.body?.title;
+  if (typeof title !== "string" || title.trim() === "") {
+    throw badRequest("title must be a non-empty string", { field: "title" });
+  }
+  const clean = title.trim();
+  if (todos.some((todo) => todo.title.toLowerCase() === clean.toLowerCase())) {
+    throw conflict(`A todo called "${clean}" already exists`);
+  }
+  res.status(201).json(addTodo(clean));
+});
+```
+
+The error handler needed no change: it already turns any `HttpError` into JSON with its own status, so a new kind of error is one line. The `Number.isInteger` check matters because `Number("abc")` is `NaN`, which would otherwise reach `findTodo`.
+</Solution>
+</Exercise>

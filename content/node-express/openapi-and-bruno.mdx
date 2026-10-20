@@ -1,0 +1,380 @@
+---
+title: Documenting an API with OpenAPI and Bruno
+summary: Describe the API in an OpenAPI file that tools can read and lint, then explore and test it with Bruno requests that live in your repository.
+order: 13
+takeaways:
+  - "An OpenAPI file is a machine-readable description of every URL, input and response of an API, and tools turn it into docs, client code and checks."
+  - "Shared pieces such as the `Todo` and `Error` schemas are written once under `components` and reused with `$ref`."
+  - "A linter such as Redocly checks that the file is valid, but nothing checks that it matches the code, so a change to a route is also a change to the spec."
+  - "Bruno stores requests as plain files in your repository, so a team shares them through git without accounts."
+  - "Bruno environments hold what changes per machine, runtime variables chain requests together, and its command line runner can run a collection as API tests."
+videos:
+  - title: "Understand OpenAPI in 5 Minutes With Examples"
+    channel: "florianjsx"
+    duration: "4:34"
+    url: https://www.youtube.com/watch?v=PenvYHJ9Koc
+  - title: "Bruno API Client Full Walkthrough 🚀 | Complete Beginner's Guide to All Features! #opensource"
+    channel: "Ganesh Patil"
+    duration: "32:33"
+    url: https://www.youtube.com/watch?v=Hh0Z_WKaigQ
+docs:
+  - title: "The OpenAPI Specification Explained"
+    url: https://learn.openapis.org/specification/
+  - title: "OpenAPI Specification 3.1"
+    url: https://spec.openapis.org/oas/v3.1.1.html
+  - title: "Bruno documentation"
+    url: https://docs.usebruno.com/
+  - title: "Bruno CLI"
+    url: https://docs.usebruno.com/bru-cli/overview
+---
+
+How does a frontend developer know that `sort` takes `-createdAt`, or that a duplicate title gives `409`? You could write a wiki page, but it goes out of date the week after. Real teams keep a **machine-readable description** of the API next to the code, and a **request collection** that anyone can run against it. This lesson adds both to the todo API from `pagination-and-versioning` (the `/v1` routes with pagination): an OpenAPI file, and a Bruno collection that tests it. Written for Bruno 4, with Express 5.3 and Node 24.
+
+## Describing the API with OpenAPI
+
+How does a frontend developer know that `sort` takes `-createdAt`, or that a duplicate title gives `409`? You could write a wiki page, but it goes out of date the week after. The standard answer is an **OpenAPI** file (still called "Swagger" by many people): a YAML or JSON document that describes every URL, method, parameter, request body and response in a format machines can read. It is the **contract**; you write it once, and tools use it:
+
+- docs websites, generated for you (Swagger UI, Redoc, Scalar)
+- client code and TypeScript types, generated from it
+- linters that check the contract itself
+- request collections in Bruno or Postman, imported from it
+
+The file is built from a few parts. This is the start of `openapi.yaml` for the todo API, with `...` where lines are left out:
+
+```yaml
+openapi: 3.1.0
+info:
+  title: Todo API
+  version: 1.0.0
+servers:
+  - url: http://localhost:4200
+paths:
+  /v1/todos:
+    get:
+      summary: List todos
+      operationId: listTodos
+      parameters:
+        - name: sort
+          in: query
+          description: A field name, with a leading - for descending order.
+          schema:
+            type: string
+            enum: [id, -id, title, -title, createdAt, -createdAt]
+            default: id
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 10 }
+        # ... done, q, page
+      responses:
+        "200":
+          description: One page of todos.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Todo" }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    post:
+      # ... the body is a NewTodo; answers 201, 400, 409, 415
+components:
+  schemas:
+    Todo:
+      type: object
+      required: [id, title, done, createdAt]
+      properties:
+        id: { type: integer }
+        title: { type: string }
+        done: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    # ... NewTodo, TodoFields, TodoPatch, PageMeta, Error
+```
+
+Read it in layers. `paths` lists every URL, and under each one the methods. Each method has its `parameters` (where they live: `query`, `path` or `header`), its `requestBody`, and a `responses` map by status code. The **schemas** under `components` are written once and reused everywhere with `$ref`: `Todo` appears in the list, in the single-todo response and in the create response, and the shared `Error` shape is referenced by every `4xx` answer. That is the payoff of the single error format from `express-error-handling`: it is described once. Write the other operations (get, replace, update and delete a todo) in the same way; the status-code table in `rest-api-design` tells you which responses each one has, and the linter below tells you when a `$ref` points nowhere. The complete file for this API describes all six operations and passes the linter.
+
+Serving it from the app lets tools fetch the contract from the running server:
+
+```ts
+// src/app.ts (added, before the /v1 router)
+import { join } from "node:path";
+
+// the contract, served as a file
+app.get("/openapi.yaml", (req, res) => {
+  res.type("application/yaml").sendFile(join(import.meta.dirname, "..", "openapi.yaml"));
+});
+```
+
+(`import.meta.dirname` is the folder of the current file, from the `files-and-paths` lesson; the file sits one level above `src/`.) To check that the file itself is correct, lint it:
+
+```bash
+npx @redocly/cli lint openapi.yaml
+```
+
+```text
+openapi.yaml: validated in 23ms
+Woohoo! Your API description is valid. 🎉
+You have 2 warnings.
+```
+
+The two warnings (no `license`, a `localhost` server URL) are style rules for public APIs and fine for a learning project. To see it as a browsable page, paste the file into the online editor at editor.swagger.io, or run `npx @redocly/cli preview-docs openapi.yaml`.
+
+<Callout type="warning" title="A spec can lie">
+Nothing forces the YAML file to match the code. If you add a field to the route and forget the file, the docs are wrong, and linting cannot tell. Teams avoid this by generating the spec from the code (with Zod schemas, as the `validation` lesson will show), or by testing the real responses against the spec. For now, treat the file as part of the change: when you change a route, you change the contract in the same pull request.
+</Callout>
+
+## Testing by hand with Bruno
+
+curl is great for one request. For ten requests that depend on each other (create a todo, then read it, then delete it) you want a tool that remembers them. **Bruno** is a free, open-source API client for that job, and it is this course's choice for manual testing. Compared with Postman, its main difference is that a Bruno collection is **a folder of plain text files**. You commit it to your repository, review changes to it in pull requests, and nobody needs an account. (The Bruno walkthrough video in this lesson shows the app's screens; the steps below show what ends up on disk.)
+
+Install the desktop app from usebruno.com, choose **Create collection**, and open the folder. Bruno 4 saves new collections in its **OpenCollection YAML** format, one `.yml` file per request. Older collections use `.bru` files with a `bruno.json`, which Bruno still opens, so you will meet both. This is the collection for the todo API, stored in a `bruno/` folder next to `src/`:
+
+```text
+bruno/
+  opencollection.yml       the collection's name
+  environments/local.yml   variables per environment
+  list-todos.yml
+  create-todo.yml
+  mark-done.yml
+  delete-todo.yml
+  get-deleted-todo.yml
+```
+
+The **environment** file holds what changes between machines. Requests use it as `{{baseUrl}}`, so the same collection can point at your laptop, a test server or production:
+
+```yaml
+# bruno/environments/local.yml
+name: local
+variables:
+  - name: baseUrl
+    value: http://localhost:4200
+```
+
+Now the interesting request. It creates a todo, checks the answer, and stores the new id for the requests that follow:
+
+```yaml
+# bruno/create-todo.yml
+info:
+  name: Create todo
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/todos"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "title": "{{title}}"
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: before-request
+      code: |-
+        // a title that is different on every run (titles must be unique)
+        bru.setVar("title", "Todo " + Date.now());
+    - type: after-response
+      code: |-
+        bru.setVar("todoId", res.body.data.id);
+    - type: tests
+      code: |-
+        test("returns 201 and a Location header", function () {
+          expect(res.status).to.equal(201);
+          expect(res.headers["location"]).to.equal("/v1/todos/" + res.body.data.id);
+        });
+  assertions:
+    - expression: res.body.data.done
+      operator: eq
+      value: "false"
+
+settings:
+  encodeUrl: true
+```
+
+Four features are in this one file:
+
+- **Variables.** `{{baseUrl}}` comes from the environment, and `{{title}}` and `{{todoId}}` are **runtime variables** that scripts set with `bru.setVar`. The `before-request` script runs first and makes a new title each time (our API rejects duplicates, so a fixed title would give `409` on the second run).
+- **Request chaining.** The `after-response` script saves `res.body.data.id` as `todoId`, and `mark-done.yml` and `delete-todo.yml` use `{{todoId}}` in their URLs. The `seq` number decides the order in a run.
+- **Assertions.** A short list of checks (`res.status eq 200`) that needs no code.
+- **Tests.** Real JavaScript with `test` and `expect` (the Chai library) for anything an assertion cannot say, such as comparing the `Location` header to the new id.
+
+You run a request with the Send button, or the whole collection from the **Runner**. The same collection also runs without the app, which is how it becomes an automatic API test in a pipeline. Install the command line tool in the project and run it from the `bruno/` folder with the server running:
+
+```bash
+npm install --save-dev @usebruno/cli
+cd bruno && npx bru run --env local
+```
+
+```text
+list-todos (200 OK) - 14 ms
+Assertions
+   ✓ res.status: eq 200
+   ✓ res.body.data: isArray
+   ✓ res.body.meta.limit: eq 5
+create-todo (201 Created) - 8 ms
+Tests
+   ✓ returns 201 and a Location header
+Assertions
+   ✓ res.body.data.done: eq false
+mark-done (200 OK) - 2 ms
+Assertions
+   ✓ res.status: eq 200
+   ✓ res.body.data.done: eq true
+delete-todo (204 No Content) - 1 ms
+Assertions
+   ✓ res.status: eq 204
+get-deleted-todo (404 Not Found) - 2 ms
+Assertions
+   ✓ res.status: eq 404
+   ✓ res.body.error.code: eq NOT_FOUND
+
+Execution Summary: Status PASS, Requests 5 (5 Passed), Tests 1/1, Assertions 9/9
+```
+
+The runner names each request after its file and exits with an error code when anything fails, which is what a CI pipeline looks for (the `github-actions-ci` lesson). The last line is a shortened version of the summary table the tool prints.
+
+Bruno can also **import an OpenAPI file** to create all the requests for you, which is the quickest way to start on an API someone else documented. In the `testing-apis` lesson you will write the same kind of checks as Vitest and Supertest tests that run inside the codebase; Bruno is for exploring and for end-to-end checks against a running server.
+
+## Common mistakes
+
+- Hand-editing the OpenAPI file once and never again. A wrong spec is worse than none.
+- Describing only the `200` answer. Clients need the `400`, `404` and `409` answers more than the happy path.
+- Saving secrets (a real token) in a Bruno environment file you commit. Use a separate environment that is git-ignored, or Bruno's secret variables.
+- Running a Bruno collection without checking anything. A request that only "gets a response" tests nothing; add assertions.
+
+<Exercise title="Document the createdAfter filter">
+In `pagination-and-versioning` you added `?createdAfter=2026-10-20` to the list endpoint. Add it to `openapi.yaml` and make sure the file is still valid.
+
+<Solution>
+Add one more entry under the `parameters` of `GET /v1/todos`:
+
+```yaml
+- name: createdAfter
+  in: query
+  description: Only todos created after this date.
+  schema: { type: string, format: date }
+```
+
+Then run `npx @redocly/cli lint openapi.yaml` again. A new optional parameter is not a breaking change, so `info.version` can go from `1.0.0` to `1.1.0` (a minor version) while the URL stays `/v1`. The URL version is the major version of the contract; the `info.version` field tracks smaller changes inside it.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the spec">
+This spec describes `GET /v1/todos/{id}`. The linter reports one error and several warnings, and one more rule of the OpenAPI standard is broken without the linter saying so. Find the problems and fix the file.
+
+```yaml
+openapi: 3.1.0
+info:
+  title: Todo API
+  version: 1.0.0
+servers:
+  - url: http://localhost:4200
+security: []
+paths:
+  /v1/todos/{id}:
+    get:
+      summary: Get one todo
+      operationId: getTodo
+      parameters:
+        - name: id
+          in: path
+          schema: { type: integer }
+      responses:
+        "200":
+          description: The todo.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Todoo" }
+components:
+  schemas:
+    Todo:
+      type: object
+      properties:
+        id: { type: integer }
+```
+
+```text
+22:23  error    no-unresolved-refs      Can't resolve $ref
+17:7   warning  operation-4xx-response  Operation must have at least one `4XX` response.
+25:5   warning  no-unused-components    Component: "Todo" is never used.
+```
+
+(The linter also prints the `license` and `localhost` warnings you saw before, which are fine here.)
+
+<Solution>
+1. **The `$ref` has a typo.** `Todoo` does not exist, and the real schema is `Todo`. Fixing the typo also removes the "never used" warning, because `Todo` is now referenced.
+2. **There is no `4xx` response.** The operation can answer `404` (no such todo), so document it:
+
+   ```yaml
+   "404":
+     description: There is no todo with that id.
+   ```
+
+3. **The path parameter is missing `required: true`.** The OpenAPI standard says a parameter in the path must be marked required, because a URL cannot work without it. The linter did not report this one in my run, so a clean lint does not prove a spec is correct.
+
+```yaml
+parameters:
+  - name: id
+    in: path
+    required: true
+    schema: { type: integer }
+```
+
+With all three changes the file validates, with only the two style warnings left.
+</Solution>
+</Exercise>
+
+<Exercise title="Check an error with Bruno">
+Without clicking in the app, write the file `bruno/missing-title.yml` that sends `POST /v1/todos` with an empty body object `{}` and checks that the answer is `400` with the error code `BAD_REQUEST` and `details.field` equal to `title`. Run the whole collection with the command line and confirm every request passes.
+
+<Solution>
+```yaml
+# bruno/missing-title.yml
+info:
+  name: Create todo without title
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: "{{baseUrl}}/v1/todos"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {}
+  auth: inherit
+
+runtime:
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "400"
+    - expression: res.body.error.code
+      operator: eq
+      value: BAD_REQUEST
+    - expression: res.body.error.details.field
+      operator: eq
+      value: title
+
+settings:
+  encodeUrl: true
+```
+
+```bash
+cd bruno && npx bru run --env local
+```
+
+The Content-Type header matters: without it the API answers `415` before it ever checks the body, and the assertion on `400` would fail. Because this file has the highest `seq`, it runs last. An error case is worth a test as much as the happy path, since clients depend on the error shape.
+</Solution>
+</Exercise>

@@ -1,0 +1,262 @@
+---
+title: Files & Paths
+summary: Read, write and organise files with fs/promises, build safe paths with node:path, and handle file errors by their code.
+order: 3
+takeaways:
+  - Use `node:fs/promises` with `await` in new code, and use `*Sync` functions only in start-up scripts.
+  - Build file paths with `node:path` and `import.meta.dirname`, because a relative path like `data.json` depends on where you started the program.
+  - Failed file calls throw errors with a `code` such as `ENOENT` (not found), which you check instead of testing for existence first.
+  - Without an encoding `readFile` gives a Buffer of raw bytes, and `writeFile` replaces the whole file.
+  - Write to a temporary file and then `rename` it, so a crash never leaves half a file behind.
+videos:
+  - title: "Node.js FS Module with Promises: Write, Read, Update & Delete Files Easily"
+    channel: "Thapa Technical"
+    duration: "19:39"
+    url: https://www.youtube.com/watch?v=A1vr8vtTHyk
+docs:
+  - title: "Node.js — File system"
+    url: https://nodejs.org/api/fs.html
+  - title: "Node.js — Path"
+    url: https://nodejs.org/api/path.html
+---
+
+Almost every backend touches files: config, uploads, logs, exports, and the JSON "database" you will use in the first projects. Knowing how to build a path that works from any folder, and how to handle a missing file properly, saves you from the most common "works on my machine" bugs. The next lesson, `streams`, uses these calls to handle files too big to load at once. This lesson was written for Node 24 and builds on `node-runtime` and `node-event-loop`, where you saw that `readFileSync` blocks the loop and `readFile` does not.
+
+## Three flavours of the fs module
+
+The `node:fs` module comes in three styles for the same operations:
+
+```js
+import { readFileSync } from "node:fs";         // 1. sync: blocks the event loop
+import { readFile } from "node:fs";             // 2. callbacks: the old style
+import { readFile } from "node:fs/promises";    // 3. promises: use this one
+```
+
+Use the promise version in new code. It works with `await`, `try`/`catch` and `Promise.all`, like everything else in modern JavaScript. Callbacks only matter when you read older code. The `*Sync` functions are fine for a script that runs once at start-up, never inside a request handler (you saw why in the event loop lesson).
+
+## Paths: where is this file?
+
+A path is a string, but building it with `+` or template strings breaks on Windows (which uses `\`) and gives wrong results around `..`. Use `node:path`:
+
+```js
+// paths.mjs
+import path from "node:path";
+
+path.join("data", "notes", "..", "todo.txt");        // "data/todo.txt"
+path.resolve("data", "todo.txt");                    // absolute: <current folder>/data/todo.txt
+path.basename("/srv/app/photo.final.png");           // "photo.final.png"
+path.basename("/srv/app/photo.final.png", ".png");   // "photo.final"
+path.extname("/srv/app/photo.final.png");            // ".png"
+path.dirname("/srv/app/photo.final.png");            // "/srv/app"
+```
+
+`join` glues pieces together and cleans up `..`. `resolve` does the same but always returns an **absolute** path, and a piece that starts with `/` restarts the path: `path.resolve("/app", "/tmp", "x.txt")` is `/tmp/x.txt`, while `path.join("/app", "/tmp", "x.txt")` is `/app/tmp/x.txt`.
+
+### Relative paths depend on where you started
+
+A relative path such as `"data.json"` is resolved against the **current working directory** (`process.cwd()`), which is the folder your terminal was in when you ran `node`, not the folder of your script:
+
+```js
+// cwd-trap.mjs (data.json sits next to this file)
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
+const bad = "data.json";
+const good = path.join(import.meta.dirname, "data.json");   // folder of this file
+```
+
+Running `node cwd-trap.mjs` inside the folder reads both. Running it from the parent folder with `node fs-and-streams/cwd-trap.mjs` reads `good` but fails on `bad` with `ENOENT`. `import.meta.dirname` and `import.meta.filename` (available in ES modules since Node 20.11) give the folder and path of the current file. In CommonJS the same values are called `__dirname` and `__filename`. Use them for files that belong to your project, and `process.cwd()` only when the user is meant to choose (a command line tool).
+
+<Callout type="warning" title="Never join a user's input onto a path directly">
+If a request says `?file=../../.env` and you do `path.join(uploadsDir, req.query.file)`, the user reads files outside your folder. This is called path traversal. The `security` lesson covers the fix; for now, remember never to trust a file name that came from outside.
+</Callout>
+
+## Reading and writing files
+
+```js
+// basics.mjs
+import { readFile, writeFile, appendFile, mkdir, readdir, stat, rename, rm } from "node:fs/promises";
+import path from "node:path";
+
+const dir = path.join(import.meta.dirname, "tmp-notes");
+await mkdir(dir, { recursive: true });         // no error if it exists, creates parents too
+
+const file = path.join(dir, "todo.txt");
+await writeFile(file, "buy milk\n");           // creates the file, or replaces its content
+await appendFile(file, "write lesson\n");      // adds to the end
+
+const text = await readFile(file, "utf8");     // a string
+const bytes = await readFile(file);            // no encoding: a Buffer (raw bytes)
+console.log(text);                             // buy milk, write lesson
+console.log(bytes.length);                     // 22
+
+const info = await stat(file);
+console.log(info.size, info.isFile(), info.isDirectory());   // 22 true false
+
+await rename(file, path.join(dir, "done.txt"));              // also used to move files
+console.log(await readdir(dir));                             // [ 'done.txt' ]
+await rm(dir, { recursive: true, force: true });             // delete the folder and everything in it
+```
+
+Without an encoding, `readFile` gives a **Buffer**: an array of bytes. Pass `"utf8"` for text. For images, PDFs and other binary files, keep the Buffer.
+
+`writeFile` **replaces** the whole file, so `writeFile(file, "x")` on an existing file throws its old content away. Use `appendFile`, or the option `{ flag: "wx" }`, which fails if the file already exists. `rm` is the only call that deletes (there is no undo and no trash), so check the path before you pass `recursive: true`.
+
+`readdir` returns names only. Add `{ withFileTypes: true }` to get objects with `isFile()` and `isDirectory()`, or `{ recursive: true }` to list the whole tree (`[ 'a', 'y.txt', 'a/b', 'a/b/x.txt' ]`).
+
+## Errors: check the code, don't check first
+
+When a file call fails, the error has a `code`:
+
+```js
+try {
+  await readFile(path.join(dir, "missing.txt"), "utf8");
+} catch (err) {
+  console.log(err.code);      // "ENOENT"
+  console.log(err.message);   // ENOENT: no such file or directory, open '/.../missing.txt'
+}
+```
+
+The codes you will meet most: `ENOENT` (no such file or folder), `EEXIST` (already exists), `EACCES` (no permission), `EISDIR` (it is a folder), `ENOTEMPTY` (folder is not empty). A common mistake is to ask "does it exist?" and then read it:
+
+```js
+// Wrong: the file can disappear between the two lines (a race condition)
+if (await exists(file)) {
+  const text = await readFile(file, "utf8");
+}
+
+// Right: just try, and handle the one error you expect
+try {
+  const text = await readFile(file, "utf8");
+} catch (err) {
+  if (err.code !== "ENOENT") throw err;   // re-throw anything unexpected
+}
+```
+
+## A small JSON store
+
+Until the databases module, a JSON file is a fine place to keep data. Handle a missing file as "no data yet", and let every other error (such as a broken JSON file) reach the caller:
+
+```js
+// json-store.mjs
+import { readFile, writeFile, rename } from "node:fs/promises";
+import path from "node:path";
+
+const file = path.join(import.meta.dirname, "tasks.json");
+
+export async function loadTasks() {
+  try {
+    return JSON.parse(await readFile(file, "utf8"));
+  } catch (err) {
+    if (err.code === "ENOENT") return [];   // first run: no file yet
+    throw err;                              // anything else is a real problem
+  }
+}
+
+export async function saveTasks(tasks) {
+  const temp = `${file}.tmp`;
+  await writeFile(temp, JSON.stringify(tasks, null, 2));
+  await rename(temp, file);                 // swap in the finished file in one step
+}
+```
+
+Writing to a temporary file and then renaming it matters: if the process crashes halfway through `writeFile`, the real file is still the old, complete one. Writing straight into `tasks.json` could leave half a file behind. This store still has a weakness, which is that two requests saving at the same moment overwrite each other. That is one reason real apps use a database.
+
+## Common mistakes
+
+- Using `readFileSync` in a request handler instead of `readFile` with `await`.
+- Using a relative path like `"data.json"` and having it fail when the program starts from another folder.
+- Checking whether a file exists before reading it, instead of handling `ENOENT`.
+- Calling `writeFile` on an existing file and silently throwing its content away.
+- Catching every error and treating it as "file not found", which hides broken JSON and permission problems.
+
+<Exercise title="Predict the paths">
+Without running it, write what each line prints.
+
+```js
+import path from "node:path";
+console.log(path.join("/app", "data", "..", "logs", "app.log"));
+console.log(path.basename("/app/logs/app.log", ".log"));
+console.log(path.extname("archive.tar.gz"));
+console.log(path.resolve("/app", "/tmp", "x.txt"));
+console.log(path.join("/app", "/tmp", "x.txt"));
+```
+
+<Solution>
+```text
+/app/logs/app.log
+app
+.gz
+/tmp/x.txt
+/app/tmp/x.txt
+```
+
+`join` cancels `data` with `..`. `basename` with a second argument removes that ending. `extname` only returns the last extension. `resolve` treats a piece starting with `/` as a new root, so everything before `/tmp` is dropped, while `join` simply glues the pieces together.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the config loader">
+This function breaks when the server is started from another folder, and it hides real problems. Fix both: read `config.json` from the folder of this file, return `{ port: 3000 }` only when the file does not exist, and let every other error (such as broken JSON) reach the caller.
+
+```js
+import { readFile } from "node:fs/promises";
+
+export async function readConfig() {
+  try {
+    return JSON.parse(await readFile("config.json", "utf8"));
+  } catch {
+    return { port: 3000 };
+  }
+}
+```
+
+<Solution>
+```js
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
+const configPath = path.join(import.meta.dirname, "config.json");
+
+export async function readConfig() {
+  try {
+    return JSON.parse(await readFile(configPath, "utf8"));
+  } catch (err) {
+    if (err.code === "ENOENT") return { port: 3000 };
+    throw err;
+  }
+}
+```
+
+With a missing file this returns `{ port: 3000 }`. With the file containing `{bad`, it throws a `SyntaxError` instead of quietly using the default, so you hear about the typo. The original `catch {}` treated every failure, including a typo in the JSON, as "no config".
+</Solution>
+</Exercise>
+
+<Exercise title="Find the biggest files">
+Write `largestFiles(dir, count)` that returns the `count` biggest files anywhere inside `dir` (including sub-folders), as objects `{ file, size }` with `file` relative to `dir`, biggest first. Ignore folders.
+
+<Solution>
+```js
+import { readdir, stat } from "node:fs/promises";
+import path from "node:path";
+
+export async function largestFiles(dir, count = 3) {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+  const files = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile())
+      .map(async (entry) => {
+        const full = path.join(entry.parentPath, entry.name);
+        return { file: path.relative(dir, full), size: (await stat(full)).size };
+      }),
+  );
+  return files.sort((a, b) => b.size - a.size).slice(0, count);
+}
+
+// with dd/a.txt (5 bytes), dd/c.txt (2 bytes) and dd/sub/b.txt (13 bytes):
+console.log(await largestFiles("dd", 2));
+// [ { file: 'sub/b.txt', size: 13 }, { file: 'a.txt', size: 5 } ]
+```
+
+`readdir` with `recursive: true` lists the whole tree, and `withFileTypes` lets you skip folders without a `stat` call. Each entry knows its folder in `parentPath`, so `path.join` gives the full path. `Promise.all` runs all the `stat` calls at the same time instead of one after the other.
+</Solution>
+</Exercise>
