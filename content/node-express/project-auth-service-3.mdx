@@ -1,0 +1,557 @@
+---
+title: "Project: Auth Service, Part 3"
+summary: "Write a Vitest and Supertest suite for every security rule of the auth service, then break the code on purpose to find out which tests really notice."
+order: 31
+takeaways:
+  - "Test security rules from the outside, such as 'the hash never appears in any response' and 'a copied cookie is dead after logout', because those are the promises clients rely on."
+  - "A cookie jar in a test client expires and sends cookies by itself, so a test about expiry or a copied cookie must set the `Cookie` header by hand."
+  - "Fake only `Date` when a test needs a known time, test both sides of the boundary, and put the real clock back after every test."
+  - "Create the accounts a test needs directly in the store and log in through the API, so each test stays fast and shows only the behaviour it checks."
+  - "A test you have never seen fail may be unable to fail: for every rule, remove the code that makes it true and check that the right test goes red."
+  - "Some rules, such as equal timing for known and unknown emails, cannot be tested well; write down which ones you check by hand."
+videos: []
+docs:
+  - title: "Vitest — Getting Started"
+    url: https://vitest.dev/guide/
+  - title: "Vitest — Mocking time"
+    url: https://vitest.dev/guide/mocking/timers
+  - title: "Supertest"
+    url: https://github.com/ladjs/supertest
+  - title: "OWASP — Session Management Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
+---
+
+Security code that nobody tested is code that nobody knows works. This last part writes the suite for the auth service, 34 tests that check each rule from Part 1 from the outside, the way a client would, and then does the exercise that matters most in testing: breaking the code on purpose to check that the tests can fail. Same versions as before, with Vitest 5.0 and Supertest 7.3; every file was run in a sandbox project.
+
+## Where you are
+
+You have the finished service from Parts 1 and 2: `src/config.ts`, `errors.ts`, `errorHandler.ts`, `validate.ts`, `schemas.ts`, `users.ts`, `sessions.ts`, `express.d.ts`, `middleware.ts`, `routes/auth.ts`, `routes/users.ts`, `seedAdmin.ts`, `app.ts` and `server.ts`. Your `package.json` already has `vitest`, `supertest` and `scripts.test` from Part 1, and `vitest.config.ts` came from the Notes API.
+
+## Stage 6: Tests
+
+The tests are the proof. Create `test/setup.ts`, `test/helpers.ts` and four test files. Setup empties the users and the sessions before **every** test and restores the real clock after every test. The helpers give you `makeUser(email, role)` (creates the account directly, which is faster than going through sign-up), `loginAs(email)` (a Supertest **agent**, which keeps cookies like a browser tab) and `sessionCookie(res)` (the raw `Set-Cookie` of a response).
+
+What each file must check:
+
+- `test/auth.test.ts`: **sign-up** (the response, a cleaned email, no hash or password anywhere in the body, a stored hash that starts with `$argon2id$` and does not contain the password, a `role` from the client ignored, a taken email in other letters refused with 409, a table of bad inputs); **login** (the cookie flags, the same answer for a wrong password and an unknown email and no cookie on failure, a 400 for a missing field, the old session ending when the same browser logs in again); **the session** (`/me` with no cookie, garbage and an empty value, logout clearing the cookie and killing a copy of it, logout needing a login, expiry after exactly a week, two browsers having two sessions).
+- `test/roles.test.ts`: 401 / 403 / 200 on the list, a promotion working on the next request with the same cookie, a demotion, a normal user changing roles (403, own role included), an admin changing their own role (403), and the 404 and 400 cases.
+- `test/password.test.ts`: change-password (401 without login, 403 for a wrong current password with nothing changed, a table of 400s, success: this browser stays in, another one is out, the old password stops working and the new one works) and `logout-all` (ends all sessions of the user and nobody else's).
+- `test/errors.test.ts`: the JSON 404 and broken JSON.
+
+For the **expiry test**, set the clock with `vi.useFakeTimers({ toFake: ["Date"] })` and send the cookie **by hand** with `.set("Cookie", ...)`. Think about why before you read the solution.
+
+<Solution>
+
+```ts
+// test/setup.ts
+import { afterEach, beforeEach, vi } from "vitest";
+import { resetSessions } from "../src/sessions.ts";
+import { resetUsers } from "../src/users.ts";
+
+// every test starts from no users, no sessions and the real clock
+beforeEach(() => {
+  resetUsers();
+  resetSessions();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+```
+
+```ts
+// test/helpers.ts
+import request from "supertest";
+import { app } from "../src/app.ts";
+import type { Role } from "../src/schemas.ts";
+import { createUser } from "../src/users.ts";
+
+export const PASSWORD = "correct horse battery";
+
+// creates the account directly: faster than going through POST /signup every time
+export function makeUser(email: string, role: Role = "user") {
+  return createUser(email, PASSWORD, role);
+}
+
+// an agent is a Supertest client that keeps cookies between requests, like a browser tab
+export async function loginAs(email: string, password = PASSWORD) {
+  const agent = request.agent(app);
+  await agent.post("/v1/auth/login").send({ email, password }).expect(200);
+  return agent;
+}
+
+// the raw Set-Cookie value of a response, e.g. "sid=abc; Max-Age=604800; Path=/; ..."
+export function sessionCookie(res: { headers: Record<string, unknown> }): string {
+  const cookies = res.headers["set-cookie"] as string[] | undefined;
+  const cookie = cookies?.find((c) => c.startsWith("sid="));
+  if (!cookie) throw new Error("the response set no sid cookie");
+  return cookie;
+}
+```
+
+```ts
+// test/auth.test.ts
+import request from "supertest";
+import { describe, expect, it, vi } from "vitest";
+import { app } from "../src/app.ts";
+import { SESSION_TTL_MS } from "../src/sessions.ts";
+import { findUserByEmail } from "../src/users.ts";
+import { loginAs, makeUser, PASSWORD, sessionCookie } from "./helpers.ts";
+
+describe("sign up", () => {
+  it("creates a user, cleans the email and never shows the hash", async () => {
+    const res = await request(app)
+      .post("/v1/auth/signup")
+      .send({ email: "  Ada@Example.com ", password: PASSWORD });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data).toEqual({
+      id: expect.any(String),
+      email: "ada@example.com",
+      role: "user",
+      createdAt: expect.any(String),
+    });
+    expect(JSON.stringify(res.body)).not.toMatch(/hash|argon2|correct horse/);
+  });
+
+  it("stores a hash, not the password", async () => {
+    await request(app)
+      .post("/v1/auth/signup")
+      .send({ email: "ada@example.com", password: PASSWORD });
+
+    const stored = findUserByEmail("ada@example.com")!;
+    expect(stored.passwordHash).toMatch(/^\$argon2id\$/);
+    expect(stored.passwordHash).not.toContain(PASSWORD);
+  });
+
+  it("ignores a role sent by the client", async () => {
+    const res = await request(app)
+      .post("/v1/auth/signup")
+      .send({ email: "ada@example.com", password: PASSWORD, role: "admin" });
+
+    expect(res.body.data.role).toBe("user");
+  });
+
+  it("refuses an email that is taken, whatever its letter case", async () => {
+    await makeUser("ada@example.com");
+
+    const res = await request(app)
+      .post("/v1/auth/signup")
+      .send({ email: "ADA@example.com", password: PASSWORD });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("CONFLICT");
+  });
+
+  it.each([
+    ["no email", { password: PASSWORD }, "email is required"],
+    [
+      "an email that is not one",
+      { email: "ada", password: PASSWORD },
+      "email must be a valid address",
+    ],
+    ["no password", { email: "ada@example.com" }, "password is required"],
+    [
+      "a password of 7 characters",
+      { email: "ada@example.com", password: "1234567" },
+      "password must be at least 8 characters",
+    ],
+    [
+      "a password of 129 characters",
+      { email: "ada@example.com", password: "x".repeat(129) },
+      "password is at most 128 characters",
+    ],
+  ])("rejects %s with 400", async (_name, body, message) => {
+    const res = await request(app).post("/v1/auth/signup").send(body);
+
+    expect(res.status).toBe(400);
+    expect(
+      res.body.error.details.issues.map((i: { message: string }) => i.message),
+    ).toContain(message);
+  });
+});
+
+describe("log in", () => {
+  it("sets an httpOnly session cookie and returns the user", async () => {
+    await makeUser("ada@example.com");
+
+    const res = await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "Ada@example.com", password: PASSWORD });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.email).toBe("ada@example.com");
+    const cookie = sessionCookie(res);
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).toContain(`Max-Age=${SESSION_TTL_MS / 1000}`);
+    expect(JSON.stringify(res.body)).not.toContain(cookie.split(";")[0].slice(4)); // the id is not in the body
+  });
+
+  it("answers a wrong password and an unknown email in exactly the same way", async () => {
+    await makeUser("ada@example.com");
+
+    const wrongPassword = await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "ada@example.com", password: "not the password" });
+    const unknownEmail = await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "nobody@example.com", password: "not the password" });
+
+    expect(wrongPassword.status).toBe(401);
+    expect(unknownEmail.status).toBe(401);
+    expect(unknownEmail.body).toEqual(wrongPassword.body);
+    expect(wrongPassword.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("answers 400 when the email or password is missing", async () => {
+    const res = await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "ada@example.com" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("ends the old session when the same browser logs in again", async () => {
+    await makeUser("ada@example.com");
+    const first = await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "ada@example.com", password: PASSWORD });
+    const oldCookie = sessionCookie(first).split(";")[0];
+
+    const second = await request(app)
+      .post("/v1/auth/login")
+      .set("Cookie", oldCookie)
+      .send({ email: "ada@example.com", password: PASSWORD });
+    const newCookie = sessionCookie(second).split(";")[0];
+
+    expect(newCookie).not.toBe(oldCookie);
+    await request(app).get("/v1/auth/me").set("Cookie", oldCookie).expect(401);
+    await request(app).get("/v1/auth/me").set("Cookie", newCookie).expect(200);
+  });
+});
+
+describe("the session", () => {
+  it("GET /me answers 401 without a cookie, with garbage and with an unknown id", async () => {
+    await request(app).get("/v1/auth/me").expect(401);
+    await request(app).get("/v1/auth/me").set("Cookie", "sid=garbage").expect(401);
+    await request(app).get("/v1/auth/me").set("Cookie", "sid=").expect(401);
+  });
+
+  it("GET /me returns the logged-in user", async () => {
+    const ada = await makeUser("ada@example.com");
+    const agent = await loginAs("ada@example.com");
+
+    const res = await agent.get("/v1/auth/me");
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.id).toBe(ada.id);
+  });
+
+  it("logout answers 204, clears the cookie, and the old cookie is dead on the server", async () => {
+    await makeUser("ada@example.com");
+    const login = await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "ada@example.com", password: PASSWORD });
+    const cookie = sessionCookie(login).split(";")[0];
+
+    const out = await request(app).post("/v1/auth/logout").set("Cookie", cookie);
+
+    expect(out.status).toBe(204);
+    expect(sessionCookie(out)).toMatch(/^sid=;/);
+    // a copied cookie must not work again: the session is gone on the server, not just in the browser
+    await request(app).get("/v1/auth/me").set("Cookie", cookie).expect(401);
+  });
+
+  it("logout needs a login", async () => {
+    await request(app).post("/v1/auth/logout").expect(401);
+  });
+
+  it("expires after a week, and not a second earlier", async () => {
+    await makeUser("ada@example.com");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-01T09:00:00Z"));
+    const login = await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "ada@example.com", password: PASSWORD });
+    // the cookie is sent by hand: a test agent's cookie jar would drop an expired cookie
+    // by itself, and the check on the server would never run
+    const cookie = sessionCookie(login).split(";")[0];
+
+    vi.setSystemTime(Date.now() + SESSION_TTL_MS - 1000);
+    await request(app).get("/v1/auth/me").set("Cookie", cookie).expect(200);
+
+    vi.setSystemTime(Date.now() + 2000);
+    await request(app).get("/v1/auth/me").set("Cookie", cookie).expect(401);
+  });
+
+  it("two browsers have two sessions: logging out of one leaves the other", async () => {
+    await makeUser("ada@example.com");
+    const laptop = await loginAs("ada@example.com");
+    const phone = await loginAs("ada@example.com");
+
+    await laptop.post("/v1/auth/logout").expect(204);
+
+    await laptop.get("/v1/auth/me").expect(401);
+    await phone.get("/v1/auth/me").expect(200);
+  });
+});
+```
+
+```ts
+// test/roles.test.ts
+import request from "supertest";
+import { describe, expect, it } from "vitest";
+import { app } from "../src/app.ts";
+import { loginAs, makeUser } from "./helpers.ts";
+
+describe("GET /v1/users", () => {
+  it("answers 401 to a stranger, 403 to a user and 200 to an admin", async () => {
+    await makeUser("ada@example.com");
+    await makeUser("root@example.com", "admin");
+    const user = await loginAs("ada@example.com");
+    const admin = await loginAs("root@example.com");
+
+    await request(app).get("/v1/users").expect(401);
+    await user.get("/v1/users").expect(403);
+    const res = await admin.get("/v1/users");
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((u: { email: string }) => u.email)).toEqual([
+      "ada@example.com",
+      "root@example.com",
+    ]);
+    expect(JSON.stringify(res.body)).not.toContain("passwordHash");
+  });
+});
+
+describe("PATCH /v1/users/:id", () => {
+  it("lets an admin promote a user, who has the new power on the very next request", async () => {
+    const ada = await makeUser("ada@example.com");
+    await makeUser("root@example.com", "admin");
+    const user = await loginAs("ada@example.com");
+    const admin = await loginAs("root@example.com");
+    await user.get("/v1/users").expect(403);
+
+    const res = await admin.patch(`/v1/users/${ada.id}`).send({ role: "admin" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.role).toBe("admin");
+    await user.get("/v1/users").expect(200); // same cookie, new role
+  });
+
+  it("lets an admin demote another admin", async () => {
+    const bob = await makeUser("bob@example.com", "admin");
+    await makeUser("root@example.com", "admin");
+    const bobAgent = await loginAs("bob@example.com");
+    const admin = await loginAs("root@example.com");
+
+    await admin.patch(`/v1/users/${bob.id}`).send({ role: "user" }).expect(200);
+
+    await bobAgent.get("/v1/users").expect(403);
+  });
+
+  it("does not let a user change anyone's role, not even their own", async () => {
+    const ada = await makeUser("ada@example.com");
+    const user = await loginAs("ada@example.com");
+
+    await user.patch(`/v1/users/${ada.id}`).send({ role: "admin" }).expect(403);
+
+    const me = await user.get("/v1/auth/me");
+    expect(me.body.data.role).toBe("user");
+  });
+
+  it("does not let an admin change their own role", async () => {
+    const root = await makeUser("root@example.com", "admin");
+    const admin = await loginAs("root@example.com");
+
+    const res = await admin.patch(`/v1/users/${root.id}`).send({ role: "user" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.message).toBe("You cannot change your own role");
+  });
+
+  it("answers 404 for an unknown user and 400 for a bad id or a bad role", async () => {
+    const ada = await makeUser("ada@example.com");
+    await makeUser("root@example.com", "admin");
+    const admin = await loginAs("root@example.com");
+
+    await admin
+      .patch("/v1/users/3f2b8c1e-5d3a-4b7e-9c1d-2a4e6f8a0b1c")
+      .send({ role: "user" })
+      .expect(404);
+    await admin.patch("/v1/users/abc").send({ role: "user" }).expect(400);
+    await admin.patch(`/v1/users/${ada.id}`).send({ role: "superuser" }).expect(400);
+    await admin.patch(`/v1/users/${ada.id}`).send({}).expect(400);
+  });
+});
+```
+
+```ts
+// test/password.test.ts
+import request from "supertest";
+import { describe, expect, it } from "vitest";
+import { app } from "../src/app.ts";
+import { loginAs, makeUser, PASSWORD } from "./helpers.ts";
+
+const NEW_PASSWORD = "a brand new password";
+
+describe("POST /v1/auth/change-password", () => {
+  it("needs a login", async () => {
+    await request(app)
+      .post("/v1/auth/change-password")
+      .send({ currentPassword: PASSWORD, newPassword: NEW_PASSWORD })
+      .expect(401);
+  });
+
+  it("refuses a wrong current password with 403 and changes nothing", async () => {
+    await makeUser("ada@example.com");
+    const agent = await loginAs("ada@example.com");
+
+    const res = await agent
+      .post("/v1/auth/change-password")
+      .send({ currentPassword: "not my password", newPassword: NEW_PASSWORD });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe("WRONG_PASSWORD");
+    await loginAs("ada@example.com", PASSWORD); // the old password still works
+  });
+
+  it.each([
+    [
+      "a new password that is too short",
+      { currentPassword: PASSWORD, newPassword: "short" },
+    ],
+    ["the same password again", { currentPassword: PASSWORD, newPassword: PASSWORD }],
+    ["a missing current password", { newPassword: NEW_PASSWORD }],
+  ])("rejects %s with 400", async (_name, body) => {
+    await makeUser("ada@example.com");
+    const agent = await loginAs("ada@example.com");
+
+    await agent.post("/v1/auth/change-password").send(body).expect(400);
+  });
+
+  it("switches to the new password, keeps this session and ends the others", async () => {
+    await makeUser("ada@example.com");
+    const laptop = await loginAs("ada@example.com");
+    const phone = await loginAs("ada@example.com");
+
+    await laptop
+      .post("/v1/auth/change-password")
+      .send({ currentPassword: PASSWORD, newPassword: NEW_PASSWORD })
+      .expect(204);
+
+    await laptop.get("/v1/auth/me").expect(200); // the browser that changed it stays in
+    await phone.get("/v1/auth/me").expect(401); // anyone else is out
+    await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "ada@example.com", password: PASSWORD })
+      .expect(401);
+    await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "ada@example.com", password: NEW_PASSWORD })
+      .expect(200);
+  });
+});
+
+describe("POST /v1/auth/logout-all", () => {
+  it("ends every session of the user, including this one, and nobody else's", async () => {
+    await makeUser("ada@example.com");
+    await makeUser("bob@example.com");
+    const laptop = await loginAs("ada@example.com");
+    const phone = await loginAs("ada@example.com");
+    const bob = await loginAs("bob@example.com");
+
+    await laptop.post("/v1/auth/logout-all").expect(204);
+
+    await laptop.get("/v1/auth/me").expect(401);
+    await phone.get("/v1/auth/me").expect(401);
+    await bob.get("/v1/auth/me").expect(200);
+  });
+});
+```
+
+```ts
+// test/errors.test.ts
+import request from "supertest";
+import { expect, it } from "vitest";
+import { app } from "../src/app.ts";
+
+it("answers an unknown URL with the JSON error shape", async () => {
+  const res = await request(app).get("/v1/nope");
+
+  expect(res.status).toBe(404);
+  expect(res.body.error).toEqual({ code: "NOT_FOUND", message: "Cannot GET /v1/nope" });
+});
+
+it("answers broken JSON with 400 INVALID_JSON", async () => {
+  const res = await request(app).post("/v1/auth/login").type("json").send("{ not json");
+
+  expect(res.status).toBe(400);
+  expect(res.body.error.code).toBe("INVALID_JSON");
+});
+```
+
+Run `npx vitest run`:
+
+```text
+ Test Files  4 passed (4)
+      Tests  34 passed (34)
+   Duration  2.09s
+```
+
+The suite takes about two seconds, and most of that is argon2 doing its job: every sign-up and every login hashes or checks a password for about 35 ms. Notes on the tests:
+
+- **The expiry test sends the cookie by hand.** My first version used an agent, and it passed even when I removed the expiry check from the server. The reason: the agent's cookie jar knows about `Max-Age` too, and under the fake clock it dropped the expired cookie **itself**, so the request arrived with no cookie and got a 401 for the wrong reason. The check on the server never ran. Sending the `Cookie` header yourself takes the jar out of the question.
+- The **"copied cookie"** tests (logout, login again) also use the raw header, for the same reason: they model a thief who has the string, not a browser that the server could tell to forget it.
+- `expect(JSON.stringify(res.body)).not.toMatch(/hash|argon2|correct horse/)` is a test about something that must **never** happen. Such tests are cheap and catch the day somebody returns `user` instead of `toPublic(user)`.
+- The unknown-email and wrong-password test compares the two whole responses with `toEqual`. If someone later changes one message, the test fails and tells them why it matters.
+- Nothing here tests that unknown-email logins take as long as wrong-password logins. Timing is hard to test without being flaky, and the dummy hash is a design rule that the tests cannot see. Be honest about that kind of gap in a README.
+
+</Solution>
+
+## Break it on purpose
+
+Make each change below in `src/`, run `npx vitest run`, check that the named tests go red, and undo it. These are the results in the sandbox:
+
+| Break this | Result |
+| ---------- | ------ |
+| `requireRole`: let every role through | Three tests fail (the list, the promotion, the demotion) |
+| `login`: do not destroy the old session | The "ends the old session" test fails |
+| `toPublic`: add the hash back | Two tests fail (sign-up, and the admin list) |
+| `PATCH /users/:id`: remove the own-role check | The "admin changes their own role" test fails |
+| `change-password`: do not destroy the other sessions | The "switches to the new password" test fails |
+| `change-password`: accept any current password | The wrong-password test fails |
+| `logout-all`: do nothing | The `logout-all` test fails |
+| `cookieOptions`: `httpOnly: false` | The cookie test fails |
+| `logout`: clear the cookie but keep the session | The "old cookie is dead on the server" test fails |
+| `signup`: pass `req.body.role` to `createUser` | The "ignores a role" test fails |
+| `emailSchema`: remove `.toLowerCase()` | Three tests fail (sign-up, login, the taken email) |
+| `usersRouter`: remove `requireRole("admin")` | Three tests fail |
+| `checkLogin`: return the user whatever the password | Two tests fail (the same-answer test, and change-password's old-password check) |
+| `getSession`: never expire a session | **No test failed** with the first suite, see below |
+
+The last row is the lesson. With the first version of the expiry test (a cookie-jar agent), the suite stayed green while sessions never expired, because the test client's jar threw the cookie away. Setting the cookie by hand fixed it: with that test, the same change fails exactly one test, `expires after a week, and not a second earlier`. A security rule without a test that can fail is a hope. Whenever you write a test for a rule, ask **what else could make this test pass**, here the client instead of the server.
+
+<Callout type="tip" title="Which rule is not on the list?">
+Two rules have no row: the dummy hash (timing) and the `Secure` flag in production (the suite runs with `NODE_ENV=test`). Decide how you would test each, or decide, as a team, that you will check them by hand and write that down.
+</Callout>
+
+## Stretch goals and checking your work
+
+- **Rate limits:** put the limiters from `security` on `login` (5 failed attempts per IP and account), on `signup` and on `change-password`. Switch them off in the test config with a `RATE_LIMIT` setting, and test the limit in one file, as in `testing-time-and-databases`.
+- **Origin check:** add the `requireTrustedOrigin` middleware from `security`, so a form on another site cannot make a logged-in browser call `logout-all` or `change-password`. Test it with a fake `Origin` header.
+- **Hash the session ids** before they go into the store, so a leaked store does not hand out working sessions.
+- **Lock out the last admin by accident:** an admin cannot demote themselves, but two admins can demote each other at the same moment. What stops you from ending up with no admin? Write the rule and a test.
+- **Password reset by email token:** a random, single-use token with a short life, stored as a hash, sent by a fake email function you can read in tests.
+- **Disable a user:** an admin route that sets `disabled`, rejects the login and ends all sessions of that user. Make sure `requireAuth` also refuses a disabled user whose cookie is still valid.
+- **Sessions in PostgreSQL:** when you reach the `databases` module, replace the `Map`s with tables and keep the same function names, so the routes and the tests do not change.
+
+Before calling the project done, run:
+
+```bash
+npx tsc
+npx vitest run
+```
+
+Both should finish without errors, with 34 tests passing. Push the project to a GitHub repository with a README that lists the endpoints, the rules from Part 1, how to start it with an admin, and the two gaps (timing and `Secure`) that the tests cannot see. This is your second Node portfolio piece, and the one that interviewers dig into: "how do you store passwords?", "what happens when I log out?", "what if my cookie is stolen?", "how do you make someone an admin?". You have an answer for each, and a test that proves it. The `fullstack-integration` module puts a React app in front of an API like this one.

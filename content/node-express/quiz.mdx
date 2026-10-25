@@ -1,0 +1,103 @@
+---
+title: "Node.js & Express Quiz"
+summary: "Check that you can explain how Node runs your code and build a validated, secure, tested Express API with sessions, roles and OAuth."
+order: 99
+quiz:
+  - question: "A route handler runs a CPU-heavy synchronous loop that takes three seconds. What happens to other users' requests during those three seconds?"
+    options:
+      - "They are served by other threads, because Node uses all CPU cores"
+      - "They wait, because JavaScript runs on one thread and the event loop cannot continue until the loop ends"
+      - "They fail at once with a `503` error"
+      - "Only requests to the same route wait"
+    answer: 1
+    explanation: "Your JavaScript runs on a single thread, so a long synchronous task blocks every request, whatever its route. Move heavy work to a worker thread or another process, or split it up."
+  - question: "Express runs your own error handler only for some of the functions below. Which one counts as an error-handling middleware?"
+    options:
+      - "`(req, res) => { ... }` registered first"
+      - "`(err, req, res) => { ... }` registered after the routes"
+      - "`(err, req, res, next) => { ... }` registered after the routes"
+      - "`(err, req, res, next) => { ... }` registered before the routes"
+    answer: 2
+    explanation: "Express recognises an error handler by its four parameters, and an error only travels forward to handlers registered later. With three parameters, or registered above the routes, you silently get the default HTML error page."
+  - question: "In Express 5, an `async` route handler awaits a database call that rejects. What happens?"
+    options:
+      - "The request hangs until it times out, so you need `try/catch` and `next(error)` in every handler"
+      - "Express calls `next(error)` for you, so your error middleware answers"
+      - "The Node process exits"
+      - "Express ignores the error and sends `200`"
+    answer: 1
+    explanation: "Express 5 handles rejected promises from handlers and middleware by passing the error on. In Express 4 the request hung, which is why older code wraps every handler in `asyncHandler`. A callback API that throws inside its own callback is still not caught."
+  - question: "A client has the todo `{ \"id\": 1, \"title\": \"Learn routes\", \"done\": false }` and wants to mark it as done, changing nothing else. Which request fits best?"
+    options:
+      - "`PUT /todos/1` with `{ \"done\": true }`"
+      - "`PATCH /todos/1` with `{ \"done\": true }`"
+      - "`POST /todos/1/done`"
+      - "`GET /todos/1?done=true`"
+    answer: 1
+    explanation: "`PATCH` merges the fields you send into the record. `PUT` means \"here is the complete new version\", so a body with a field missing is an error or resets it. A `GET` must never change anything."
+  - question: "You validate the query string `?done=false` with `z.coerce.boolean()`. What does the API receive?"
+    options:
+      - "`false`"
+      - "A `400` error, because `\"false\"` is not a boolean"
+      - "`undefined`"
+      - "`true`, because every non-empty string is truthy"
+    answer: 3
+    explanation: "`z.coerce.boolean()` calls `Boolean(value)`, and `Boolean(\"false\")` is `true`. For query flags use `z.stringbool()` and list the words you accept."
+  - question: "Why should a login route answer `Invalid email or password` for an unknown email and for a wrong password, and still verify a hash when the email is unknown?"
+    options:
+      - "Otherwise the response, or its timing, tells an attacker which emails have an account"
+      - "Because argon2 cannot hash an empty value"
+      - "Because Express 5 requires the same message for every `401`"
+      - "To make the session cookie shorter"
+    answer: 0
+    explanation: "Different messages, or an instant answer for unknown emails against about 40 ms for real ones, let an attacker build a list of real accounts. Verifying against a dummy hash makes both cases take the same time."
+  - question: "Ada's todo has id 1. Bob, who is logged in, sends `DELETE /v1/todos/1`. Which answer does the lesson recommend?"
+    options:
+      - "`200`, then delete it, because Bob is logged in"
+      - "`401`, because Bob must log in again"
+      - "`403`, so Bob knows he is not allowed"
+      - "`404`, the same answer as for a todo that does not exist, so Bob learns nothing about Ada's data"
+    answer: 3
+    explanation: "The check belongs on the server and compares the owner with `req.user`. Answering `404` for other people's records hides whether they exist. Skipping the ownership check is the classic broken object level authorization bug."
+  - question: "Your API sets `Access-Control-Allow-Origin` only for `https://app.example.com`. Does this stop an attacker from calling the API with `curl`?"
+    options:
+      - "Yes, the server refuses every other origin"
+      - "Yes, but only for `POST` requests"
+      - "No, CORS is a browser rule about which pages may read a response, and `curl` ignores it"
+      - "No, unless you also turn on `helmet`"
+    answer: 2
+    explanation: "CORS only changes what browsers let a page read. The real protection is authentication, authorization, the `Origin` check against CSRF, and rate limits."
+  - question: "In the OAuth flow \"Sign in with GitHub\", what is the `state` value for?"
+    options:
+      - "It tells GitHub which permissions you want"
+      - "It stores the user's session on GitHub's side"
+      - "It is a random value you save before the redirect and compare on return, so an attacker cannot make you finish a login they started"
+      - "It encrypts the authorization code"
+    answer: 2
+    explanation: "Without `state`, an attacker can send a victim a callback URL with the attacker's own code and sign the victim in to the attacker's account. PKCE adds a second guard that ties the code to the browser that asked for it."
+  - question: "All 24 of your tests pass. What is a good way to learn whether they would notice a real bug?"
+    options:
+      - "Run them a second time"
+      - "Break the code on purpose, for example make an ownership check always `true`, and see that a test fails"
+      - "Add more `console.log` lines"
+      - "Check that the tests run fast"
+    answer: 1
+    explanation: "A passing run says nothing about what the tests would catch. Breaking a rule on purpose proves that a test guards it, and a coverage report shows the lines that no test ran at all."
+---
+
+You have finished the Node.js & Express module. Everything here carries into the next ones: the databases lesson replaces the in-memory stores, and the full-stack lessons call this kind of API from React.
+
+## Ready to move on?
+
+Tick these off in your head. If you hesitate on one, reopen that lesson before moving on.
+
+- [ ] I can explain the event loop, why blocking it hurts every user, and when to use streams instead of reading a whole file
+- [ ] I can run TypeScript in Node, read configuration from the environment, and set up a dev workflow
+- [ ] I can build Express 5 routes with middleware, routers and one error handler that returns a consistent JSON error
+- [ ] I can design a REST API (resources, methods, status codes, pagination, versions) and describe it with OpenAPI
+- [ ] I can validate body, params, query and `process.env` with Zod, and avoid the coercion traps
+- [ ] I can hash passwords with argon2, keep users logged in with a cookie session, and protect routes by role and by ownership
+- [ ] I can explain CORS, CSRF, rate limits and the OAuth flow, and say which attack each one stops
+- [ ] I can write Vitest and Supertest tests that start from a clean state, and check that they can fail
+
+When the list feels solid, take the quiz below. It saves your best score in this browser, and you can retake it as often as you like.

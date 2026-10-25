@@ -1,0 +1,347 @@
+---
+title: File Uploads with Multer
+summary: Accept file uploads safely in Express with multer - random names, size limits, checking the real file type, access control, and serving files back without opening a security hole.
+order: 22
+takeaways:
+  - "Files arrive as `multipart/form-data`, which `express.json()` ignores; multer parses it and streams each file to disk (or memory) for you."
+  - "Everything about an uploaded file that the client supplies, its name, its type header and its extension, is untrusted: save under a random name and check the real type by reading the first bytes."
+  - "Set `limits` (size, number of files, number of fields) on every multer instance, and check who may upload before multer writes anything."
+  - "Serve uploads through a route that checks access, with the stored content type, a download disposition and `nosniff`, not as a public static folder."
+  - "A multipart `POST` is a simple request with no preflight, so a cookie-based API still needs its CSRF check."
+  - "On a hosting platform the disk is temporary, so real systems keep files in object storage and only the metadata in the database."
+videos:
+  - title: "How to Upload Files in Node.js Using Express and Multer"
+    channel: "James Q Quick"
+    duration: "6:52"
+    url: https://www.youtube.com/watch?v=i8yxx6V9UdM
+docs:
+  - title: "multer (GitHub)"
+    url: https://github.com/expressjs/multer
+  - title: "OWASP — File Upload Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html
+  - title: "MDN — Content-Disposition"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Disposition
+---
+
+Users want to attach files: an avatar, an invoice, a screenshot. It is also one of the most dangerous features you can add, because the client chooses the name, the type and the content of what lands on your disk, and "how do you secure a file upload?" is a favourite interview question. A route that works in a demo (`upload.single("file")` and done) lets anybody write any file anywhere, fill the disk, or plant a page that runs on your domain. This lesson adds image **attachments** to todos in the API of `structured-logging`, using multer. Written for multer 2.5, Express 5.3 and Node 24. The video is older than multer 2, so details there may differ a little; the code below is what ran. The handlers write to `req.log`, the request logger from the last lesson.
+
+## Configuration
+
+Two settings differ between environments, so they come from the environment (`schemas-and-config` built the validation):
+
+```ts
+// src/config.ts (added)
+    // uploads: where files are kept and how big one may be (2 MB)
+    UPLOAD_DIR: z.string().min(1).default("uploads"),
+    MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(2 * 1024 * 1024),
+```
+
+`MAX_UPLOAD_BYTES` has a default and is checked as a positive integer, so a typo such as `2MB` stops the server at start instead of failing on the first upload. `UPLOAD_DIR` is where files go; relative paths are resolved from the folder the server is started in.
+
+## What arrives: `multipart/form-data`
+
+A JSON body is one value. A form with a file has several **parts**, each with its own headers, separated by a random **boundary** string:
+
+```text
+POST /v1/todos/1/attachments
+Content-Type: multipart/form-data; boundary=----abc123
+
+------abc123
+Content-Disposition: form-data; name="file"; filename="receipt.png"
+Content-Type: image/png
+
+<the bytes of the file>
+------abc123--
+```
+
+`express.json()` skips this request because the content type is not JSON, so `req.body` stays empty. Something has to read the parts, and holding a 50 MB file as a string would be a mistake, so that something should write the bytes out as they arrive. That is **multer**, a small middleware built on a streaming parser (`streams` explained why that matters). On the client, `FormData` creates this body, and you must **not** set `Content-Type` yourself, because the browser has to add the boundary:
+
+```js
+const form = new FormData();
+form.append("file", fileInput.files[0]);
+await fetch(`${api}/v1/todos/1/attachments`, { method: "POST", credentials: "include", body: form });
+```
+
+With `curl` the flag is `-F`: `curl -F file=@receipt.png localhost:4200/v1/todos/1/attachments`.
+
+## The multer instance
+
+```ts
+// src/middleware/upload.ts
+import { randomUUID } from "node:crypto";
+import multer from "multer";
+import { uploadDir } from "../attachments.ts";
+import { config } from "../config.ts";
+
+// files are streamed to disk, so a big upload does not sit in memory
+const storage = multer.diskStorage({
+  destination: uploadDir,
+  filename: (req, file, callback) => callback(null, randomUUID()), // not the client's name
+});
+
+export const upload = multer({
+  storage,
+  limits: {
+    fileSize: config.MAX_UPLOAD_BYTES, // bigger: the upload stops and the part file is deleted
+    files: 1,
+    fields: 0, // this endpoint takes a file and nothing else
+  },
+});
+```
+
+- **Storage.** `diskStorage` streams each file into a folder, so memory use stays flat. `memoryStorage` keeps the whole file in a `Buffer` in `req.file.buffer`: fine for a 100 KB avatar you will resize at once, dangerous without a tight limit, because ten parallel 50 MB uploads are 500 MB of RAM.
+- **The name on disk is random.** `file.originalname` is whatever the client typed. Multer already strips folders from it (a client sending `../../evil.html` gives `evil.html`), but it can still be `.htaccess`, `CON` on Windows, or a name that collides with another upload. A `randomUUID()` can be none of those. The original name is kept as plain text in the database, to show to people, and is never used in a path.
+- **Limits are not optional.** `fileSize` stops an upload that grows past the limit (multer deletes the part-written file), `files` bounds the number of files and `fields: 0` refuses any extra text fields. Without them a single request can fill the disk, and the default for each is `Infinity`.
+
+When `destination` is a string, multer creates the folder for you at start (I deleted `uploads/` and started the server: it was back). If you pass a function instead, creating the folder is your job.
+
+## The routes
+
+```ts
+// src/routes/attachments.ts
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
+import { Router } from "express";
+import type { NextFunction, Request, Response } from "express";
+import {
+  addAttachment,
+  findAttachment,
+  listAttachments,
+  MAX_ATTACHMENTS_PER_TODO,
+  removeAttachment,
+  toPublicAttachment,
+  uploadDir,
+} from "../attachments.ts";
+import { badRequest, conflict, HttpError, notFound } from "../errors.ts";
+import { detectImageType } from "../imageType.ts";
+import { currentUser } from "../middleware/requireAuth.ts";
+import { upload } from "../middleware/upload.ts";
+import { canManageTodo } from "../policy.ts";
+import { idParamsSchema } from "../schemas/params.ts";
+import { findTodo } from "../todos.ts";
+import { parse } from "../validate.ts";
+
+// mounted at /v1/todos/:id/attachments (behind requireAuth)
+export const attachmentsRouter = Router({ mergeParams: true });
+
+// runs BEFORE multer: a todo you may not touch must not cost the server a file write
+function loadTodo(req: Request, res: Response, next: NextFunction) {
+  const { id } = parse(idParamsSchema, req.params, "params");
+  const todo = findTodo(id);
+  if (!todo || !canManageTodo(currentUser(req), todo)) throw notFound(`No todo with id ${id}`);
+  res.locals.todoId = todo.id;
+  next();
+}
+attachmentsRouter.use(loadTodo);
+
+// GET /v1/todos/1/attachments
+attachmentsRouter.get("/", (req, res) => {
+  res.json({ data: listAttachments(res.locals.todoId).map(toPublicAttachment) });
+});
+
+// POST /v1/todos/1/attachments   multipart/form-data with one field called "file"
+attachmentsRouter.post(
+  "/",
+  (req, res, next) => {
+    if (listAttachments(res.locals.todoId).length >= MAX_ATTACHMENTS_PER_TODO) {
+      throw conflict(`A todo can have at most ${MAX_ATTACHMENTS_PER_TODO} attachments`);
+    }
+    next();
+  },
+  upload.single("file"),
+  async (req, res) => {
+    const file = req.file;
+    if (!file) throw badRequest('Send one file in the multipart field "file"');
+
+    // multer has already written it to disk: look inside, and delete it if it is not an image
+    const mime = await detectImageType(file.path);
+    if (!mime) {
+      await rm(file.path, { force: true });
+      throw new HttpError(415, "UNSUPPORTED_MEDIA_TYPE", "Only PNG, JPEG, GIF and WebP images are allowed");
+    }
+
+    const attachment = addAttachment({
+      todoId: res.locals.todoId,
+      storedName: file.filename,
+      originalName: file.originalname,
+      mime,
+      size: file.size,
+    });
+    req.log.info({ attachmentId: attachment.id, size: attachment.size, mime }, "attachment stored");
+    res
+      .status(201)
+      .location(`${req.baseUrl}/${attachment.id}`)
+      .json({ data: toPublicAttachment(attachment) });
+  },
+);
+
+// GET /v1/todos/1/attachments/<id>: the file itself
+attachmentsRouter.get("/:attachmentId", (req, res) => {
+  const attachment = findAttachment(res.locals.todoId, String(req.params.attachmentId));
+  if (!attachment) throw notFound("No such attachment");
+
+  res.attachment(attachment.originalName); // Content-Disposition; it also guesses a type from the name...
+  res.type(attachment.mime); // ...so set the type we found, after it
+  res.set("Cross-Origin-Resource-Policy", "same-site"); // our own frontend may show it in an <img>
+  res.sendFile(join(uploadDir, attachment.storedName));
+});
+
+// DELETE /v1/todos/1/attachments/<id>
+attachmentsRouter.delete("/:attachmentId", async (req, res) => {
+  const attachment = findAttachment(res.locals.todoId, String(req.params.attachmentId));
+  if (!attachment) throw notFound("No such attachment");
+
+  removeAttachment(attachment.id);
+  await rm(join(uploadDir, attachment.storedName), { force: true });
+  res.status(204).end();
+});
+```
+
+Read the order of the middleware, because it is the point:
+
+1. `attachmentsRouter.use(loadTodo)` runs **first** and answers `404` when the todo is not yours (the ownership rule from `authorization-oauth`). Putting multer before it would write a 2 MB file to disk for a request that is about to be refused.
+2. The count check runs before multer for the same reason: a sixth attachment is a `409` without any write.
+3. `upload.single("file")` parses the body and writes the file. If it fails, the error goes to the error handler.
+4. Only now does the handler look at `req.file`, and **it still does not trust it**.
+
+## Never trust the type
+
+A multer `fileFilter` can look at `file.mimetype`, but that string is simply the `Content-Type` header of the part, and the client writes it. Upload a text file named `evil.png` with `-H "Content-Type: image/png"` and every check on names and headers passes. The only honest evidence is the content. Real image formats start with fixed bytes (their **magic numbers**), so the lesson reads the first 12 bytes of the saved file:
+
+```ts
+// src/imageType.ts
+import { open } from "node:fs/promises";
+
+// the first bytes of a real image file; a name or a Content-Type header can say anything
+const signatures = [
+  { mime: "image/png", matches: (b: Buffer) => b.subarray(0, 8).toString("hex") === "89504e470d0a1a0a" },
+  { mime: "image/jpeg", matches: (b: Buffer) => b.subarray(0, 3).toString("hex") === "ffd8ff" },
+  { mime: "image/gif", matches: (b: Buffer) => b.subarray(0, 4).toString("latin1") === "GIF8" },
+  {
+    mime: "image/webp",
+    matches: (b: Buffer) =>
+      b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP",
+  },
+] as const;
+
+export type ImageMime = (typeof signatures)[number]["mime"];
+
+export async function detectImageType(path: string): Promise<ImageMime | undefined> {
+  const file = await open(path);
+  try {
+    const { buffer, bytesRead } = await file.read(Buffer.alloc(12), 0, 12, 0);
+    const head = buffer.subarray(0, bytesRead);
+    return signatures.find((signature) => signature.matches(head))?.mime;
+  } finally {
+    await file.close();
+  }
+}
+```
+
+If no signature matches, the handler deletes the file and answers `415`. The type stored with the attachment is the one **found**, never the one claimed. SVG is left out of the list on purpose: it is text that may contain `script` elements, so serving it back from your domain is a stored-XSS risk. In a larger project the `file-type` package recognises many more formats; for an avatar, re-encoding the image (with `sharp`) is better still, because it throws away anything that was hiding in the file.
+
+<Callout type="warning" title="A matching header is not a safe file">
+Magic bytes prove that a file starts like a PNG, not that everything after it is harmless: a file can be a valid image and a valid script at once (a "polyglot"). The type check is one layer. The others are random names, a size limit, serving with the stored type and `nosniff`, and never executing or `include`-ing anything from the upload folder.
+</Callout>
+
+## Serving the file back
+
+The download route does four deliberate things:
+
+- It sits behind `loadTodo`, so only someone who may see the todo can fetch its files. It does **not** use `express.static(uploadDir)`, which would make every file public to anyone who guesses or leaks a name.
+- `res.attachment(originalName)` sets `Content-Disposition: attachment; filename=...`, which tells browsers to download it rather than render it. It also guesses a `Content-Type` from that file name, so `res.type(attachment.mime)` comes **after** it. Without that order, an attachment called `evil.html` would be served as `text/html`. I uploaded PNG bytes under the name `evil.html` and downloaded them: the response was `Content-Type: image/png`, `Content-Disposition: attachment; filename=evil.html`, `X-Content-Type-Options: nosniff` (from Helmet) and the bytes were identical to the original.
+- `res.sendFile` receives an absolute path built from the stored random name, so nothing from the client reaches it.
+- `Cross-Origin-Resource-Policy: same-site` replaces Helmet's default `same-origin` for this route. I loaded images into a page on `localhost:5173` from the API on `localhost:4200`: with the default header the `<img>` was **blocked**, and with `same-site` it loaded, cookie included. Use it only for files your own frontend embeds, and use `same-origin` (the default) for everything else.
+
+## Errors from multer
+
+Multer reports problems as `MulterError` with a `code`, which the error handler turns into the API's JSON shape:
+
+```ts
+// src/middleware/errorHandler.ts (added to toHttpError)
+if (err instanceof multer.MulterError) {
+  return err.code === "LIMIT_FILE_SIZE"
+    ? new HttpError(413, "PAYLOAD_TOO_LARGE", "That file is too large")
+    : new HttpError(400, "BAD_UPLOAD", err.message);
+}
+```
+
+What I sent (todo 1 is Ada's, todo 2 is Bob's; the limit is 2 MB), and what came back:
+
+| Upload | Answer |
+| --- | --- |
+| a real 70-byte PNG | `201` and `Location` |
+| an HTML file named `evil.png` | `415 UNSUPPORTED_MEDIA_TYPE` (and no file left on disk) |
+| a PNG header followed by 3 MB of zeros | `413 PAYLOAD_TOO_LARGE` (and no file left on disk) |
+| a multipart body with no parts | `400`, "Send one file in the multipart field" |
+| the file in a field called `photo` | `400 BAD_UPLOAD`, "Unexpected file field" |
+| an extra text field next to the file | `400 BAD_UPLOAD`, "Too many fields" |
+| Bob's todo, as Ada | `404`, and nothing was written |
+| a file named `../../evil.html` | `201`, stored as `evil.html`; on disk it is only a UUID |
+| no login | `401` |
+| a sixth file on one todo | `409` |
+
+From a page on the allowed origin, `fetch` with a `FormData` body and `credentials: "include"` also worked (`201`). That request is a **simple** request (multipart is one of the three form content types), so no preflight protects it: the `requireTrustedOrigin` check from `security` is what stops a foreign site from posting files with a victim's cookie.
+
+## Where files live in production
+
+A folder next to the code is fine on your laptop. On a platform such as Render the disk is **ephemeral**: it is wiped on each deploy and is not shared between instances. Real systems keep files in **object storage** (Amazon S3, Cloudflare R2) and keep only the metadata (`originalName`, `mime`, `size`, the object key) in the database. A common pattern lets the browser upload straight to the bucket with a short-lived **presigned URL** from your API, so the bytes never pass through Node at all. The checks above still apply: you decide the object key, the size limit and the allowed type when you sign the URL.
+
+## Common mistakes
+
+- Trusting `file.mimetype`, `originalname` or the extension, instead of saving under a random name and reading the bytes.
+- No `limits` on multer, or checking permissions after the file has already been written.
+- Serving the upload folder with `express.static`, or serving a file with a content type taken from its name.
+- Forgetting that a multipart `POST` needs no preflight, and so needs the CSRF check.
+- Keeping the only copy of user files on the disk of a hosting platform.
+
+<Exercise title="Predict the answer">
+The upload route above is running with a 2 MB limit. What status does each request get? (a) A 1 MB JPEG called `photo.jpg`. (b) A 1 MB JPEG called `photo.exe`. (c) A 1 MB `.zip` file sent with the header `Content-Type: image/png`. (d) The same JPEG as (a), but into the sixth attachment of a todo. (e) The same JPEG into a todo that belongs to another user.
+
+<Solution>
+(a) `201`. (b) `201` as well: the name is only text, and the content is a real JPEG, so the stored type is `image/jpeg`. The file is saved under a UUID with no extension, so `.exe` never matters. (c) `415`: the header says PNG, but the first bytes are `PK` (the ZIP signature), so no image signature matches and the file is deleted. (d) `409` before any byte is written, because the count check runs before multer. (e) `404`, again before multer: `loadTodo` runs first, so the other user's todo looks like one that does not exist.
+</Solution>
+</Exercise>
+
+<Exercise title="Review this upload route">
+A teammate sends this for review. List the problems.
+
+```ts
+const upload = multer({ dest: "public/uploads" });
+
+app.use(express.static("public"));
+
+app.post("/upload", upload.single("file"), async (req, res) => {
+  const target = path.join("public/uploads", req.file.originalname);
+  await fs.rename(req.file.path, target);
+  console.log("uploaded", req.file.originalname, req.headers.cookie);
+  res.json({ url: `/uploads/${req.file.originalname}` });
+});
+```
+
+<Solution>
+1. No `limits`: one request can fill the disk. Set `fileSize`, `files` and `fields`.
+2. The route has no authentication or ownership check, and anyone can call it.
+3. `path.join("public/uploads", originalname)` uses a client-controlled name in a path. Multer strips folders, but the name can still overwrite another user's file (two people upload `avatar.png`), and with some configurations (`preservePath`) it can walk out of the folder. Use a random stored name.
+4. `express.static("public")` serves everything uploaded, with the content type of the file extension. Upload `x.html` and it is a page on your domain, running with your origin (stored XSS). Serve through a checked route with the type you found.
+5. Nothing checks the type: neither the extension nor the content.
+6. `req.file` may be `undefined` when no file was sent, so the handler crashes with a `500` instead of a `400`.
+7. `console.log` prints the `Cookie` header, so session ids end up in the logs; it is also unstructured. Log `req.log.info({ size, mime }, "file stored")` and leave the cookie out.
+8. The response hands out a permanent public URL, which exposes the guessable name. Return the attachment id and have the client call an authenticated route.
+</Solution>
+</Exercise>
+
+<Exercise title="Allow PDFs too">
+Accept PDF documents as well as images. What do you change in the type check, and what should you think about before serving them back?
+
+<Solution>
+Add a signature (`%PDF-` are the first five bytes of a PDF), and rename the type from `ImageMime` to something wider, as the error message too:
+
+```ts
+// src/imageType.ts (added to the list; rename ImageMime to AllowedMime)
+{ mime: "application/pdf", matches: (b: Buffer) => b.subarray(0, 5).toString("latin1") === "%PDF-" },
+```
+
+Run on three files, the detector said `pixel.png -> image/png`, `doc.pdf -> application/pdf` and `evil.png -> undefined`. Before serving PDFs, remember that they can contain scripts and links, and that a browser's built-in viewer would run them on your domain. The download route already sends `Content-Disposition: attachment`, the stored type and `nosniff`, so the file is saved instead of rendered, which is the right default for documents. If you want an inline preview, serve it from a separate domain without cookies.
+</Solution>
+</Exercise>

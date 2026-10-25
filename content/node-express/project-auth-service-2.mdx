@@ -1,0 +1,577 @@
+---
+title: "Project: Auth Service, Part 2"
+summary: "Make the login stick with httpOnly cookie sessions and requireAuth, then add roles with an admin API, changing a password and logging out everywhere."
+order: 30
+takeaways:
+  - "A session is a long random id in an `HttpOnly` cookie that points at state on the server, so logging out means deleting the session on the server, not only the cookie in the browser."
+  - "Issue a new session id at every login and destroy the old one, so nobody can plant a session id in your browser in advance."
+  - "`requireAuth` looks the user up on every request, so a changed role or a deleted session takes effect on the very next request with the same cookie."
+  - "An admin route answers 401 to a stranger and 403 to a normal user, and an admin must not be able to change their own role, or the last admin could lock everyone out."
+  - "Changing a password must ask for the current one and end every other session, because the reason for the change may be that someone else has the old password."
+videos:
+  - title: "Session vs Token Authentication in 100 Seconds"
+    channel: "Fireship"
+    duration: "2:18"
+    url: https://www.youtube.com/watch?v=UBUNrFtufWo
+docs:
+  - title: "OWASP — Session Management Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
+  - title: "OWASP — Session fixation"
+    url: https://owasp.org/www-community/attacks/Session_fixation
+  - title: "OWASP — Authorization Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html
+  - title: "MDN — Set-Cookie header"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie
+  - title: "MDN — 403 Forbidden"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/403
+---
+
+Part 1 gave you accounts that can be created but not used. This part makes them useful and adds the three things where most real security bugs hide: **how a login is remembered** (sessions), **who may do what** (roles) and **what happens when credentials change** (a new password, a stolen cookie). Same versions as Part 1: Express 5.3, Zod 4.6, `argon2` 0.45 and Node 24; every file was run in a sandbox project.
+
+## Where you are
+
+From Part 1 you have `src/config.ts`, `errors.ts`, `errorHandler.ts`, `validate.ts`, `schemas.ts`, `users.ts`, `routes/auth.ts` (sign-up only), `app.ts` and `server.ts`. If you did not build Part 1, do that first.
+
+## Stage 3: Sessions, `requireAuth`, login, `/me` and logout
+
+Now make the login stick. Write:
+
+- `src/sessions.ts`: the cookie name (`sid`), the lifetime (7 days), a `Map` from session id to `{ userId, expiresAt }`, and the cookie options (`httpOnly`, `sameSite: "lax"`, `secure` when `NODE_ENV` is `production`, `path: "/"`). `createSession(userId)` makes the id with `randomBytes(32)` in `base64url`. `getSession(id)` returns nothing for an unknown **or expired** session and deletes the expired one. Add `destroySession(id)` and `resetSessions()` for tests.
+- `src/express.d.ts`: teaches TypeScript that `req.user` and `req.sessionId` exist after `requireAuth` ran.
+- `src/middleware.ts` with `requireAuth` and a helper `currentAuth(req)`. `requireAuth` reads the cookie (it can be anything the client sends, so check that it is a string), finds the session, then finds the **user** and answers 401 when any step fails. It looks the user up on every request on purpose. `currentAuth` returns `{ user, sessionId }` or throws 401, so handlers need no `!`.
+- The other routes in `src/routes/auth.ts`: `POST /login` (parse, `checkLogin`, 401 "Invalid email or password", end the old session if the request had a cookie, create a new one, set the cookie with `maxAge`, answer the user), `GET /me`, and `POST /logout` (destroy the session on the server, clear the cookie with the **same options**, answer 204).
+- In `app.ts`, add `cookieParser()` before the routes.
+
+<Solution>
+
+```ts
+// src/sessions.ts
+import { randomBytes } from "node:crypto";
+import type { CookieOptions } from "express";
+import { config } from "./config.ts";
+
+export const SESSION_COOKIE = "sid";
+export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // one week
+
+type Session = { userId: string; expiresAt: number };
+
+// session id -> who it belongs to. In memory, so a restart logs everyone out.
+const sessions = new Map<string, Session>();
+
+export const cookieOptions: CookieOptions = {
+  httpOnly: true, // JavaScript in the page cannot read it
+  sameSite: "lax", // not sent on cross-site POSTs
+  secure: config.NODE_ENV === "production", // HTTPS only in production
+  path: "/",
+};
+
+// for tests: no sessions again
+export function resetSessions(): void {
+  sessions.clear();
+}
+
+export function createSession(userId: string): string {
+  const id = randomBytes(32).toString("base64url"); // 256 random bits: cannot be guessed
+  sessions.set(id, { userId, expiresAt: Date.now() + SESSION_TTL_MS });
+  return id;
+}
+
+export function getSession(id: string): Session | undefined {
+  const session = sessions.get(id);
+  if (!session) return undefined;
+  if (session.expiresAt <= Date.now()) {
+    sessions.delete(id);
+    return undefined;
+  }
+  return session;
+}
+
+export function destroySession(id: string): void {
+  sessions.delete(id);
+}
+```
+
+```ts
+// src/express.d.ts
+import type { PublicUser } from "./users.ts";
+
+// teach TypeScript about the fields requireAuth adds to the request
+declare global {
+  namespace Express {
+    interface Request {
+      user?: PublicUser;
+      sessionId?: string;
+    }
+  }
+}
+```
+
+```ts
+// src/middleware.ts
+import type { NextFunction, Request, Response } from "express";
+import { unauthorized } from "./errors.ts";
+import { getSession, SESSION_COOKIE } from "./sessions.ts";
+import { findUserById, toPublic } from "./users.ts";
+import type { PublicUser } from "./users.ts";
+
+// 401: "who are you?" The user is looked up on every request, so a changed role,
+// a changed password or a deleted session takes effect at once.
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const cookie: unknown = req.cookies?.[SESSION_COOKIE];
+  const sessionId = typeof cookie === "string" ? cookie : undefined;
+  const session = sessionId && getSession(sessionId);
+  const user = session && findUserById(session.userId);
+
+  if (!sessionId || !user) {
+    next(unauthorized());
+    return;
+  }
+
+  req.user = toPublic(user);
+  req.sessionId = sessionId;
+  next();
+}
+
+// for handlers behind requireAuth: the user and the session id, typed, without a `!`
+export function currentAuth(req: Request): { user: PublicUser; sessionId: string } {
+  if (!req.user || !req.sessionId) throw unauthorized();
+  return { user: req.user, sessionId: req.sessionId };
+}
+```
+
+```ts
+// src/routes/auth.ts
+import { Router } from "express";
+import { unauthorized } from "../errors.ts";
+import { currentAuth, requireAuth } from "../middleware.ts";
+import { loginSchema, signupSchema } from "../schemas.ts";
+import {
+  cookieOptions,
+  createSession,
+  destroySession,
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+} from "../sessions.ts";
+import { checkLogin, createUser, toPublic } from "../users.ts";
+import { parse } from "../validate.ts";
+
+export const authRouter = Router();
+
+// POST /v1/auth/signup  { "email": "...", "password": "..." }
+authRouter.post("/signup", async (req, res) => {
+  const { email, password } = parse(signupSchema, req.body, "body");
+  const user = await createUser(email, password); // role is always "user": the body cannot say otherwise
+  res
+    .status(201)
+    .location("/v1/auth/me")
+    .json({ data: toPublic(user) });
+});
+
+// POST /v1/auth/login  { "email": "...", "password": "..." }
+authRouter.post("/login", async (req, res) => {
+  const { email, password } = parse(loginSchema, req.body, "body");
+  const user = await checkLogin(email, password);
+  if (!user) throw unauthorized("Invalid email or password"); // the same text for both causes
+
+  // a new id for every login, and the old one dies: nobody can hand you a session id in advance
+  const old: unknown = req.cookies?.[SESSION_COOKIE];
+  if (typeof old === "string") destroySession(old);
+
+  res.cookie(SESSION_COOKIE, createSession(user.id), {
+    ...cookieOptions,
+    maxAge: SESSION_TTL_MS,
+  });
+  res.json({ data: toPublic(user) });
+});
+
+// GET /v1/auth/me
+authRouter.get("/me", requireAuth, (req, res) => {
+  res.json({ data: currentAuth(req).user });
+});
+
+// POST /v1/auth/logout: removes the session on the server, then the cookie in the browser
+authRouter.post("/logout", requireAuth, (req, res) => {
+  destroySession(currentAuth(req).sessionId);
+  res.clearCookie(SESSION_COOKIE, cookieOptions);
+  res.status(204).end();
+});
+```
+
+```ts
+// src/app.ts
+import cookieParser from "cookie-parser";
+import express from "express";
+import { notFound } from "./errors.ts";
+import { errorHandler } from "./errorHandler.ts";
+import { authRouter } from "./routes/auth.ts";
+
+export const app = express();
+
+app.use(express.json({ limit: "100kb" }));
+app.use(cookieParser());
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+app.use("/v1/auth", authRouter);
+
+// nothing answered: turn it into an error so it gets the same JSON shape
+app.use((req, res, next) => {
+  next(notFound(`Cannot ${req.method} ${req.path}`));
+});
+
+// must be last
+app.use(errorHandler);
+```
+
+A session with `npm run dev` running. I had signed up `ada@example.com` first. No cookie, then a wrong password, then the real login (the id in the cookie will differ for you):
+
+```text
+$ curl -i localhost:4000/v1/auth/me
+HTTP/1.1 401 Unauthorized
+
+{"error":{"code":"UNAUTHORIZED","message":"You must be logged in"}}
+
+$ curl -i -X POST localhost:4000/v1/auth/login -H "Content-Type: application/json" \
+    -d '{"email":"ada@example.com","password":"wrong password"}'
+HTTP/1.1 401 Unauthorized
+
+{"error":{"code":"UNAUTHORIZED","message":"Invalid email or password"}}
+
+$ curl -i -c jar.txt -X POST localhost:4000/v1/auth/login -H "Content-Type: application/json" \
+    -d '{"email":"ada@example.com","password":"correct horse battery"}'
+HTTP/1.1 200 OK
+Set-Cookie: sid=6NurseTqg6TmY3z__Zdg-99T14EMFbUilZS-u4MHHbU; Max-Age=604800; Path=/; Expires=Sun, 01 Nov 2026 08:10:08 GMT; HttpOnly; SameSite=Lax
+
+{"data":{"id":"1509cd79-bb32-4f29-8230-e811c1cee546","email":"ada@example.com","role":"user","createdAt":"2026-10-25T08:10:08.265Z"}}
+```
+
+`-c jar.txt` makes curl save the cookies it receives, and `-b jar.txt` sends them back, which is what a browser does by itself. The rest of the session:
+
+```text
+$ curl -b jar.txt localhost:4000/v1/auth/me
+{"data":{"id":"1509cd79-bb32-4f29-8230-e811c1cee546","email":"ada@example.com","role":"user","createdAt":"2026-10-25T08:10:08.265Z"}}
+
+$ cp jar.txt old-jar.txt          # keep a copy of the cookie, as a thief would
+$ curl -i -b jar.txt -c jar.txt -X POST localhost:4000/v1/auth/logout
+HTTP/1.1 204 No Content
+Set-Cookie: sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax
+
+$ curl -b old-jar.txt localhost:4000/v1/auth/me
+{"error":{"code":"UNAUTHORIZED","message":"You must be logged in"}}
+```
+
+The last request is the point of server-side sessions: the copied cookie is still well-formed, but the session behind it no longer exists, so it is useless. With a JWT you could not do this before the token expired.
+
+Two details to notice in the code. The `login` route destroys the session id the browser sent before it creates a new one, so a session id that someone planted in a browser before the login (**session fixation**) never becomes a logged-in session. And `res.clearCookie` gets `cookieOptions` again, because a browser only removes a cookie when the name, the path and the flags match.
+
+</Solution>
+
+## Stage 4: Roles, the admin routes and the first admin
+
+Add roles to the service. The rules:
+
+- `GET /v1/users` lists all users (without hashes) and is for admins only. A stranger gets **401**, a logged-in normal user gets **403**.
+- `PATCH /v1/users/:id` with `{ "role": "admin" }` or `{ "role": "user" }` changes a role. A bad id is a 400, an unknown user a 404, a bad role a 400. **Nobody can change their own role** (403), because otherwise the last admin could demote themselves and nobody could undo it.
+- The new role works on the **next request** with the same cookie. That happens by itself, because `requireAuth` reads the user from the store every time. This is why a session stores a user id and not a copy of the user.
+- Someone has to be the first admin. At startup, if `ADMIN_EMAIL` and `ADMIN_PASSWORD` are set and no such user exists, create it with the role `admin`. This happens in `server.ts`, not in `app.ts`, so tests never create it.
+
+You need: `requireRole(...roles)` in `middleware.ts`, two schemas, two store functions, `src/routes/users.ts` (one `usersRouter.use(requireAuth, requireRole("admin"))` protects the whole file), `src/seedAdmin.ts`, and two lines each in `app.ts` and `server.ts`.
+
+<Solution>
+
+In `src/schemas.ts`, add the two schemas at the bottom (`roleSchema` is already there):
+
+```ts
+// src/schemas.ts (added)
+export const changeRoleSchema = z.object({ role: roleSchema });
+
+export const idParamsSchema = z.object({ id: z.uuid("id must be a valid id") });
+```
+
+In `src/users.ts`, add these two functions:
+
+```ts
+// src/users.ts (added)
+export function listUsers(): User[] {
+  return [...users.values()];
+}
+```
+
+```ts
+// src/users.ts (added, at the end)
+export function setRole(id: string, role: Role): User | undefined {
+  const user = users.get(id);
+  if (user) user.role = role;
+  return user;
+}
+```
+
+In `src/middleware.ts`, change the imports (`forbidden` and `Role` are new) and add `requireRole` between `requireAuth` and `currentAuth`:
+
+```ts
+// src/middleware.ts (imports)
+import { forbidden, unauthorized } from "./errors.ts";
+import type { Role } from "./schemas.ts";
+```
+
+```ts
+// src/middleware.ts (added)
+// 403: "you may not". Use it after requireAuth.
+export function requireRole(...allowed: Role[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      next(unauthorized());
+    } else if (!allowed.includes(req.user.role)) {
+      next(forbidden());
+    } else {
+      next();
+    }
+  };
+}
+```
+
+Then the new files:
+
+```ts
+// src/routes/users.ts
+import { Router } from "express";
+import { forbidden, notFound } from "../errors.ts";
+import { currentAuth, requireAuth, requireRole } from "../middleware.ts";
+import { changeRoleSchema, idParamsSchema } from "../schemas.ts";
+import { listUsers, setRole, toPublic } from "../users.ts";
+import { parse } from "../validate.ts";
+
+export const usersRouter = Router();
+
+// every route in this file is for admins only
+usersRouter.use(requireAuth, requireRole("admin"));
+
+// GET /v1/users
+usersRouter.get("/", (req, res) => {
+  res.json({ data: listUsers().map(toPublic) });
+});
+
+// PATCH /v1/users/:id  { "role": "admin" }
+usersRouter.patch("/:id", (req, res) => {
+  const { id } = parse(idParamsSchema, req.params, "params");
+  const { role } = parse(changeRoleSchema, req.body, "body");
+
+  // otherwise the last admin could demote themselves and nobody could undo it
+  if (id === currentAuth(req).user.id) throw forbidden("You cannot change your own role");
+
+  const user = setRole(id, role);
+  if (!user) throw notFound(`No user with id ${id}`);
+  res.json({ data: toPublic(user) });
+});
+```
+
+```ts
+// src/seedAdmin.ts
+import { config } from "./config.ts";
+import { createUser, findUserByEmail } from "./users.ts";
+
+// the first admin has to come from somewhere: the environment, once, at startup
+export async function ensureAdmin(): Promise<void> {
+  const { ADMIN_EMAIL, ADMIN_PASSWORD } = config;
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) return;
+  if (findUserByEmail(ADMIN_EMAIL.toLowerCase())) return;
+
+  await createUser(ADMIN_EMAIL.toLowerCase(), ADMIN_PASSWORD, "admin");
+  console.log(`Created the admin ${ADMIN_EMAIL}`);
+}
+```
+
+Mount the router and seed the admin:
+
+```ts
+// src/app.ts (two additions)
+import { usersRouter } from "./routes/users.ts";
+
+// ...after app.use("/v1/auth", authRouter):
+app.use("/v1/users", usersRouter);
+```
+
+```ts
+// src/server.ts
+import { app } from "./app.ts";
+import { config } from "./config.ts";
+import { ensureAdmin } from "./seedAdmin.ts";
+
+await ensureAdmin();
+
+app.listen(config.PORT, () => {
+  console.log(`Auth service on http://localhost:${config.PORT}`);
+});
+```
+
+Start it with an admin from the environment (`ADMIN_EMAIL=Admin@Example.com ADMIN_PASSWORD=admin-password-1 npm run dev`, or put the two lines in a `.env` file, which `npm run dev` reads). Note the capital letters in the email: the seed lowercases it like any other email. A session, with Ada signed up and logged in as a normal user in `jar.txt`, and the admin logged in in `admin.txt`:
+
+```text
+$ curl -i -b jar.txt localhost:4000/v1/users
+HTTP/1.1 403 Forbidden
+
+{"error":{"code":"FORBIDDEN","message":"You are not allowed to do that"}}
+
+$ curl -b admin.txt localhost:4000/v1/users
+{"data":[{"id":"e8c2972e-1678-488c-8cad-ee1f76eb0b16","email":"admin@example.com","role":"admin","createdAt":"2026-10-25T08:07:33.489Z"},{"id":"88d72948-5582-4bf5-91c2-2251cc7057ef","email":"ada@example.com","role":"user","createdAt":"2026-10-25T08:07:35.342Z"}]}
+
+$ curl -X PATCH -b admin.txt localhost:4000/v1/users/88d72948-5582-4bf5-91c2-2251cc7057ef \
+    -H "Content-Type: application/json" -d '{"role":"admin"}'
+{"data":{"id":"88d72948-5582-4bf5-91c2-2251cc7057ef","email":"ada@example.com","role":"admin","createdAt":"2026-10-25T08:07:35.342Z"}}
+
+$ curl -b jar.txt localhost:4000/v1/users -o /dev/null -w '%{http_code}\n'
+200
+```
+
+The last request is Ada's **old** cookie, from before she was promoted. It works as an admin now, with no new login.
+
+</Solution>
+
+## Stage 5: Change password and log out everywhere
+
+Two routes for when credentials may be in the wrong hands.
+
+- `POST /v1/auth/change-password` with `{ "currentPassword", "newPassword" }`, for a logged-in user. The new password follows the sign-up rules and must differ from the current one (a 400). A wrong current password is a **403** with the code `WRONG_PASSWORD`, not a 401: the client is logged in, and a 401 would make a front end throw the user back to the login page. On success: hash and store the new password, **destroy every other session of the user but keep the current one**, answer 204. Think about why: if the password changes because someone else knew it, that someone may be logged in right now.
+- `POST /v1/auth/logout-all`: destroys every session of the user, this one too, clears the cookie, answers 204.
+
+You need two store functions (`verifyPassword`, `changePassword`), one in the session store (`destroyUserSessions(userId, keepId?)`), one schema and the two routes.
+
+<Solution>
+
+In `src/schemas.ts`:
+
+```ts
+// src/schemas.ts (added)
+export const changePasswordSchema = z
+  .object({
+    currentPassword: z.string({ error: "currentPassword is required" }).min(1).max(128),
+    newPassword: newPassword("newPassword"),
+  })
+  .refine((body) => body.currentPassword !== body.newPassword, {
+    path: ["newPassword"],
+    error: "newPassword must be different from the current one",
+  });
+```
+
+In `src/users.ts`:
+
+```ts
+// src/users.ts (added)
+export function verifyPassword(user: User, password: string): Promise<boolean> {
+  return argon2.verify(user.passwordHash, password);
+}
+```
+
+```ts
+// src/users.ts (added, before setRole)
+export async function changePassword(user: User, newPassword: string): Promise<void> {
+  user.passwordHash = await argon2.hash(newPassword);
+}
+```
+
+In `src/sessions.ts`:
+
+```ts
+// src/sessions.ts (added, at the end)
+// every session of one user, except the one in `keepId` (leave it out to end them all)
+export function destroyUserSessions(userId: string, keepId?: string): void {
+  for (const [id, session] of sessions) {
+    if (session.userId === userId && id !== keepId) sessions.delete(id);
+  }
+}
+```
+
+In `src/routes/auth.ts`, the imports grow (`HttpError`, `notFound`, the new schema, `destroyUserSessions`, `findUserById`, `verifyPassword` and `changePassword`):
+
+```ts
+// src/routes/auth.ts (imports)
+import { Router } from "express";
+import { HttpError, notFound, unauthorized } from "../errors.ts";
+import { currentAuth, requireAuth } from "../middleware.ts";
+import { changePasswordSchema, loginSchema, signupSchema } from "../schemas.ts";
+import {
+  cookieOptions,
+  createSession,
+  destroySession,
+  destroyUserSessions,
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+} from "../sessions.ts";
+import {
+  changePassword,
+  checkLogin,
+  createUser,
+  findUserById,
+  toPublic,
+  verifyPassword,
+} from "../users.ts";
+import { parse } from "../validate.ts";
+```
+
+and the two handlers go at the end of the file:
+
+```ts
+// src/routes/auth.ts (added)
+// POST /v1/auth/logout-all: ends this session and every other one of the same user
+authRouter.post("/logout-all", requireAuth, (req, res) => {
+  destroyUserSessions(currentAuth(req).user.id);
+  res.clearCookie(SESSION_COOKIE, cookieOptions);
+  res.status(204).end();
+});
+
+// POST /v1/auth/change-password  { "currentPassword": "...", "newPassword": "..." }
+authRouter.post("/change-password", requireAuth, async (req, res) => {
+  const { user: publicUser, sessionId } = currentAuth(req);
+  const { currentPassword, newPassword } = parse(changePasswordSchema, req.body, "body");
+
+  const user = findUserById(publicUser.id);
+  if (!user) throw notFound("No such user");
+  if (!(await verifyPassword(user, currentPassword))) {
+    // 403, not 401: the client is logged in, a 401 would make it show the login page
+    throw new HttpError(403, "WRONG_PASSWORD", "The current password is wrong");
+  }
+
+  await changePassword(user, newPassword);
+  destroyUserSessions(user.id, sessionId); // a thief who had the old password loses their session
+  res.status(204).end();
+});
+```
+
+Trying it, with Ada logged in with `jar.txt`:
+
+```text
+$ curl -i -b jar.txt -X POST localhost:4000/v1/auth/change-password -H "Content-Type: application/json" \
+    -d '{"currentPassword":"nope nope nope","newPassword":"a brand new password"}'
+HTTP/1.1 403 Forbidden
+
+{"error":{"code":"WRONG_PASSWORD","message":"The current password is wrong"}}
+
+$ curl -i -b jar.txt -X POST localhost:4000/v1/auth/change-password -H "Content-Type: application/json" \
+    -d '{"currentPassword":"correct horse battery","newPassword":"a brand new password"}'
+HTTP/1.1 204 No Content
+
+$ curl -i -b jar.txt -c jar.txt -X POST localhost:4000/v1/auth/logout
+HTTP/1.1 204 No Content
+Set-Cookie: sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax
+
+$ curl -b jar.txt localhost:4000/v1/auth/me -o /dev/null -w '%{http_code}\n'
+401
+```
+
+<Callout type="warning" title="This route is a password-guessing machine">
+Anyone holding a stolen session cookie can try passwords against `change-password` as fast as the server hashes them. In a real service the `security` lesson's rate limiter belongs on this route too, together with the login. It is a stretch goal here, so the suite stays about the rules and not about the limiter.
+</Callout>
+
+</Solution>
+
+## Where you are now
+
+The service does everything it set out to do: accounts, sessions, roles, safe credential changes. Check the project:
+
+```bash
+npx tsc
+```
+
+It should print nothing. What you do **not** have yet is proof. In **Part 3** (`project-auth-service-3`) you write the test suite (34 tests) and break the code on purpose to see which of your tests would notice.

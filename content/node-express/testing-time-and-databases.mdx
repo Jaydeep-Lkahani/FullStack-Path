@@ -1,0 +1,296 @@
+---
+title: Testing Time, Limits and the Database
+summary: Fake the clock instead of waiting, test the rate limiter in one file, and choose a safe test database strategy for when the data moves out of memory.
+order: 26
+takeaways:
+  - "Fake only `Date` with `vi.useFakeTimers({ toFake: [\"Date\"] })`, test both sides of a boundary, and put the real clock back after each test."
+  - "Rate limits get in the way of tests that log in often, so switch them off in the test config and turn them on in the one file that tests them."
+  - "`config.ts` reads `process.env` once, when it is first imported, so a test that changes the environment must also reset the modules and import the app afterwards."
+  - "Tests delete data, so they need their own database, and the code must refuse to run against a name that does not end in `_test`."
+  - "Vitest runs files in parallel workers, so each worker needs its own database, for example one named with `VITEST_POOL_ID`."
+  - "Clean the database before each test by rolling back a transaction, truncating the tables, or building a fresh database, and use the real database engine instead of a mock."
+videos: []
+docs:
+  - title: "Vitest — Mocking time"
+    url: https://vitest.dev/guide/mocking/timers
+  - title: "Vitest — Parallelism"
+    url: https://vitest.dev/guide/parallelism
+  - title: "Vitest — vi.stubEnv and vi.resetModules"
+    url: https://vitest.dev/api/vi
+  - title: "Node.js — node:sqlite"
+    url: https://nodejs.org/api/sqlite.html
+---
+
+The last lesson, `testing-apis`, tested the routes with Vitest and Supertest. This one deals with the three things that make API tests slow, flaky or dangerous: **time** (a session lasts a week), **limits** (the rate limiter blocks a test that logs in too often) and the **database** (tests delete data, so which database do they delete from?). Written for Vitest 5.0, Supertest 7.3 and Node 24, and it continues the same code and test files. I found no video about these topics that I could verify, so this lesson has none.
+
+## Time and the rate limit
+
+Some behaviour depends on the clock. Sessions last a week, and nobody waits a week in a test. Vitest can fake `Date`:
+
+```ts
+// test/session-expiry.test.ts
+import { afterEach, expect, it, vi } from "vitest";
+import { app } from "../src/app.ts";
+import { SESSION_TTL_MS } from "../src/sessions.ts";
+import { loginAs, makeUser } from "./helpers.ts";
+
+afterEach(() => {
+  vi.useRealTimers(); // never leave a fake clock behind for the next test
+});
+
+it("logs the user out when the session is a week old", async () => {
+  await makeUser("ada@example.com");
+  vi.useFakeTimers({ toFake: ["Date"] }); // only Date: timers and promises keep working
+  vi.setSystemTime(new Date("2026-10-01T09:00:00Z"));
+  const agent = await loginAs("ada@example.com");
+  await agent.get("/v1/auth/me").expect(200);
+
+  vi.setSystemTime(Date.now() + SESSION_TTL_MS - 1000); // one second before the end
+  await agent.get("/v1/auth/me").expect(200);
+
+  vi.setSystemTime(Date.now() + 2000); // one second after
+  const res = await agent.get("/v1/auth/me");
+  expect(res.status).toBe(401);
+});
+
+it("does not need the real clock for createdAt either", async () => {
+  const ada = await makeUser("ada@example.com");
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-01T09:00:00Z"));
+  const agent = await loginAs("ada@example.com");
+
+  const res = await agent.post("/v1/todos").send({ title: "Dated" });
+
+  expect(res.body.data.createdAt).toBe("2026-10-01T09:00:00.000Z"); // exact, no expect.any
+  expect(res.body.data.ownerId).toBe(ada.id);
+});
+```
+
+`toFake: ["Date"]` fakes only `Date`; `setTimeout` and friends stay real, so Supertest and argon2 keep working (I did not try faking everything, since fake timers and a real network are an easy way to get a test that hangs). The test checks both sides of the boundary, one second before and one second after, because off-by-one mistakes live exactly there. The second test shows a bonus: with a known time, `createdAt` can be compared exactly instead of with `expect.any`. The `afterEach` puts the real clock back so the fake one cannot leak into the next test.
+
+The **rate limits** from `security` are the opposite problem: with them on, a test file that fails logins on purpose gets blocked after 5 attempts, and a long file can run into the 120 requests per minute ceiling. So the API got a switch, and the Vitest config uses it:
+
+```ts
+// src/config.ts
+RATE_LIMIT: z.stringbool().default(true),
+
+// src/middleware/rateLimit.ts, inside limiter()
+skip: () => !config.RATE_LIMIT, // tests that are not about limits switch them off
+
+// vitest.config.ts, inside test
+env: { RATE_LIMIT: "false" },
+```
+
+The switch is on unless someone turns it off, so production keeps its limits. One test file turns it back on:
+
+```ts
+// test/rate-limit.test.ts
+import { expect, it, vi } from "vitest";
+
+// The shared setup switched the limits off. config.ts reads process.env when it is
+// first imported, so turn them on and load a fresh copy of the app. Each test file
+// has its own module registry already; resetModules drops what the setup file loaded.
+vi.stubEnv("RATE_LIMIT", "true");
+vi.resetModules();
+const { default: request } = await import("supertest");
+const { app } = await import("../src/app.ts");
+const { createUser } = await import("../src/users.ts");
+
+it("blocks the sixth failed login for one account, but not other accounts", async () => {
+  await createUser("ada@example.com", "correct horse battery");
+  const attempt = (email: string) =>
+    request(app).post("/v1/auth/login").send({ email, password: "wrong password" });
+
+  for (let i = 1; i <= 5; i++) {
+    expect((await attempt("ada@example.com")).status).toBe(401);
+  }
+
+  const blocked = await attempt("ada@example.com");
+  expect(blocked.status).toBe(429);
+  expect(blocked.body.error.code).toBe("RATE_LIMITED");
+  expect(Number(blocked.headers["retry-after"])).toBeGreaterThan(0);
+
+  expect((await attempt("bob@example.com")).status).toBe(401); // a different account is untouched
+});
+```
+
+`config.ts` reads `process.env` when it is first imported, and the setup file has already imported it. So the test sets the variable with `vi.stubEnv`, drops the loaded modules with `vi.resetModules()`, and only then imports a fresh `app` with `await import(...)`. The test also checks that the block is per account: Bob is still answered with a `401`, not a `429`.
+
+## A test database
+
+So far the "database" is memory, and `reset()` was enough. Soon (module `databases`) the data lives in PostgreSQL, and the same questions come back. The answers:
+
+1. **A separate database, always.** Tests delete everything; they must never be pointed at the database you develop in, let alone at production. Use its own name and URL (`TEST_DATABASE_URL`), and make the code refuse a wrong one:
+
+   ```ts
+   // ex/testDatabase.ts
+   // One database per Vitest worker, and a hard stop if the URL does not look like a test database.
+   export function testDatabaseUrl(baseUrl = process.env.TEST_DATABASE_URL): string {
+     if (!baseUrl) throw new Error("Set TEST_DATABASE_URL (see .env.test.example)");
+
+     const url = new URL(baseUrl);
+     const name = url.pathname.slice(1);
+     if (!name.endsWith("_test")) {
+       throw new Error(`Refusing to run tests against "${name}": the database name must end in _test`);
+     }
+
+     url.pathname = `/${name}_${process.env.VITEST_POOL_ID ?? "1"}`; // todo_test_1, todo_test_2, ...
+     return url.toString();
+   }
+   ```
+
+   I ran it: the URL `.../todo_test` with worker 2 gives `postgres://localhost:5432/todo_test_2`; `.../todo` and `.../todo_production` are refused with `the database name must end in _test`, and a missing variable stops with `Set TEST_DATABASE_URL`.
+
+2. **One database per worker.** Files run in parallel (the variable `VITEST_POOL_ID` was `1` and `2` for two files I ran together), and two workers writing into one database would break each other's counts. A name with the worker id, as above, avoids it. The alternative is to run the files one at a time (`fileParallelism: false`), which is simpler and slower.
+
+3. **A way back to empty.** There are three common ways, and I tried each on a small `node:sqlite` database (built into Node 24, so nothing to install):
+
+   ```ts
+   // ex/rollback.ts: three ways to get an empty database back, tried on node:sqlite
+   import { DatabaseSync } from "node:sqlite";
+
+   const db = new DatabaseSync(":memory:");
+   db.exec("create table todos (id integer primary key, title text not null)");
+   const count = () => (db.prepare("select count(*) as c from todos").get() as { c: number }).c;
+   const add = (title: string) => db.prepare("insert into todos (title) values (?)").run(title);
+
+   // 1. roll back: every test runs inside a transaction that is never committed
+   db.exec("begin");
+   add("made in a test");
+   console.log("rollback: inside the test", count());
+   db.exec("rollback");
+   console.log("rollback: next test starts with", count());
+
+   // 2. truncate: delete the rows (and, in Postgres, restart the ids) before each test
+   add("left behind");
+   db.exec("delete from todos");
+   console.log("truncate: next test starts with", count());
+
+   // 3. a new database per test file: nothing to clean, but the schema is built every time
+   const fresh = new DatabaseSync(":memory:");
+   fresh.exec("create table todos (id integer primary key, title text not null)");
+   console.log("fresh: starts with", (fresh.prepare("select count(*) as c from todos").get() as { c: number }).c);
+   ```
+
+   It printed:
+
+   ```text
+   rollback: inside the test 1
+   rollback: next test starts with 0
+   truncate: next test starts with 0
+   fresh: starts with 0
+   ```
+
+   The trade-offs:
+
+   | Strategy | How | Good | Bad |
+   | --- | --- | --- | --- |
+   | Roll back | `begin` before the test, `rollback` after | very fast, nothing to clean | the code under test must use that one connection and not commit itself |
+   | Truncate | delete the rows before each test | simple, works through any connection | slower with many tables; you must list the tables |
+   | Fresh database | build a new one per file | perfect isolation | the schema is created every time |
+
+   For an API tested through HTTP, **truncate before each test** is the usual choice, because the request handler usually takes its own connection from a pool and cannot join a transaction that the test began. You will apply it to PostgreSQL when you reach `prisma`.
+
+4. **The real database, not a mock.** If a test replaces the database with a fake, it checks your fake. Constraints, unique indexes and transactions are what break in production, and only the real engine has them. Fake only what you do not own and cannot run locally: a payment provider, an email service, GitHub (as `oauth-github` did).
+
+5. **Build the data the test needs, in the test.** A shared "seed everything" file makes every test depend on data it cannot see. Small helper functions (`makeUser`, `createTodo`) that make exactly what one test needs keep each test readable on its own.
+
+## Common mistakes
+
+- Real clocks and `setTimeout` waits in tests. They make tests slow and flaky.
+- Leaving a fake clock on, so the next test runs in the year 2000.
+- Switching the rate limit off for everything, and so never testing it.
+- Testing against the development or production database.
+- Letting two parallel workers write into one database.
+
+<Exercise title="Predict the output">
+What do these two tests print, and in which of them does the failure appear? What is the one-line fix?
+
+```ts
+import { expect, it, vi } from "vitest";
+
+it("runs in the year 2000", () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2000-01-01T00:00:00Z"));
+  expect(new Date().getFullYear()).toBe(2000);
+});
+
+it("runs in the real present", () => {
+  expect(new Date().getFullYear()).toBeGreaterThan(2020);
+});
+```
+
+<Solution>
+The first test passes. The second fails with `expected 2000 to be greater than 2020`: nobody restored the real clock, so the fake one leaks into every later test in the file (and the failing test is not the one with the bug, which makes it confusing to read). The fix is to restore it after each test:
+
+```ts
+import { afterEach, vi } from "vitest";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+```
+
+With that, both tests pass (I ran both versions). Putting this in `test/setup.ts` instead protects every file at once.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the rate-limit test">
+A teammate wrote this test for the login limit. It fails with `expected 401 to be 429`, although the limiter works. Why, and how do you fix it?
+
+```ts
+import request from "supertest";
+import { expect, it, vi } from "vitest";
+import { app } from "../src/app.ts";
+
+vi.stubEnv("RATE_LIMIT", "true");
+
+it("blocks the sixth failed login", async () => {
+  const attempt = () =>
+    request(app).post("/v1/auth/login").send({ email: "ada@example.com", password: "wrong password" });
+
+  for (let i = 1; i <= 5; i++) await attempt();
+
+  expect((await attempt()).status).toBe(429);
+});
+```
+
+<Solution>
+`import` lines are moved to the top and run first. By the time `vi.stubEnv` runs, `app.ts` has been imported, `config.ts` has read `process.env` (where the shared setup says `RATE_LIMIT=false`), and the limiters were built to skip every request. The sixth attempt gets the ordinary `401`. I ran it and got `AssertionError: expected 401 to be 429`.
+
+The fix is the order from the lesson: change the variable first, drop the modules that already loaded, then import with `await import(...)`:
+
+```ts
+vi.stubEnv("RATE_LIMIT", "true");
+vi.resetModules();
+const { default: request } = await import("supertest");
+const { app } = await import("../src/app.ts");
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Your own test database guard">
+Write `testDatabaseUrl()` as above, but make it also refuse the host names that are not local (anything except `localhost` and `127.0.0.1`), because a `todo_test` database can exist on a shared server too. What would you do about a CI service that runs PostgreSQL on another host?
+
+<Solution>
+```ts
+export function testDatabaseUrl(baseUrl = process.env.TEST_DATABASE_URL): string {
+  if (!baseUrl) throw new Error("Set TEST_DATABASE_URL");
+
+  const url = new URL(baseUrl);
+  const name = url.pathname.slice(1);
+  if (!name.endsWith("_test")) throw new Error(`"${name}" does not end in _test`);
+
+  const local = ["localhost", "127.0.0.1"];
+  if (!local.includes(url.hostname) && process.env.ALLOW_REMOTE_TEST_DB !== "true") {
+    throw new Error(`Refusing to run tests on ${url.hostname}`);
+  }
+
+  url.pathname = `/${name}_${process.env.VITEST_POOL_ID ?? "1"}`;
+  return url.toString();
+}
+```
+
+A CI job usually starts its PostgreSQL as a service container on `localhost`, so nothing needs to change. If the database really is on another host, the CI workflow sets `ALLOW_REMOTE_TEST_DB=true` on purpose, which makes the exception visible in the workflow file instead of being the default. (I did not run this variant; the version in the lesson text is the one that ran.)
+</Solution>
+</Exercise>

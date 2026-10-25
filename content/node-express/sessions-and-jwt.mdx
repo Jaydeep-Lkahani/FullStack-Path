@@ -1,0 +1,451 @@
+---
+title: Sessions, Cookies and JWT
+summary: Remember a logged-in user with an httpOnly session cookie, protect routes with a middleware, log out for real, and know when a JWT is the better choice.
+order: 17
+takeaways:
+  - "HTTP forgets every request, so after a successful login the server hands the browser a random session id in a cookie, and the browser sends it back with every request."
+  - "With a cookie session the server keeps the state: it looks the id up in a store, so logging out or banning a user takes effect at once."
+  - "Set `HttpOnly` (JavaScript cannot read the cookie, which limits what an XSS bug can steal), `Secure` (HTTPS only), `SameSite=Lax` (not sent on cross-site POSTs) and a lifetime."
+  - "A JWT is a signed, readable token that carries the user's data; the server needs no lookup, but it cannot cancel a token before it expires."
+  - "For a web app that talks to its own API, cookie sessions are the simpler and safer default; JWTs fit service-to-service calls and third-party tokens."
+videos:
+  - title: "Session vs Token Authentication in 100 Seconds"
+    channel: "Fireship"
+    duration: "2:18"
+    url: https://www.youtube.com/watch?v=UBUNrFtufWo
+docs:
+  - title: "MDN — Using HTTP cookies"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies
+  - title: "MDN — Set-Cookie header"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie
+  - title: "Express 5.x API: res.cookie"
+    url: https://expressjs.com/en/5x/api.html
+  - title: "OWASP — Session Management Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
+  - title: "jwt.io — Introduction to JSON Web Tokens"
+    url: https://www.jwt.io/introduction
+---
+
+In `authentication` the login route checks a password and then... forgets. HTTP is **stateless**: the next request arrives as a stranger, and nobody wants to type a password for every click. This lesson adds the missing piece, remembering who is logged in, with the technique most web apps use (a **cookie session**), and then compares it with the other famous answer, the **JWT**. It is a favourite interview question, and the `react-meets-express` and `auth-end-to-end` lessons use what you build here. Written for Express 5.3, `cookie-parser` 1.4 and Node 24; it continues the code of the last lesson.
+
+## How a cookie works
+
+A **cookie** is a small piece of text the server asks the browser to keep, and the browser then attaches it to every later request to that site. Two headers do all the work:
+
+The server sends `Set-Cookie: sid=…; HttpOnly; …` in the login response, and from then on the browser adds `Cookie: sid=…` to every request to that site. The browser does this by itself, for `fetch` too (with an option you will meet in `auth-end-to-end`). The idea of a **session**: the cookie holds only a long random id, and the server keeps a table of *which id belongs to which user*. The cookie is a coat-check ticket, not the coat.
+
+```text
+browser                                  server
+  | -- POST /login (email, password) -->  check password
+  |                                       sessions: "3Rz4…" -> user 1
+  | <-- Set-Cookie: sid=3Rz4… ---------
+  | -- GET /me   Cookie: sid=3Rz4… --->   look up "3Rz4…" -> user 1
+  | <-- 200 { user 1 } ----------------
+```
+
+## Building the session store
+
+```ts
+// src/sessions.ts
+import { randomBytes } from "node:crypto";
+import type { CookieOptions } from "express";
+import { config } from "./config.ts";
+
+export const SESSION_COOKIE = "sid";
+export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // one week
+
+type Session = { userId: number; expiresAt: number };
+
+// session id -> who it belongs to. In memory, so a restart logs everyone out.
+const sessions = new Map<string, Session>();
+
+export const cookieOptions: CookieOptions = {
+  httpOnly: true, // JavaScript in the page cannot read it
+  sameSite: "lax", // not sent on cross-site POSTs
+  secure: config.NODE_ENV === "production", // HTTPS only in production
+  path: "/",
+};
+
+export function createSession(userId: number): string {
+  const id = randomBytes(32).toString("base64url"); // 256 random bits: cannot be guessed
+  sessions.set(id, { userId, expiresAt: Date.now() + SESSION_TTL_MS });
+  return id;
+}
+
+export function getSession(id: string): Session | undefined {
+  const session = sessions.get(id);
+  if (!session) return undefined;
+  if (session.expiresAt <= Date.now()) {
+    sessions.delete(id);
+    return undefined;
+  }
+  return session;
+}
+
+export function destroySession(id: string): void {
+  sessions.delete(id);
+}
+```
+
+- The id comes from `randomBytes(32)`: 256 random bits, impossible to guess. Never build it from a counter, a timestamp or the user's id, and never use `Math.random()`, which is predictable.
+- `getSession` checks the expiry itself, so an old session is dead even if the browser still sends it.
+- `cookieOptions` lives in one object, because **clearing** a cookie later must use the same `path` and flags as setting it.
+
+| Option | What it does | Why |
+| --- | --- | --- |
+| `httpOnly` | `document.cookie` cannot see the cookie | Script injected into the page (XSS) cannot steal the session id |
+| `secure` | sent only over HTTPS | The id is not readable on public Wi-Fi |
+| `sameSite: "lax"` | not sent when another site makes the browser send a POST to you | Blocks most CSRF; the `security` lesson covers the rest |
+| `maxAge` | lifetime in milliseconds | Without it the cookie dies when the browser closes |
+
+<Callout type="note" title="Secure is off in development">
+A `Secure` cookie is never sent over plain `http://localhost` in some browsers, so `cookieOptions` turns it on only when `NODE_ENV` is `production`. In production your host terminates HTTPS, so the flag is a must there. Also note that `SameSite` talks about *sites*, not origins: `localhost:5173` and `localhost:4200` count as the same site, because the port is not part of it.
+</Callout>
+
+## The middleware that protects routes
+
+`cookie-parser` fills `req.cookies` from the `Cookie` header (Express itself can send cookies, but not read them):
+
+```bash
+npm install cookie-parser
+npm install -D @types/cookie-parser
+```
+
+```ts
+// src/middleware/requireAuth.ts
+import type { NextFunction, Request, Response } from "express";
+import { unauthorized } from "../errors.ts";
+import { getSession, SESSION_COOKIE } from "../sessions.ts";
+import { findUserById, toPublic } from "../users.ts";
+
+export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const cookie: unknown = req.cookies?.[SESSION_COOKIE];
+  const sessionId = typeof cookie === "string" ? cookie : undefined;
+  const session = sessionId && getSession(sessionId);
+  const user = session && findUserById(session.userId);
+
+  if (!sessionId || !user) {
+    next(unauthorized());
+    return;
+  }
+
+  req.user = toPublic(user);
+  req.sessionId = sessionId;
+  next();
+}
+```
+
+`requireAuth` is a middleware like the ones in `express-middleware`: it either calls `next(error)` with a `401`, or **attaches `req.user`** and lets the request through. A missing cookie, a forged id and an expired session all end the same way. TypeScript does not know about `req.user` yet, so one small file teaches it:
+
+```ts
+// src/express.d.ts
+import type { PublicUser } from "./users.ts";
+
+// teach TypeScript about the fields requireAuth adds to the request
+declare global {
+  namespace Express {
+    interface Request {
+      user?: PublicUser;
+      sessionId?: string;
+    }
+  }
+}
+```
+
+This is **declaration merging**: it adds two optional fields to Express's own `Request` type. It holds only types, so Node never runs it (nothing imports it) and TypeScript finds it through `"include": ["src"]` in `tsconfig.json`.
+
+## Login, me and logout
+
+```ts
+// src/routes/auth.ts
+import { Router } from "express";
+import { unauthorized } from "../errors.ts";
+import { requireAuth } from "../middleware/requireAuth.ts";
+import { requireJson } from "../middleware/requireJson.ts";
+import { loginSchema, signupSchema } from "../schemas/auth.ts";
+import {
+  cookieOptions,
+  createSession,
+  destroySession,
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+} from "../sessions.ts";
+import { checkLogin, createUser, toPublic } from "../users.ts";
+import { parse } from "../validate.ts";
+
+export const authRouter = Router();
+
+// POST /v1/auth/signup  { "email": "...", "password": "..." }
+authRouter.post("/signup", requireJson, async (req, res) => {
+  const { email, password } = parse(signupSchema, req.body, "body");
+  const user = await createUser(email, password);
+  res.status(201).json({ data: toPublic(user) });
+});
+
+// POST /v1/auth/login  { "email": "...", "password": "..." }
+authRouter.post("/login", requireJson, async (req, res) => {
+  const { email, password } = parse(loginSchema, req.body, "body");
+  const user = await checkLogin(email, password);
+  if (!user) throw unauthorized("Invalid email or password"); // the same text for both causes
+
+  const sessionId = createSession(user.id);
+  res.cookie(SESSION_COOKIE, sessionId, { ...cookieOptions, maxAge: SESSION_TTL_MS });
+  res.json({ data: toPublic(user) });
+});
+
+// GET /v1/auth/me
+authRouter.get("/me", requireAuth, (req, res) => {
+  res.json({ data: req.user });
+});
+
+// POST /v1/auth/logout: removes the session on the server, then the cookie in the browser
+authRouter.post("/logout", requireAuth, (req, res) => {
+  destroySession(req.sessionId!); // requireAuth has set it
+  res.clearCookie(SESSION_COOKIE, cookieOptions);
+  res.status(204).end();
+});
+```
+
+New compared with the last lesson: the `login` route creates a session and sets the cookie in place of the comment, and there are two new routes. `me` answers "who am I?", which a frontend asks when the page loads. `logout` deletes the session **on the server** and then tells the browser to drop the cookie. The `!` on `req.sessionId` is safe because `requireAuth` ran first.
+
+Two more lines wire it up. `cookieParser()` must come before the routes, and `requireAuth` can guard a whole router: from now on the todos need a login.
+
+```ts
+// src/app.ts (added)
+import cookieParser from "cookie-parser";
+app.use(express.json());
+app.use(cookieParser());
+
+// src/routes/v1.ts (changed)
+v1Router.use("/auth", authRouter);
+v1Router.use("/todos", requireAuth, todosRouter);
+```
+
+Try it. `-c jar.txt` makes curl save cookies to a file (a **cookie jar**), and `-b jar.txt` sends them back, like a browser:
+
+```bash
+curl -i localhost:4200/v1/todos
+# HTTP/1.1 401 Unauthorized
+# {"error":{"code":"UNAUTHORIZED","message":"You must be logged in"}}
+
+curl -si -c jar.txt -X POST localhost:4200/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"correct horse battery"}'
+# Set-Cookie: sid=3Rz4vkFpd3zle7jeFB4lh4T--bEgci0sDdNL2H0sPAE; Max-Age=604800; Path=/; Expires=Thu, 29 Oct 2026 16:45:46 GMT; HttpOnly; SameSite=Lax
+
+curl -s -b jar.txt localhost:4200/v1/auth/me
+# {"data":{"id":1,"email":"ada@example.com","createdAt":"2026-10-22T16:45:46.419Z"}}
+
+curl -s -b jar.txt "localhost:4200/v1/todos?limit=1"   # 200, the todos are open now
+
+curl -si -b jar.txt -c jar.txt -X POST localhost:4200/v1/auth/logout
+# HTTP/1.1 204 No Content
+# Set-Cookie: sid=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax
+
+curl -s -b jar.txt localhost:4200/v1/auth/me
+# {"error":{"code":"UNAUTHORIZED","message":"You must be logged in"}}
+```
+
+The important test is the last kind: copy the id out of the jar **before** logging out, log out, then send the copied cookie by hand with `-H "Cookie: sid=…"`. It gets `401`, because the server forgot the session. That is the strength of server-side state, and the reason a leaked or stolen session can be ended.
+
+<Callout type="warning" title="Logout is a POST">
+A `GET /logout` can be triggered by an `<img src>` on any web page, or by a browser that prefetches links, and would log your users out against their will. Anything that changes state uses `POST`, as in the `rest-api-design` lesson.
+</Callout>
+
+## What an in-memory store cannot do
+
+`sessions` is a `Map` inside one Node process, so:
+
+- A restart logs everybody out, and a second server instance does not know the first one's sessions.
+- Expired sessions that nobody asks about stay in memory.
+
+Real apps keep sessions in a database table or in Redis (`stretch-redis-queues`), keyed by the id, with the same `createSession` / `getSession` / `destroySession` interface; that is why the interface is so small. Many apps use the `express-session` package, which gives you the same thing with pluggable stores. Writing it by hand once shows there is no magic in it. One more habit from production: store a **hash** of the session id (SHA-256 is fine here, the id is already random), so a leaked table does not hand out working sessions.
+
+## JWT: the other answer
+
+A **JSON Web Token** puts the user data **inside** the token, and signs it. There is no table to look up:
+
+```ts
+// ex/jwt.ts
+import { createHmac } from "node:crypto";
+
+const secret = "a-long-random-secret-only-the-server-knows";
+const b64 = (value: object) => Buffer.from(JSON.stringify(value)).toString("base64url");
+
+// a JWT is three base64url parts joined by dots: header.payload.signature
+const header = b64({ alg: "HS256", typ: "JWT" });
+const payload = b64({ sub: "1", role: "user", exp: 2_000_000_000 });
+const signature = createHmac("sha256", secret).update(`${header}.${payload}`).digest("base64url");
+const token = `${header}.${payload}.${signature}`;
+console.log(token);
+
+// anyone can read the payload: it is encoded, not encrypted
+const [, body] = token.split(".");
+console.log(JSON.parse(Buffer.from(body!, "base64url").toString()));
+
+// only the secret holder can make a matching signature
+function verify(jwt: string) {
+  const [h, p, s] = jwt.split(".");
+  const expected = createHmac("sha256", secret).update(`${h}.${p}`).digest("base64url");
+  return s === expected;
+}
+console.log(verify(token));
+
+// change the role to admin: the signature no longer matches
+const forgedBody = b64({ sub: "1", role: "admin", exp: 9999999999 });
+console.log(verify(`${header}.${forgedBody}.${signature}`));
+```
+
+```text
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwicm9sZSI6InVzZXIiLCJleHAiOjIwMDAwMDAwMDB9.2OQrbcpqq1iDeJJ1ZqicEZ8NISzlQFIayS0dLgLBPRQ
+{ sub: '1', role: 'user', exp: 2000000000 }
+true
+false
+```
+
+Three parts joined by dots: a header (the algorithm), the payload (the **claims**: `sub` is the subject, `exp` the expiry as Unix seconds) and the signature. Notice what the code shows:
+
+- The payload is only **encoded**, not encrypted: anyone who holds the token can read it. Never put secrets in it.
+- The signature is an HMAC with a secret only the server knows. Changing `"user"` to `"admin"` breaks it, so a valid token proves the server made it.
+- Verifying needs no database: just the secret and the clock.
+
+This code is for understanding only. In real code use the `jose` library, which checks the expiry, rejects unexpected algorithms and compares signatures safely. Always give `verify` the algorithm you expect; tokens with `alg: "none"` have fooled careless servers.
+
+### Sessions or JWT
+
+| | Cookie session | JWT |
+| --- | --- | --- |
+| Where the state lives | On the server (a lookup per request) | In the token |
+| Log out or ban a user | Delete the session: instant | Impossible before `exp`, unless you keep a deny list (which is state again) |
+| Scaling to many servers | Needs a shared store | Any server can check it |
+| Size | A short id | Hundreds of bytes on every request |
+| Where the client keeps it | An `HttpOnly` cookie, JavaScript cannot touch it | Often `localStorage`, which any XSS script can read |
+
+The "stateless, so it scales" argument of JWTs is real but rarely your problem: one database lookup per request is cheap, and you already have a database. The cost, no real logout, is felt immediately. The usual patch is a **short-lived access token** (say 15 minutes) plus a long-lived **refresh token** that the server stores and can revoke, which means you built a session system anyway, with more moving parts.
+
+The rule of thumb: **a web app talking to its own API should use cookie sessions.** JWTs earn their place when one service calls another, when a mobile app or third party holds the credential, and in OAuth, where the identity provider hands you a signed token (the `oauth-github` lesson, two lessons on).
+
+<Callout type="warning" title="A JWT in localStorage can be stolen by XSS">
+`browser-storage` explained that script in your page can read `localStorage`. A JWT kept there leaves the door open that `HttpOnly` closes. If you use JWTs in a browser, keep them in an `HttpOnly` cookie, and at that point you have the same cookie, only bigger.
+</Callout>
+
+## Common mistakes
+
+- A session id that is short, guessable, or made with `Math.random()`.
+- Forgetting `httpOnly`, so any injected script can read the cookie.
+- Logging out by clearing the cookie only: the old id still works for anyone who copied it.
+- Setting the cookie with one `path` and clearing it with another, so it stays.
+- Using the user's id as the cookie value: anybody can type `sid=2`.
+- Putting passwords or other secrets in a JWT payload because "it is signed".
+
+<Exercise title="Fix the bug">
+A colleague wrote this login. Name everything that is wrong with the cookie.
+
+```ts
+const user = await checkLogin(email, password);
+if (!user) throw unauthorized("Invalid email or password");
+
+res.cookie("userId", String(user.id));
+res.json({ data: toPublic(user) });
+```
+
+and the guard that reads it:
+
+```ts
+const user = findUserById(Number(req.cookies.userId));
+if (!user) return next(unauthorized());
+req.user = toPublic(user);
+next();
+```
+
+<Solution>
+The cookie holds the user's id, so anybody can open the browser tools, type `userId=2` and be user 2. There is no secret in it at all. It also has no `httpOnly` (an XSS script can read or overwrite it), no `secure`, no `sameSite`, and no lifetime. Because nothing lives on the server, logout can only clear the cookie, and a copied cookie works forever.
+
+The fix is what this lesson built: store a random id in the cookie, keep `id -> user` on the server with an expiry, and set `httpOnly`, `secure` in production, `sameSite` and `maxAge`. `Number(req.cookies.userId)` also turns a missing cookie into `NaN`, and the guard silently relies on `findUserById(NaN)` returning nothing.
+</Solution>
+</Exercise>
+
+<Exercise title="Expire idle sessions">
+Sessions currently last a week from login. Change them so that a session ends after **30 minutes without a request**, but never lives longer than a week in total. Test it with a fake clock.
+
+<Solution>
+```ts
+// src/sessions.ts (changed)
+const IDLE_MS = 30 * 60 * 1000;      // 30 minutes without a request
+const MAX_MS = SESSION_TTL_MS;       // never longer than a week in total
+
+type Session = { userId: number; createdAt: number; expiresAt: number };
+
+// createSession stores { userId, createdAt: now, expiresAt: now + IDLE_MS }
+
+export function getSession(id: string): Session | undefined {
+  const session = sessions.get(id);
+  if (!session) return undefined;
+
+  const now = Date.now();
+  if (session.expiresAt <= now) {
+    sessions.delete(id);
+    return undefined;
+  }
+  // each use pushes the deadline forward, but never past the hard cap
+  session.expiresAt = Math.min(now + IDLE_MS, session.createdAt + MAX_MS);
+  return session;
+}
+```
+
+Tried in `ex/sliding.ts` with `mock.timers.enable({ apis: ["Date"] })` from `node:test`, which replaces the clock so the test does not wait half an hour:
+
+```text
+after 20 min: true
+after 45 min: true
+after 80 min: false
+still alive just before day 7: true
+after 7 days of steady use: false
+```
+
+`getSession` moves the deadline forward on every use, and `Math.min` keeps it from passing the hard cap. The cookie can keep its one-week `maxAge`; the server decides when a session is dead.
+</Solution>
+</Exercise>
+
+<Exercise title="Change password and log out the other devices">
+Add `POST /v1/auth/password` with `{ currentPassword, newPassword }`. It must require a login, check the current password, store the new hash, and **end every other session** of that user while keeping the current one.
+
+<Solution>
+```ts
+// src/schemas/auth.ts (added)
+export const changePasswordSchema = z.object({
+  currentPassword: z.string({ error: "currentPassword is required" }).min(1).max(128),
+  newPassword: signupSchema.shape.password, // the same rules as at sign-up
+});
+
+// src/sessions.ts (added)
+export function destroyUserSessions(userId: number, keepId?: string): void {
+  for (const [id, session] of sessions) {
+    if (session.userId === userId && id !== keepId) sessions.delete(id);
+  }
+}
+
+// src/users.ts (added)
+export async function changePassword(user: User, current: string, next: string): Promise<boolean> {
+  if (!(await argon2.verify(user.passwordHash, current))) return false;
+  user.passwordHash = await argon2.hash(next);
+  return true;
+}
+
+// src/routes/auth.ts (added)
+authRouter.post("/password", requireAuth, requireJson, async (req, res) => {
+  const { currentPassword, newPassword } = parse(changePasswordSchema, req.body, "body");
+  const user = findUserById(req.user!.id)!;
+
+  if (!(await changePassword(user, currentPassword, newPassword))) {
+    throw new HttpError(403, "FORBIDDEN", "The current password is wrong");
+  }
+
+  destroyUserSessions(user.id, req.sessionId); // every other device is logged out
+  res.status(204).end();
+});
+```
+
+Tried with two logins (a "phone" and a "laptop"): a wrong current password gives `403`; changing it from the laptop gives `204`; afterwards the laptop's `/me` still answers `200`, the phone's answers `401`, the old password no longer logs in and the new one does. Deleting from a `Map` while looping over it is safe in JavaScript. A `403` fits better than `401` here, because the person *is* logged in; they just failed to prove it again. This "log out everywhere" step is what a stolen session needs after a password change.
+</Solution>
+</Exercise>

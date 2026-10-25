@@ -1,0 +1,566 @@
+---
+title: "Project: Notes API, Part 2"
+summary: "Finish the notes API with PATCH and DELETE, then write a Vitest and Supertest suite for every rule and break the code on purpose to find out which tests really notice."
+order: 28
+takeaways:
+  - "`PATCH` changes only the fields that were sent, so its schema is the create schema made partial, with a rule that at least one field must be present."
+  - "`DELETE` answers 204 with no body, and deleting the same note twice gives a 404 the second time."
+  - "A test file that goes through the real app with Supertest checks routing, parsing, validation, the store and the error handler together, which is where most bugs live."
+  - "Fake only `Date` when a test needs known timestamps, and put the real clock back after every test."
+  - "Use `it.each` for tests that differ only in their input, so every bad request gets its own named test."
+  - "A green test run proves nothing until you have seen a test fail: break the code on purpose, and fix every test that stays green."
+videos: []
+docs:
+  - title: "Vitest — Getting Started"
+    url: https://vitest.dev/guide/
+  - title: "Vitest — Mocking time"
+    url: https://vitest.dev/guide/mocking/timers
+  - title: "Supertest"
+    url: https://github.com/ladjs/supertest
+  - title: "MDN: PATCH request method"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods/PATCH
+  - title: "MDN: 204 No Content"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/204
+---
+
+An API that works when you try it with curl is not finished. It is finished when a test run can tell you, in two seconds, that it still works after the next change. This lesson completes the project from `project-notes-api-1`: the last two routes, the full test suite, and the exercise that matters most in testing, which is checking that your tests can fail. Same versions as Part 1: Express 5.3, Zod 4.6, Node 24, Vitest 5.0 and Supertest 7.3. Every file was run in a sandbox project; the suite has 38 tests.
+
+## Where you are
+
+Part 1 left you with these files, all working: `src/errors.ts`, `src/errorHandler.ts`, `src/validate.ts`, `src/schemas.ts`, `src/store.ts`, `src/routes.ts`, `src/app.ts` and `src/server.ts`. `GET`, `POST` and `GET /:id` work. If you did not build Part 1, do that first; the code below adds to it.
+
+## Stage 4: PATCH and DELETE
+
+Add the two routes. The rules:
+
+- **PATCH** changes only the fields that are in the body. Its schema is the same four fields as `POST`, but all optional (`.partial()`), and the body must contain at least one of them: `{}` is an error, and so is a body with only unknown fields, since Zod removes those and nothing is left. Every field keeps its own rules, so `{ "title": "   " }` is still refused. `updatedAt` moves; `createdAt` and `id` never do.
+- **DELETE** removes the note and answers **204 with no body**. The second `DELETE` of the same id is a 404, like any note that does not exist.
+- For both, the id is checked first (400), then the note is looked up (404), and only then the body is parsed.
+
+You need a new schema, two store functions and two handlers. Note that `.default()` does not belong in the patch schema: a default would silently refill fields the client did not send.
+
+<Solution>
+
+In `src/schemas.ts`, add the patch schema next to `newNoteSchema`, and its type next to the others at the bottom:
+
+```ts
+// src/schemas.ts (added)
+// PATCH: any of the fields, but at least one
+export const patchNoteSchema = z
+  .object({ title, body, tags, pinned }, { error: "Send a JSON object" })
+  .partial()
+  .refine((patch) => Object.keys(patch).length > 0, {
+    error: "Send at least one of: title, body, tags, pinned",
+  });
+```
+
+```ts
+// src/schemas.ts (added, with the other types)
+export type NotePatch = z.output<typeof patchNoteSchema>;
+```
+
+In `src/store.ts`, import the type (`import type { ListQuery, NewNote, NotePatch } from "./schemas.ts";`) and add:
+
+```ts
+// src/store.ts (added)
+export function updateNote(note: Note, patch: NotePatch): Note {
+  Object.assign(note, patch, { updatedAt: new Date().toISOString() });
+  return note;
+}
+
+export function deleteNote(id: string): boolean {
+  return notes.delete(id);
+}
+```
+
+In `src/routes.ts`, change the two imports at the top:
+
+```ts
+// src/routes.ts (imports)
+import {
+  idParamsSchema,
+  listQuerySchema,
+  newNoteSchema,
+  patchNoteSchema,
+} from "./schemas.ts";
+import { createNote, deleteNote, findNote, listNotes, updateNote } from "./store.ts";
+```
+
+and add the handlers at the end of the file:
+
+```ts
+// src/routes.ts (added)
+// PATCH /v1/notes/:id  { "pinned": true }  changes only the fields you send
+notesRouter.patch("/:id", (req, res) => {
+  const note = noteFromParams(req.params);
+  res.json({ data: updateNote(note, parse(patchNoteSchema, req.body, "body")) });
+});
+
+// DELETE /v1/notes/:id
+notesRouter.delete("/:id", (req, res) => {
+  deleteNote(noteFromParams(req.params).id);
+  res.status(204).end();
+});
+```
+
+`updateNote` changes the stored object with `Object.assign`. The patch contains only the keys the client sent (Zod leaves out a key that was not there), so fields not sent are not touched. Trying it:
+
+```text
+$ curl -i -X PATCH localhost:4000/v1/notes/300278e8-2cdf-4778-ac2b-5444161de9a1 \
+    -H "Content-Type: application/json" -d '{"pinned":true,"tags":["Home"]}'
+HTTP/1.1 200 OK
+
+{"data":{"id":"300278e8-2cdf-4778-ac2b-5444161de9a1","title":"Buy milk","body":"","tags":["home"],"pinned":true,"createdAt":"2026-10-25T08:00:04.176Z","updatedAt":"2026-10-25T08:00:04.203Z"}}
+
+$ curl -i -X PATCH localhost:4000/v1/notes/300278e8-2cdf-4778-ac2b-5444161de9a1 \
+    -H "Content-Type: application/json" -d '{}'
+HTTP/1.1 400 Bad Request
+
+{"error":{"code":"BAD_REQUEST","message":"Invalid request body","details":{"issues":[{"field":"body","message":"Send at least one of: title, body, tags, pinned"}]}}}
+
+$ curl -i -X DELETE localhost:4000/v1/notes/300278e8-2cdf-4778-ac2b-5444161de9a1
+HTTP/1.1 204 No Content
+
+$ curl -i localhost:4000/v1/notes/300278e8-2cdf-4778-ac2b-5444161de9a1
+HTTP/1.1 404 Not Found
+
+{"error":{"code":"NOT_FOUND","message":"No note with id 300278e8-2cdf-4778-ac2b-5444161de9a1"}}
+```
+
+Notice `createdAt` stayed and `updatedAt` moved by 27 milliseconds.
+
+</Solution>
+
+## Stage 5: Tests
+
+Time to write down what you have been checking by hand. Make `vitest.config.ts`, a setup file, a small helper and three test files:
+
+- `test/setup.ts` empties the store before **every** test (without that, tests see each other's notes and pass or fail by order) and puts the real clock back after every test.
+- `test/helpers.ts` has `addNote(body, at?)`, which creates a note through the API and, when `at` is given, fakes the clock first so the note gets a known `createdAt`. Fake only `Date` (`vi.useFakeTimers({ toFake: ["Date"] })`), or Supertest's own timers stop too.
+- `test/notes.test.ts`: create (shape, `Location`, cleaned input, fields the client may not set, 404 and 400 for ids), a table of bad inputs with `it.each`, broken JSON, a body that is not JSON, `PATCH` (only sent fields change, `updatedAt` moves, `{}` refused and nothing changed, unknown id), and `DELETE` (204, then 404).
+- `test/list.test.ts`: four notes with known times, then default order with pinned first, `tag`, `q` (**with a capital letter in the query**, you will see why), `pinned`, combined filters, both sort orders, page 2, a page past the end (200 with an empty list), and a table of bad queries.
+- `test/errors.test.ts`: the JSON 404 for an unknown URL, a body over 100 kB, and the 500 case. For the 500, build a tiny Express app with a route that throws and the real `errorHandler`, so you do not have to break the real app to test it.
+
+Test the **behaviour** a client sees (status, headers, body), not how the code is written, so that you can restructure the code later without touching the tests.
+
+<Solution>
+
+```ts
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["test/**/*.test.ts"],
+    setupFiles: ["test/setup.ts"],
+  },
+});
+```
+
+```ts
+// test/setup.ts
+import { afterEach, beforeEach, vi } from "vitest";
+import { resetNotes } from "../src/store.ts";
+
+// every test starts from an empty store and the real clock
+beforeEach(() => {
+  resetNotes();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+```
+
+```ts
+// test/helpers.ts
+import request from "supertest";
+import { vi } from "vitest";
+import { app } from "../src/app.ts";
+import type { Note } from "../src/store.ts";
+
+// Creates a note through the API. With `at`, the fake clock is set first, so the
+// note gets a known createdAt and the sort tests do not depend on the speed of the machine.
+export async function addNote(body: object, at?: string): Promise<Note> {
+  if (at) {
+    vi.useFakeTimers({ toFake: ["Date"] }); // only Date: Supertest keeps its real timers
+    vi.setSystemTime(new Date(at));
+  }
+  const res = await request(app).post("/v1/notes").send(body).expect(201);
+  return res.body.data;
+}
+
+export const titles = (res: { body: { data: Note[] } }) =>
+  res.body.data.map((note) => note.title);
+```
+
+```ts
+// test/notes.test.ts
+import request from "supertest";
+import { describe, expect, it, vi } from "vitest";
+import { app } from "../src/app.ts";
+import { addNote } from "./helpers.ts";
+
+const MISSING = "3f2b8c1e-5d3a-4b7e-9c1d-2a4e6f8a0b1c"; // a valid id that nobody has
+
+describe("creating and reading", () => {
+  it("creates a note, then finds it through Location", async () => {
+    const created = await request(app).post("/v1/notes").send({ title: "Buy milk" });
+
+    expect(created.status).toBe(201);
+    expect(created.body.data).toEqual({
+      id: expect.any(String),
+      title: "Buy milk",
+      body: "",
+      tags: [],
+      pinned: false,
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+    });
+    expect(created.headers.location).toBe(`/v1/notes/${created.body.data.id}`);
+
+    const fetched = await request(app).get(created.headers.location);
+    expect(fetched.body.data).toEqual(created.body.data);
+  });
+
+  it("cleans the input: trims the title, lowercases and de-duplicates the tags", async () => {
+    const note = await addNote({ title: "  Plan  ", tags: ["Work", " work ", "Ideas"] });
+
+    expect(note.title).toBe("Plan");
+    expect(note.tags).toEqual(["work", "ideas"]);
+  });
+
+  it("ignores fields the client may not set", async () => {
+    const note = await addNote({
+      title: "Mine",
+      id: "chosen-by-client",
+      createdAt: "2000-01-01T00:00:00.000Z",
+      admin: true,
+    });
+
+    expect(note.id).not.toBe("chosen-by-client");
+    expect(note.createdAt).not.toBe("2000-01-01T00:00:00.000Z");
+    expect(note).not.toHaveProperty("admin");
+  });
+
+  it("answers 404 for an unknown id and 400 for an id that is not an id", async () => {
+    const missing = await request(app).get(`/v1/notes/${MISSING}`);
+    expect(missing.status).toBe(404);
+    expect(missing.body.error.code).toBe("NOT_FOUND");
+
+    const garbage = await request(app).get("/v1/notes/abc");
+    expect(garbage.status).toBe(400);
+    expect(garbage.body.error.details.issues[0].field).toBe("id");
+  });
+});
+
+describe("bad input", () => {
+  it.each([
+    ["no title", {}, "title is required"],
+    ["a blank title", { title: "   " }, "title cannot be empty"],
+    ["a number as title", { title: 42 }, "title must be a string"],
+    [
+      "a title over 120 characters",
+      { title: "x".repeat(121) },
+      "title is at most 120 characters",
+    ],
+    ["tags that are not a list", { title: "a", tags: "work" }, "tags must be a list"],
+    [
+      "eleven tags",
+      { title: "a", tags: Array.from({ length: 11 }, (_, i) => `t${i}`) },
+      "at most 10 tags",
+    ],
+    ["a blank tag", { title: "a", tags: ["  "] }, "a tag cannot be empty"],
+    ["pinned as a string", { title: "a", pinned: "yes" }, "pinned must be true or false"],
+  ])("rejects %s with 400 and says what is wrong", async (_name, body, message) => {
+    const res = await request(app).post("/v1/notes").send(body);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("BAD_REQUEST");
+    expect(
+      res.body.error.details.issues.map((issue: { message: string }) => issue.message),
+    ).toContain(message);
+  });
+
+  it("reports every problem at once", async () => {
+    const res = await request(app).post("/v1/notes").send({ title: "", pinned: "yes" });
+
+    expect(res.body.error.details.issues).toHaveLength(2);
+  });
+
+  it("answers broken JSON with 400 INVALID_JSON, in the same error shape", async () => {
+    const res = await request(app).post("/v1/notes").type("json").send("{ not json");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("INVALID_JSON");
+  });
+
+  it("answers a body that is not JSON with 400, because there is no object to read", async () => {
+    const res = await request(app).post("/v1/notes").type("text").send("title=Buy milk");
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.issues[0].message).toBe("Send a JSON object");
+  });
+});
+
+describe("updating and deleting", () => {
+  it("PATCH changes only the fields you send and moves updatedAt, not createdAt", async () => {
+    const note = await addNote(
+      { title: "Draft", body: "keep me", tags: ["a"] },
+      "2026-10-01T09:00:00Z",
+    );
+    vi.setSystemTime(new Date("2026-10-02T09:00:00Z"));
+
+    const res = await request(app).patch(`/v1/notes/${note.id}`).send({ pinned: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({
+      ...note,
+      pinned: true,
+      updatedAt: "2026-10-02T09:00:00.000Z",
+    });
+    expect(res.body.data.createdAt).toBe("2026-10-01T09:00:00.000Z");
+  });
+
+  it("PATCH can clear things: an empty body and an empty tag list are allowed", async () => {
+    const note = await addNote({ title: "Draft", body: "text", tags: ["a"] });
+
+    const res = await request(app)
+      .patch(`/v1/notes/${note.id}`)
+      .send({ body: "", tags: [] });
+
+    expect(res.body.data).toMatchObject({ body: "", tags: [] });
+  });
+
+  it.each([
+    ["an empty object", {}],
+    ["only unknown fields", { color: "red" }],
+    ["a blank title", { title: " " }],
+  ])("PATCH with %s is a 400 and changes nothing", async (_name, patch) => {
+    const note = await addNote({ title: "Keep" });
+
+    const res = await request(app).patch(`/v1/notes/${note.id}`).send(patch);
+
+    expect(res.status).toBe(400);
+    const after = await request(app).get(`/v1/notes/${note.id}`);
+    expect(after.body.data).toEqual(note);
+  });
+
+  it("PATCH on an unknown id is a 404", async () => {
+    const res = await request(app).patch(`/v1/notes/${MISSING}`).send({ title: "x" });
+
+    expect(res.status).toBe(404);
+  });
+
+  it("DELETE answers 204 with no body, and then the note is gone", async () => {
+    const note = await addNote({ title: "Temporary" });
+
+    const deleted = await request(app).delete(`/v1/notes/${note.id}`);
+    expect(deleted.status).toBe(204);
+    expect(deleted.text).toBe("");
+
+    await request(app).get(`/v1/notes/${note.id}`).expect(404);
+    await request(app).delete(`/v1/notes/${note.id}`).expect(404);
+  });
+});
+```
+
+```ts
+// test/list.test.ts
+import request from "supertest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { app } from "../src/app.ts";
+import { addNote, titles } from "./helpers.ts";
+
+// four notes with known times; "Zebra" is pinned, and the oldest note is the one about milk
+beforeEach(async () => {
+  await addNote(
+    { title: "Buy milk", body: "two litres", tags: ["home", "shop"] },
+    "2026-10-01T09:00:00Z",
+  );
+  await addNote({ title: "apple pie", tags: ["home"] }, "2026-10-02T09:00:00Z");
+  await addNote(
+    { title: "Quarterly plan", body: "Milk the budget", tags: ["work"] },
+    "2026-10-03T09:00:00Z",
+  );
+  await addNote({ title: "Zebra", pinned: true }, "2026-10-04T09:00:00Z");
+});
+
+describe("GET /v1/notes", () => {
+  it("lists the newest-updated first, with pinned notes on top", async () => {
+    const res = await request(app).get("/v1/notes");
+
+    expect(titles(res)).toEqual(["Zebra", "Quarterly plan", "apple pie", "Buy milk"]);
+    expect(res.body.meta).toEqual({ page: 1, limit: 10, total: 4, totalPages: 1 });
+  });
+
+  it("filters by tag", async () => {
+    const res = await request(app).get("/v1/notes").query({ tag: "HOME" });
+
+    expect(titles(res)).toEqual(["apple pie", "Buy milk"]);
+  });
+
+  it("searches title and body, ignoring case", async () => {
+    const res = await request(app).get("/v1/notes").query({ q: "MILK" });
+
+    expect(titles(res)).toEqual(["Quarterly plan", "Buy milk"]);
+  });
+
+  it("filters by pinned", async () => {
+    expect(titles(await request(app).get("/v1/notes?pinned=true"))).toEqual(["Zebra"]);
+    expect(await request(app).get("/v1/notes?pinned=false")).toHaveProperty(
+      "body.meta.total",
+      3,
+    );
+  });
+
+  it("combines filters", async () => {
+    const res = await request(app).get("/v1/notes").query({ tag: "home", q: "pie" });
+
+    expect(titles(res)).toEqual(["apple pie"]);
+  });
+
+  it("sorts titles without regard to case, and keeps pinned notes first", async () => {
+    expect(titles(await request(app).get("/v1/notes?sort=title"))).toEqual([
+      "Zebra", // pinned: first whatever the sort says
+      "apple pie",
+      "Buy milk",
+      "Quarterly plan",
+    ]);
+    expect(titles(await request(app).get("/v1/notes?sort=createdAt"))).toEqual([
+      "Zebra",
+      "Buy milk",
+      "apple pie",
+      "Quarterly plan",
+    ]);
+  });
+
+  it("paginates and reports the totals", async () => {
+    const page2 = await request(app).get("/v1/notes").query({ limit: 3, page: 2 });
+
+    expect(titles(page2)).toEqual(["Buy milk"]);
+    expect(page2.body.meta).toEqual({ page: 2, limit: 3, total: 4, totalPages: 2 });
+
+    const beyond = await request(app).get("/v1/notes").query({ limit: 3, page: 9 });
+    expect(beyond.status).toBe(200);
+    expect(beyond.body.data).toEqual([]);
+  });
+
+  it.each([
+    ["an unknown sort", "sort=id"],
+    ["a limit of 0", "limit=0"],
+    ["a limit over 100", "limit=101"],
+    ["a page that is not a number", "page=two"],
+    ["pinned=yes", "pinned=yes"],
+    ["an empty search", "q="],
+  ])("rejects %s with 400", async (_name, query) => {
+    const res = await request(app).get(`/v1/notes?${query}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.issues.length).toBeGreaterThan(0);
+  });
+});
+```
+
+```ts
+// test/errors.test.ts
+import express from "express";
+import request from "supertest";
+import { expect, it, vi } from "vitest";
+import { app } from "../src/app.ts";
+import { errorHandler } from "../src/errorHandler.ts";
+
+it("answers an unknown URL with the JSON error shape, not Express's HTML page", async () => {
+  const res = await request(app).get("/v2/notes");
+
+  expect(res.status).toBe(404);
+  expect(res.headers["content-type"]).toMatch(/json/);
+  expect(res.body.error).toEqual({ code: "NOT_FOUND", message: "Cannot GET /v2/notes" });
+});
+
+it("answers a body over 100 kB with 413", async () => {
+  const res = await request(app)
+    .post("/v1/notes")
+    .send({ title: "x", body: "y".repeat(150_000) });
+
+  expect(res.status).toBe(413);
+  expect(res.body.error.code).toBe("PAYLOAD_TOO_LARGE");
+});
+
+it("hides the details of a crash from the client but writes them to the log", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const broken = express(); // a tiny app with a route that fails and the real error handler
+  broken.get("/boom", () => {
+    throw new Error("password for the database is hunter2");
+  });
+  broken.use(errorHandler);
+
+  const res = await request(broken).get("/boom");
+
+  expect(res.status).toBe(500);
+  expect(res.body).toEqual({
+    error: { code: "INTERNAL_ERROR", message: "Something went wrong" },
+  });
+  expect(JSON.stringify(res.body)).not.toContain("hunter2");
+  expect(log).toHaveBeenCalledOnce();
+});
+```
+
+Run `npx vitest run`:
+
+```text
+ Test Files  3 passed (3)
+      Tests  38 passed (38)
+```
+
+Why the tests look the way they do:
+
+- `request(app)` never opens a port. Supertest starts the app on a random free port for the length of one call, so tests do not clash with `npm run dev`.
+- Every `await request(...)` is awaited. Without `await`, a test can finish before the request does and pass whatever the route answers.
+- In `list.test.ts` all four notes are created in a `beforeEach` with a known time each, so "newest first" is a fact and not a guess about how fast the machine is. Without the fake clock, notes created in the same millisecond would have equal timestamps and the order would depend on luck.
+- The `it.each` tables give every bad input its own line in the report. When one fails, the name tells you which input it was.
+- The 500 test checks two things: the client sees nothing about the cause (`hunter2` is not in the body), and the error was still written to the log (`console.error` was called once). The `vi.spyOn(console, "error")` also keeps the test report free of the fake error.
+
+</Solution>
+
+## Break it on purpose
+
+A test suite that has never failed might not be able to. Make each change below in `src/`, run `npx vitest run`, check that the named test goes red, and undo the change. These are the results in the sandbox:
+
+| Break this | Result |
+| ---------- | ------ |
+| In `listNotes`, remove the `Number(b.pinned) - Number(a.pinned)` part of the sort | Only the sort test fails. In the default list the pinned note is also the newest, so it stays first anyway |
+| In `listNotes`, search with `q` as given instead of lowercased (`const needle = q`) | **No test fails**, until the search test used the capital letters in `MILK` |
+| In `sortKey`, stop lowercasing titles | The sort test fails (`Buy milk` jumps before `apple pie`) |
+| In `updateNote`, stop setting `updatedAt` | The PATCH test fails |
+| In `patchNoteSchema`, remove the `.refine` | Two tests fail: the empty body and the body of only unknown fields |
+| In `tags`, remove the `Set` that drops repeats | The "cleans the input" test fails |
+| In `newNoteSchema`, use `z.looseObject` instead of `z.object` | The "fields the client may not set" test fails: the client's own `id` wins |
+| In the POST route, remove `.location(...)` | The create test fails |
+| In `toHttpError`, answer a crash with the real `err.message` | The 500 test fails |
+| In `noteFromParams`, remove the 404 check | Three tests fail (GET, PATCH and DELETE of an unknown id) |
+| In `listQuerySchema`, stop lowercasing `tag` | The tag filter test fails |
+
+Two rows are lessons. The search test first used a lowercase query, so removing the lowercasing changed nothing and the suite stayed green; asking for `MILK` fixed it, and the search now fails when the lowercasing goes. And the pinned-first rule had one test only, because the example data made the pinned note the newest. Rules that interact with the data, such as sorting, need test data where the rule changes the outcome. Whenever you write a test for a rule, ask: which data would make this test fail if the rule were missing?
+
+<Callout type="tip" title="Do the same for your own tests">
+Pick one rule you wrote a test for, delete the line of code that makes it true, and run the suite. If it stays green, you have found a test that only looks like a test.
+</Callout>
+
+## Stretch goals and checking your work
+
+- **`If-Match` and `ETag`:** give each note a `version` number that goes up on every change, send it as an `ETag`, and make `PATCH` require `If-Match`. Answer 412 when the version is old, so two people editing the same note cannot overwrite each other without noticing.
+- **405 with `Allow`:** a `PUT` to `/v1/notes/:id` currently gets the JSON 404. Add the catch-all routes from `rest-api-build` so it answers 405 with an `Allow` header.
+- **Cursor pagination:** replace `page` with a `cursor` (the id and time of the last note seen), following `pagination-and-versioning`. Test that adding a note between two page requests does not repeat or skip a note.
+- **`GET /v1/tags`:** list every tag with the number of notes that use it, most used first.
+- **Persist to a file:** save the store to `notes.json` after every change with a write to a temporary file followed by a rename, as in `files-and-paths`, and load it at startup. Test with a temporary folder.
+- **Document it:** write `openapi.yaml` for the API, using `z.toJSONSchema` for the schemas as in `schemas-and-config`, and run the requests in Bruno (`openapi-and-bruno`).
+
+Before calling the project done, run:
+
+```bash
+npx tsc
+npx vitest run
+```
+
+Both should finish without errors, with 38 tests passing. Push the project to a GitHub repository with a short README: what the API does, how to run it, one `curl` example for each route, and the list of rules from Part 1. This is the first Node portfolio piece. What interviewers see in it is not the five routes but the details around them: input that is cleaned and checked, one error shape, a 500 that leaks nothing, and tests you have watched fail. The next project, `project-auth-service-1` (three parts), adds users, passwords and sessions on top of the same structure.

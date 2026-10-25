@@ -302,7 +302,7 @@ curl -i http://localhost:4200/                              # X-Request-Id: 8f4d
 curl -i -H "x-request-id: abc" http://localhost:4200/       # X-Request-Id: abc
 ```
 
-The middleware only adds information and passes the request on with `next()`. Passing along an id from the caller lets you follow one request across several services in the logs, a technique you will meet again in the `uploads-config-logging` lesson.
+The middleware only adds information and passes the request on with `next()`. Passing along an id from the caller lets you follow one request across several services in the logs, a technique you will meet again in the `structured-logging` lesson.
 </Solution>
 </Exercise>
 

@@ -1,0 +1,440 @@
+---
+title: Testing APIs with Vitest and Supertest
+summary: Test the Express API through HTTP with Vitest and Supertest, keep every test independent, send logged-in requests, and check that the tests can really fail.
+order: 25
+takeaways:
+  - "Supertest calls your Express `app` directly, without `listen()` or a port, so an API test is a normal async function: send a request, check the response."
+  - "Every test must start from the same known state: reset the stores before each test, or the tests depend on their order."
+  - "An agent from `request.agent(app)` keeps cookies like a browser tab, so a helper that logs in gives you an authenticated client."
+  - "A test that forgets `await` or `return` passes even when the API is wrong, so make each new test fail once on purpose."
+  - "Check the whole answer, including the error shape and the security rules, not only the status code."
+  - "Break the code on purpose and read the coverage report to learn whether the tests would notice a bug."
+videos:
+  - title: "Testing NodeJS API using Jest and Supertest"
+    channel: "Coding Owls"
+    duration: "12:36"
+    url: https://www.youtube.com/watch?v=UfX-QNCOFrE
+  - title: "Testing with Vitest FREE COURSE ⚡️"
+    channel: "Mehul Mohan"
+    duration: "42:25"
+    url: https://www.youtube.com/watch?v=cM_AeQHzlGg
+docs:
+  - title: "Vitest — Getting Started"
+    url: https://vitest.dev/guide/
+  - title: "Vitest — Coverage"
+    url: https://vitest.dev/guide/coverage
+  - title: "Vitest — Parallelism"
+    url: https://vitest.dev/guide/parallelism
+  - title: "Supertest (GitHub)"
+    url: https://github.com/forwardemail/supertest
+---
+
+An API you cannot test is an API you are afraid to change. Every lesson so far ended with you trying the API by hand with `curl` or Bruno, and that does not scale: after a month nobody remembers which of the 30 requests to repeat after touching the auth code. Tests are those requests written down, with the expected answers, run in two seconds. Job interviews for backend roles also ask "how do you test your API?", and the projects after this one (`project-notes-api-1` and `-2`, then `project-auth-service-1` to `-3`) are built on tests. This lesson covers the tests themselves; `testing-time-and-databases` follows with the clock, rate limits and the test database. It is written for Vitest 5.0, Supertest 7.3, Express 5 and Node 24.
+
+We test the API from the outside, through HTTP, the way a client would. The code is the finished API from `realtime-chat`, with a few small changes that tests ask for (the reset functions here, a rate-limit switch in the next lesson). Both videos are older than the versions used here, and the first one uses Jest instead of Vitest; Supertest and the `expect` calls work the same, and the code below is what ran.
+
+## What to test, and how
+
+| Kind | What it checks | Speed | Example here |
+| --- | --- | --- | --- |
+| Unit test | one function, no HTTP | fastest | `titleTaken()`, a Zod schema |
+| Integration test | a request through the real routes, middleware and stores | fast | `POST /v1/todos` answers `201` |
+| End-to-end test | a browser against a running system | slow | Playwright, in the `production` module |
+
+For an API the best value is the middle row. One request passes through the JSON parser, the login check, the validation, the handler and the error handler, and the test notices if any of them is wrong. **Vitest** runs the tests (you used it for React in `testing`); **Supertest** sends the HTTP requests.
+
+The reason `app` can be tested at all is the split from `express-middleware`: `app.ts` builds the app and exports it, `server.ts` calls `listen()`. Supertest takes the `app` and starts it on a free port for each request, so tests never fight over port 4200.
+
+## Setup
+
+```bash
+npm install -D vitest supertest @types/supertest @vitest/coverage-v8
+```
+
+```ts
+// vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["test/**/*.test.ts"],
+    setupFiles: ["test/setup.ts"],
+  },
+});
+```
+
+```json
+"scripts": {
+  "test": "vitest run",
+  "test:watch": "vitest",
+  "test:coverage": "vitest run --coverage"
+}
+```
+
+The next lesson adds one line to this config. `vitest run` runs once and exits (use it in CI); plain `vitest` stays on and reruns the affected tests when you save, which is the mode to work in. Vitest understands TypeScript by itself.
+
+Vitest sets `NODE_ENV` to `test`. The earlier lessons already used that: `logger.ts` is silent in tests, and `server.ts` (which seeds demo data) is never imported, so every test starts with no users and no todos.
+
+## Your first tests
+
+```ts
+// test/basics.test.ts
+import request from "supertest";
+import { describe, expect, it } from "vitest";
+import { app } from "../src/app.ts";
+
+describe("the app", () => {
+  it("describes itself at /", async () => {
+    const res = await request(app).get("/");
+
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+    expect(res.body).toEqual({ name: "todo-api", versions: ["v1"] });
+  });
+
+  it("answers an unknown URL with the JSON 404", async () => {
+    const res = await request(app).get("/nope");
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({
+      error: { code: "NOT_FOUND", message: "Cannot GET /nope" },
+    });
+  });
+
+  it("answers broken JSON with 400 INVALID_JSON", async () => {
+    const res = await request(app)
+      .post("/v1/auth/login")
+      .set("Content-Type", "application/json")
+      .send('{"email": ');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("INVALID_JSON");
+  });
+});
+```
+
+`request(app).get("/")` returns a promise of the response, so the test is an `async` function with `await`. The response has `status`, `headers` and the parsed JSON `body`. Notice the second test: it pins down the exact shape of the error from `express-error-handling`. That shape is a promise to every client, and a test is where it is kept.
+
+I ran it, and the first run found that **my own guess was wrong**: I had written `VALIDATION_ERROR` as the error code for a bad body, and the API answers `BAD_REQUEST`. A test written from memory checks your memory; run it once and look at what the API really says before you freeze that into the test.
+
+<Callout type="warning" title="The test that cannot fail">
+Forget the `await` and the test passes whatever the API does. I ran `it("...", () => { request(app).get("/nope").expect(200); })`: the route answers 404, and Vitest still printed `1 passed`. The request is started, nobody waits for it, and the test function ends first. Always `await` the request or `return` it, and when you add a test, make it fail once on purpose (change the expected status) to see that it can.
+</Callout>
+
+## Every test starts empty
+
+The stores in this API are module-level variables: `todos`, the `users` map, the `sessions` map, and the counters that hand out ids. They live as long as the test file runs, so one test's data leaks into the next. I turned the reset off and ran the todo tests: **10 of the 12 failed**, most with `That email is already registered`, because the second test tried to create Ada again.
+
+The fix is a way back to the start: each store module gets a `reset` function.
+
+```ts
+// src/todos.ts (the same idea in users.ts and sessions.ts)
+// for tests: back to an empty store whose first id is 1 again
+export function resetTodos(): void {
+  todos.length = 0;
+  nextId = 1;
+}
+```
+
+```ts
+// test/setup.ts
+import { beforeEach } from "vitest";
+import { resetSessions } from "../src/sessions.ts";
+import { resetTodos } from "../src/todos.ts";
+import { resetUsers } from "../src/users.ts";
+
+// every test starts from the same empty state
+beforeEach(() => {
+  resetTodos();
+  resetUsers();
+  resetSessions();
+});
+```
+
+`setupFiles` runs before every test file, and its `beforeEach` runs before every test. Resetting the id counters too means the first todo is always `id: 1`, so the tests can say so.
+
+Two facts about how Vitest runs things. **Files run in parallel** in separate workers, each with its own copy of the modules, so two files never share these stores. **Tests inside one file run one after another, in the order written**, sharing the file's state, which is why the reset is needed between them.
+
+<Callout type="note" title="Test-only code in the app">
+The three `reset` functions exist only for tests. That is the price of keeping data in module variables. When the data moves into a database (module `databases`) they disappear, and the cleaning happens in the database instead (see `testing-time-and-databases`).
+</Callout>
+
+## Logging in
+
+Most routes need a session cookie. Going through the sign-up and login forms in every test would be slow and noisy, so a helper does it:
+
+```ts
+// test/helpers.ts
+import request from "supertest";
+import { app } from "../src/app.ts";
+import type { Role } from "../src/schemas/user.ts";
+import { createUser } from "../src/users.ts";
+
+export const PASSWORD = "correct horse battery";
+
+// creates the account directly: faster than going through POST /signup every time
+export function makeUser(email: string, role: Role = "user") {
+  return createUser(email, PASSWORD, role);
+}
+
+// an agent is a Supertest client that keeps cookies between requests, like a browser tab
+export async function loginAs(email: string) {
+  const agent = request.agent(app);
+  await agent.post("/v1/auth/login").send({ email, password: PASSWORD }).expect(200);
+  return agent;
+}
+```
+
+`makeUser` creates the account directly, skipping `POST /signup` (that route has tests of its own). `loginAs` returns an **agent**: a Supertest client that remembers the cookies from earlier responses, like a browser tab. `.expect(200)` on the login makes a setup failure show up where it happens instead of as a mysterious `401` ten lines later.
+
+### Testing the routes
+
+```ts
+// test/todos.test.ts (the first test of "the todo routes")
+  it("creates a todo, then finds it through Location", async () => {
+    const ada = await makeUser("ada@example.com");
+    const agent = await loginAs("ada@example.com");
+
+    const created = await agent.post("/v1/todos").send({ title: "Write tests" });
+    expect(created.status).toBe(201);
+    expect(created.body.data).toEqual({
+      id: 1,
+      title: "Write tests",
+      done: false,
+      ownerId: ada.id,
+      createdAt: expect.any(String), // the clock decides this one
+    });
+
+    const fetched = await agent.get(created.headers.location);
+    expect(fetched.body.data).toEqual(created.body.data);
+  });
+```
+
+What to notice:
+
+- **`toEqual` for the whole body, `expect.any(String)` for what you cannot know.** The timestamp comes from the clock, so the test accepts any string there and checks everything else exactly. `toMatchObject` is the middle road: it checks only the fields you list.
+- **The `Location` header is followed**, which tests two things at once: the header is right, and the todo can be read back.
+- **Set up data without HTTP when HTTP is not the point.** The list test needs five todos; `createTodo` makes them directly, and the one request in the test is the one being tested.
+- **`ownerId: ada.id`** instead of a hard-coded `1`: the test says what it means.
+
+The same file goes on with `it.each` (one test per bad body: no title, empty title, a number, `done` as text), PATCH and DELETE, and the ownership rules from `authorization-oauth`: Bob gets the **same 404** for Ada's todo as for a todo that does not exist, and the admin sees everyone's todos. Those security rules are what you most want a test for: nobody notices them being broken until someone exploits it.
+
+### Logging out
+
+```ts
+// test/auth.test.ts (one test of "login, me and logout")
+  it("ends the session on the server when logging out", async () => {
+    await makeUser("ada@example.com");
+    const login = await request(app)
+      .post("/v1/auth/login")
+      .send({ email: "ada@example.com", password: PASSWORD });
+    const cookie = login.headers["set-cookie"]![0].split(";")[0]; // "sid=..."
+
+    await request(app).post("/v1/auth/logout").set("Cookie", cookie).expect(204);
+
+    // a stolen or copied cookie must be worthless now
+    const replay = await request(app).get("/v1/auth/me").set("Cookie", cookie);
+    expect(replay.status).toBe(401);
+  });
+```
+
+`auth.test.ts` also checks that a wrong password and an unknown email get the identical answer (the lesson `authentication` insisted on that). The logout test keeps the cookie, logs out, and then **replays the old cookie**. That is the attack the lesson `sessions-and-jwt` warned about, and the test proves the server forgot the session, not just the browser. It uses plain `request(app)` with `.set("Cookie", cookie)` because an agent would have thrown the cookie away on logout.
+
+## How good are the tests?
+
+A passing run says nothing about whether the tests would notice a bug. Two checks.
+
+**Break the code on purpose.** In `policy.ts` I changed `user.role === "admin" || todo.ownerId === user.id` to `true`, so anyone may touch any todo. Exactly one test failed, the one that checks Bob's 404:
+
+```text
+× hides another user's todo behind a 404
+AssertionError: expected 200 to be 404
+Test Files  1 failed | 2 passed (3)
+Tests  1 failed | 23 passed (24)
+```
+
+I put the line back and all 24 passed. That test is the only guard on the ownership rule, which is the point of keeping it.
+
+**Coverage** lists the lines that no test ran (`npm run test:coverage`). The part of the report that matters:
+
+```text
+File               | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s
+All files          |   53.69 |    43.75 |    54.4 |   55.89 |
+  requireRole.ts   |   16.66 |        0 |      50 |   16.66 | 8-13
+  routes/todos.ts  |   80.48 |    71.42 |   85.71 |      80 | 69-77,85
+  routes/users.ts  |   30.76 |        0 |       0 |   36.36 | 18,23-31
+  chat.ts          |   10.25 |        0 |       0 |   12.12 | 12-56
+```
+
+Lines 69-77 of `routes/todos.ts` are the whole `PUT` handler, and `requireRole` and the users routes are untested too: two exercises below close those gaps. Coverage tells you what is **not** tested; it cannot tell you that the tested lines are checked well (a test with no `expect` covers a line just as well). Treat a number as a search tool, not a goal.
+
+## Common mistakes
+
+- Forgetting `await` or `return`, so a test passes while the API is wrong.
+- Tests that depend on each other's data or order. Run one alone with `vitest run -t "name"`; if it fails alone, it was leaning on another.
+- Checking only the status. A `200` with the wrong body, or a `404` with the stack trace in it, passes.
+- Asserting the whole body when part of it changes by itself (ids, dates, random tokens).
+- Mocking so much that the test checks the mocks.
+
+<Exercise title="Predict the output">
+This file has no reset. Which of the three tests pass, and what does each failure say? Then: what happens if you run only `adds a pear` with `vitest run -t "adds a pear"`?
+
+```ts
+import { expect, it } from "vitest";
+
+const cart: string[] = [];
+
+it("adds an apple", () => {
+  cart.push("apple");
+  expect(cart).toHaveLength(1);
+});
+
+it("adds a pear", () => {
+  cart.push("pear");
+  expect(cart).toHaveLength(1);
+});
+
+it("starts empty", () => {
+  expect(cart).toHaveLength(0);
+});
+```
+
+<Solution>
+Tests in one file run in order and share `cart`. The first passes. The second fails: `expected [ 'apple', 'pear' ] to have a length of 1 but got 2`. The third fails too: `expected [ 'apple', 'pear' ] to have a length of +0 but got 2`. That is `Tests  2 failed | 1 passed (3)` (I ran it).
+
+Run alone with `-t "adds a pear"`, the other tests are skipped, so `cart` holds only the pear and the test **passes**. A test that passes alone and fails in the suite (or the reverse) is leaking state. The fix is a fresh `cart` per test:
+
+```ts
+let cart: string[];
+beforeEach(() => {
+  cart = [];
+});
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the test that cannot fail">
+The route `/nope` answers 404, yet this test passes. Fix it so that it fails with a clear message, then change the expected status to make it pass for the right reason.
+
+```ts
+it("answers 200 at /nope", () => {
+  request(app).get("/nope").expect(200);
+});
+```
+
+<Solution>
+```ts
+it("answers 200 at /nope", async () => {
+  await request(app).get("/nope").expect(200);
+});
+```
+
+With the `async` and the `await` it fails as it should: `Error: expected 200 "OK", got 404 "Not Found"`. Returning the chain (`return request(app).get("/nope").expect(200);`) works too. The correct test checks what the route really does:
+
+```ts
+it("answers 404 at /nope", async () => {
+  const res = await request(app).get("/nope");
+  expect(res.status).toBe(404);
+});
+```
+
+I ran both versions of the first test: the version without `await` printed `1 passed`; this one failed with the message above.
+</Solution>
+</Exercise>
+
+<Exercise title="Test the PUT route">
+`PUT /v1/todos/:id` has no tests (coverage showed lines 69-77 as untouched). Write three: it replaces `title` and `done`; it answers `400` when `done` is missing, because PUT replaces the whole todo; a todo may keep its own title but not take another of the owner's titles (`409`, compared without regard to case).
+
+<Solution>
+```ts
+// test/put.test.ts
+import { describe, expect, it } from "vitest";
+import { createTodo } from "../src/todos.ts";
+import { loginAs, makeUser } from "./helpers.ts";
+
+describe("PUT /v1/todos/:id", () => {
+  it("replaces title and done", async () => {
+    const ada = await makeUser("ada@example.com");
+    createTodo({ title: "Old", done: false }, ada.id);
+    const agent = await loginAs("ada@example.com");
+
+    const res = await agent.put("/v1/todos/1").send({ title: "New", done: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ id: 1, title: "New", done: true });
+  });
+
+  it("needs both fields, because PUT replaces the whole todo", async () => {
+    const ada = await makeUser("ada@example.com");
+    createTodo({ title: "Old", done: false }, ada.id);
+    const agent = await loginAs("ada@example.com");
+
+    const res = await agent.put("/v1/todos/1").send({ title: "New" });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("lets a todo keep its own title, but not take another one of the owner's", async () => {
+    const ada = await makeUser("ada@example.com");
+    createTodo({ title: "First", done: false }, ada.id);
+    createTodo({ title: "Second", done: false }, ada.id);
+    const agent = await loginAs("ada@example.com");
+
+    await agent.put("/v1/todos/1").send({ title: "First", done: true }).expect(200);
+    const clash = await agent.put("/v1/todos/1").send({ title: "second", done: true });
+
+    expect(clash.status).toBe(409);
+  });
+});
+```
+
+With these (and the next exercise) the lines of `routes/todos.ts` rose from 80% to 97.5%; only line 85, the `409` of PATCH, was still untouched. The middle `PUT` call in the third test, the one that keeps its own title, is the check that finds the bug where `titleTaken` forgets `exceptId`: every todo would then conflict with itself.
+</Solution>
+</Exercise>
+
+<Exercise title="Test the admin routes">
+`/v1/users` is only for admins (`requireRole("admin")`, from `authorization-oauth`). Write tests: a visitor gets `401`, a normal user `403`; an admin gets the list, and no password hash appears anywhere in the response; an admin cannot change their own role.
+
+<Solution>
+```ts
+// test/users.test.ts
+import { describe, expect, it } from "vitest";
+import { app } from "../src/app.ts";
+import request from "supertest";
+import { loginAs, makeUser } from "./helpers.ts";
+
+describe("/v1/users is for admins", () => {
+  it("answers 401 to a visitor and 403 to a normal user", async () => {
+    await makeUser("ada@example.com");
+    const ada = await loginAs("ada@example.com");
+
+    expect((await request(app).get("/v1/users")).status).toBe(401);
+    expect((await ada.get("/v1/users")).status).toBe(403);
+  });
+
+  it("lets an admin list users, without password hashes", async () => {
+    await makeUser("admin@example.com", "admin");
+    await makeUser("ada@example.com");
+    const admin = await loginAs("admin@example.com");
+
+    const res = await admin.get("/v1/users");
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(2);
+    expect(JSON.stringify(res.body)).not.toContain("passwordHash");
+  });
+
+  it("does not let an admin change their own role", async () => {
+    await makeUser("admin@example.com", "admin");
+    const admin = await loginAs("admin@example.com");
+
+    const res = await admin.patch("/v1/users/1").send({ role: "user" });
+
+    expect(res.status).toBe(403);
+  });
+});
+```
+
+Searching the whole serialized body for `passwordHash` is deliberately blunt: it also catches a hash leaking through a field you did not think of. `401` versus `403` is the difference between "who are you?" and "you may not", and the two get separate assertions.
+</Solution>
+</Exercise>

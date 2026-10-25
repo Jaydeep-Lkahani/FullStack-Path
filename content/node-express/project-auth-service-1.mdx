@@ -1,0 +1,395 @@
+---
+title: "Project: Auth Service, Part 1"
+summary: "Set up an auth service with Express 5 and Zod, then build users and sign-up: argon2 password hashing, a store that never shows the hash, and a login check that gives nothing away."
+order: 29
+takeaways:
+  - "Write the rules down first (what the password must look like, how long a session lives, what the API shows about a user), then build, then check each one by hand."
+  - "Store only a password hash, keep it out of every response with one `toPublic` function, and let the sign-up route choose the role, because the request body cannot be trusted to."
+  - "Hash before you check for a duplicate, and check and insert with no `await` between them, or two simultaneous sign-ups could both pass the check."
+  - "A login check must answer the same for a wrong password and an unknown email, and do the same amount of work in both cases, so an attacker learns nothing about which emails have accounts."
+  - "Zod drops the fields a schema does not list, so a `role` sent at sign-up never reaches the code that creates the user."
+videos: []
+docs:
+  - title: "OWASP — Authentication Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html
+  - title: "OWASP — Password Storage Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
+  - title: "node-argon2 on GitHub"
+    url: https://github.com/ranisalt/node-argon2
+  - title: "Zod — Defining schemas"
+    url: https://zod.dev/api
+---
+
+Almost every capstone project later in this course starts with "and users can log in", and almost every backend interview asks you to design it. You already met each piece: `authentication` (password hashing and the sign-up), `sessions-and-jwt` (cookies and sessions), `authorization-oauth` (roles) and `security` (what attackers try). Those lessons built the pieces inside a todo API. This project builds them again as a **standalone auth service**, on the structure of the Notes API from `project-notes-api-1`, so that you can copy it into any later project.
+
+It comes in three parts. **Part 1** (this lesson) sets up the project and builds the users and the sign-up. **Part 2** adds sessions, login, `/me`, logout, roles with an admin API, changing a password and "log out everywhere". **Part 3** is the test suite and the break-it-on-purpose round. It was written for Express 5.3, Zod 4.6, `argon2` 0.45, `cookie-parser` 1.4, Node 24 and TypeScript 7, and every file was run in a sandbox project.
+
+## What you will build
+
+A small API whose only job is accounts. Anyone can sign up and log in; a logged-in user can see themselves, change their password and log out; an admin can list users and change roles.
+
+```text
+GET     /health                    → { "status": "ok" }
+POST    /v1/auth/signup            → create an account              → 201   (Part 1)
+POST    /v1/auth/login             → check the password, set cookie → 200   (Part 2)
+GET     /v1/auth/me                → who am I?                      → 200 or 401 (Part 2)
+POST    /v1/auth/logout            → end this session               → 204   (Part 2)
+POST    /v1/auth/logout-all        → end every session of mine      → 204   (Part 2)
+POST    /v1/auth/change-password   → new password, other sessions out → 204 (Part 2)
+GET     /v1/users                  → all users, admins only         → 200   (Part 2)
+PATCH   /v1/users/:id              → change a role, admins only     → 200   (Part 2)
+```
+
+### The rules (decide first, then code)
+
+- An email is trimmed and lowercased before it is checked or stored, so `Ada@Example.com` and `ada@example.com` are one account.
+- A password is 8 to 128 characters and is **never** trimmed or changed. The maximum is there so nobody can make the server hash a megabyte.
+- Only a password **hash** (argon2id) is stored. The hash never appears in a response, a log or a test failure message.
+- Everyone who signs up is a `user`. A `role` in the sign-up body is ignored. The first admin comes from the environment (Part 2).
+- A wrong password and an unknown email give the **same** answer, 401 "Invalid email or password", and take about the same time.
+- A session is 256 random bits, lives for 7 days and sits in a cookie that is `HttpOnly`, `SameSite=Lax` and, in production, `Secure`.
+- Logging in always creates a **new** session and ends the old one that the browser sent, if any.
+- Logging out deletes the session on the server. A copy of the cookie is worth nothing afterwards.
+- Every failure has the same JSON shape as in the Notes API, and a crash answers a bland 500.
+
+### Requirements for the whole project
+
+- [ ] Sign-up cleans the input, answers 201, refuses a taken email with 409, and never shows the hash
+- [ ] Login answers identically for a wrong password and an unknown email, and sets the session cookie
+- [ ] `GET /v1/auth/me` answers 401 without a valid session and the user with one
+- [ ] Logout answers 204 and kills the session on the server; sessions expire after a week
+- [ ] Changing the password needs the current one, and ends every other session
+- [ ] "Log out everywhere" ends all sessions of the user
+- [ ] Admin routes answer 401 to strangers, 403 to normal users and work for admins; a role change takes effect on the next request; nobody can change their own role
+- [ ] Every rule above has a test, and you have seen the tests fail
+
+<Callout type="tip" title="Write your own version first">
+Each stage says what to build and how to check it. Try it yourself first, even if it comes out rough, and open the solution to compare. The lessons named above are your reference, and the `parse` helper and the error handler come from the Notes API unchanged.
+</Callout>
+
+## Stage 1: Set up and the shared files
+
+Make the project:
+
+```bash
+mkdir auth-service && cd auth-service
+npm init -y
+npm pkg set type=module scripts.dev="node --watch --env-file-if-exists=.env src/server.ts" scripts.start="node src/server.ts" scripts.typecheck="tsc" scripts.test="vitest run"
+npm install express zod argon2 cookie-parser
+npm install -D typescript @types/node@24 @types/express @types/cookie-parser vitest supertest @types/supertest
+mkdir src test
+```
+
+`argon2` has a native part. npm may print a note that its install script was not approved; the package worked for me without approval, and if it does not for you, run `npm install-scripts approve argon2` as the note says.
+
+Now copy these files from your Notes API project, **unchanged**: `tsconfig.json`, `vitest.config.ts`, `src/errorHandler.ts` and `src/validate.ts`. Copy `src/errors.ts` too and add three helpers for the new status codes. Then write two files yourself:
+
+1. `src/config.ts`: read `process.env` once with a Zod schema, as in `schemas-and-config`. It has `PORT` (default 4000), `NODE_ENV` (`development`, `production` or `test`), and two optional settings for Part 2, `ADMIN_EMAIL` and `ADMIN_PASSWORD`, which must be set together or not at all. An invalid environment prints the problems and stops the process.
+2. `src/app.ts` and `src/server.ts`: the app (JSON body parser with a limit, `GET /health`, the JSON 404, the error handler last) and the file that listens. Keep them apart so tests can import the app.
+
+Run `npm run dev` and check `curl localhost:4000/health` and a JSON 404.
+
+<Solution>
+
+Added to `src/errors.ts`, next to `badRequest` and `notFound`:
+
+```ts
+// src/errors.ts (added)
+export const unauthorized = (message = "You must be logged in") =>
+  new HttpError(401, "UNAUTHORIZED", message);
+
+export const forbidden = (message = "You are not allowed to do that") =>
+  new HttpError(403, "FORBIDDEN", message);
+
+export const conflict = (message: string) => new HttpError(409, "CONFLICT", message);
+```
+
+```ts
+// src/config.ts
+import { z } from "zod";
+
+const configSchema = z
+  .object({
+    PORT: z.coerce.number().int().min(1).max(65535).default(4000),
+    NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+    // the first admin: created at startup when it does not exist yet
+    ADMIN_EMAIL: z.email().optional(),
+    ADMIN_PASSWORD: z.string().min(8).optional(),
+  })
+  .refine((env) => Boolean(env.ADMIN_EMAIL) === Boolean(env.ADMIN_PASSWORD), {
+    error: "Set both ADMIN_EMAIL and ADMIN_PASSWORD, or neither",
+  });
+
+const result = configSchema.safeParse(process.env);
+if (!result.success) {
+  console.error("Invalid environment:\n" + z.prettifyError(result.error));
+  process.exit(1);
+}
+
+export const config = result.data;
+```
+
+```ts
+// src/app.ts (first version)
+import express from "express";
+import { notFound } from "./errors.ts";
+import { errorHandler } from "./errorHandler.ts";
+
+export const app = express();
+
+app.use(express.json({ limit: "100kb" }));
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+// nothing answered: turn it into an error so it gets the same JSON shape
+app.use((req, res, next) => {
+  next(notFound(`Cannot ${req.method} ${req.path}`));
+});
+
+// must be last
+app.use(errorHandler);
+```
+
+```ts
+// src/server.ts
+import { app } from "./app.ts";
+import { config } from "./config.ts";
+
+app.listen(config.PORT, () => {
+  console.log(`Auth service on http://localhost:${config.PORT}`);
+});
+```
+
+```text
+$ curl -i localhost:4000/health
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"status":"ok"}
+
+$ curl localhost:4000/v1/auth/signup
+{"error":{"code":"NOT_FOUND","message":"Cannot GET /v1/auth/signup"}}
+```
+
+The `refine` in `config.ts` is a rule between two settings: an admin email without a password (or the other way round) is a mistake that should stop the server at startup, not surprise you later. Port 4000 is the default because port 3000 is where many dev servers already listen.
+
+</Solution>
+
+## Stage 2: Users and sign-up
+
+Two files hold the rules about accounts, and one route exposes sign-up. Write:
+
+- `src/schemas.ts`: the `email` rule (trim, lowercase, then check it is an address), `signupSchema` (email and a password of 8 to 128 characters), `loginSchema` (email and a password that only has to be present: an old password from before today's rules must still log in), and `roleSchema` (`user` or `admin`) with its `Role` type. Give every field a clear message.
+- `src/users.ts`: the `User` type (`id` as a UUID, `email`, `role`, `passwordHash`, `createdAt`) and `PublicUser`, the same without the hash. The users live in a `Map`. Write `toPublic`, `findUserByEmail`, `findUserById`, `resetUsers` (for tests), `createUser(email, password, role = "user")` and `checkLogin(email, password)`.
+- `createUser` hashes with argon2 **before** it checks for a duplicate (the hash takes tens of milliseconds, and the check and the insert must have no `await` between them, or two simultaneous sign-ups could both pass the check) and throws a 409 when the email exists.
+- `checkLogin` returns the user, or `null` for both causes of failure. When the email is unknown it must still verify the password against a **dummy hash** (a real hash of a throwaway password, made once at startup), so that the unknown-email path takes as long as the wrong-password path.
+- `src/routes/auth.ts` with `POST /signup` only, mounted in `app.ts` at `/v1/auth`. It parses the body, creates the user and answers 201 with `toPublic(user)`.
+
+Check the store with a scratch script before you trust it:
+
+```ts
+// scratch.ts (delete it afterwards)
+import { checkLogin, createUser } from "./src/users.ts";
+
+const ada = await createUser("ada@example.com", "correct horse battery");
+console.log(ada.passwordHash.slice(0, 31) + "...");
+
+for (const [email, password] of [
+  ["ada@example.com", "correct horse battery"],
+  ["ada@example.com", "wrong password"],
+  ["nobody@example.com", "wrong password"],
+]) {
+  const start = performance.now();
+  const user = await checkLogin(email, password);
+  console.log(`${email} / ${password}: ${user ? "ok" : "null"} in ${Math.round(performance.now() - start)} ms`);
+}
+```
+
+<Solution>
+
+```ts
+// src/schemas.ts
+import { z } from "zod";
+
+// "  Ada@Example.com " becomes "ada@example.com" before it is checked and stored
+const email = z
+  .string({ error: "email is required" })
+  .trim()
+  .toLowerCase()
+  .pipe(z.email("email must be a valid address"));
+
+// never trim a password; the maximum keeps a client from making the server hash megabytes
+const newPassword = (name: string) =>
+  z
+    .string({ error: `${name} is required` })
+    .min(8, `${name} must be at least 8 characters`)
+    .max(128, `${name} is at most 128 characters`);
+
+export const signupSchema = z.object({ email, password: newPassword("password") });
+
+// login only checks that something was sent: a password from before today's rules must still work
+export const loginSchema = z.object({
+  email,
+  password: z
+    .string({ error: "password is required" })
+    .min(1, "password is required")
+    .max(128),
+});
+
+export const roleSchema = z.enum(["user", "admin"], {
+  error: "role must be user or admin",
+});
+export type Role = z.infer<typeof roleSchema>;
+```
+
+```ts
+// src/users.ts
+import { randomUUID } from "node:crypto";
+import argon2 from "argon2";
+import { conflict } from "./errors.ts";
+import type { Role } from "./schemas.ts";
+
+export type User = {
+  id: string;
+  email: string;
+  role: Role;
+  passwordHash: string; // never leaves the server
+  createdAt: string;
+};
+
+// what the API may show: everything except the hash
+export type PublicUser = Omit<User, "passwordHash">;
+
+const users = new Map<string, User>();
+
+// a real hash of a throwaway password: it makes "no such email" as slow as "wrong password"
+const dummyHash = await argon2.hash("not-a-real-password");
+
+// for tests: no users again
+export function resetUsers(): void {
+  users.clear();
+}
+
+export function toPublic({ passwordHash, ...user }: User): PublicUser {
+  return user;
+}
+
+export function findUserById(id: string): User | undefined {
+  return users.get(id);
+}
+
+export function findUserByEmail(email: string): User | undefined {
+  return [...users.values()].find((user) => user.email === email);
+}
+
+export async function createUser(
+  email: string,
+  password: string,
+  role: Role = "user",
+): Promise<User> {
+  const passwordHash = await argon2.hash(password); // slow, so it comes first
+
+  // check and insert with no `await` between them, or two sign-ups could both pass
+  if (findUserByEmail(email)) throw conflict("That email is already registered");
+
+  const user: User = {
+    id: randomUUID(),
+    email,
+    role,
+    passwordHash,
+    createdAt: new Date().toISOString(),
+  };
+  users.set(user.id, user);
+  return user;
+}
+
+// the user when the password is right, otherwise null: callers cannot tell why
+export async function checkLogin(email: string, password: string): Promise<User | null> {
+  const user = findUserByEmail(email);
+  const ok = await argon2.verify(user?.passwordHash ?? dummyHash, password);
+  return user && ok ? user : null;
+}
+```
+
+```ts
+// src/routes/auth.ts (first version: sign-up only)
+import { Router } from "express";
+import { signupSchema } from "../schemas.ts";
+import { createUser, toPublic } from "../users.ts";
+import { parse } from "../validate.ts";
+
+export const authRouter = Router();
+
+// POST /v1/auth/signup  { "email": "...", "password": "..." }
+authRouter.post("/signup", async (req, res) => {
+  const { email, password } = parse(signupSchema, req.body, "body");
+  const user = await createUser(email, password); // role is always "user": the body cannot say otherwise
+  res
+    .status(201)
+    .location("/v1/auth/me")
+    .json({ data: toPublic(user) });
+});
+```
+
+Connect it in `src/app.ts` (two additions):
+
+```ts
+// src/app.ts (two additions)
+import { authRouter } from "./routes/auth.ts";
+
+// ...after app.get("/health", ...) and before the 404 handler:
+app.use("/v1/auth", authRouter);
+```
+
+The scratch script printed:
+
+```text
+$argon2id$v=19$m=65536,p=4,t=3$...
+ada@example.com / correct horse battery: ok in 35 ms
+ada@example.com / wrong password: null in 35 ms
+nobody@example.com / wrong password: null in 33 ms
+```
+
+The hash starts with `$argon2id$` and carries its own settings, and all three checks take about the same time, because the unknown email is checked against the dummy hash. Then sign-up with curl, in the order of the rules: a messy email and a `role` the client should not be able to set, then the same email in other letters, then a bad body:
+
+```text
+$ curl -i -X POST localhost:4000/v1/auth/signup -H "Content-Type: application/json" \
+    -d '{"email":" Ada@Example.com ","password":"correct horse battery","role":"admin"}'
+HTTP/1.1 201 Created
+Location: /v1/auth/me
+Content-Type: application/json; charset=utf-8
+
+{"data":{"id":"cf849dda-03cf-4ecd-8d21-41454b8fccd0","email":"ada@example.com","role":"user","createdAt":"2026-10-25T08:09:59.837Z"}}
+
+$ curl -i -X POST localhost:4000/v1/auth/signup -H "Content-Type: application/json" \
+    -d '{"email":"ADA@example.com","password":"another password 1"}'
+HTTP/1.1 409 Conflict
+
+{"error":{"code":"CONFLICT","message":"That email is already registered"}}
+
+$ curl -i -X POST localhost:4000/v1/auth/signup -H "Content-Type: application/json" \
+    -d '{"email":"nope","password":"short"}'
+HTTP/1.1 400 Bad Request
+
+{"error":{"code":"BAD_REQUEST","message":"Invalid request body","details":{"issues":[{"field":"email","message":"email must be a valid address"},{"field":"password","message":"password must be at least 8 characters"}]}}}
+```
+
+The `role` the client sent is gone: the schema has no `role`, so Zod dropped it, and the route calls `createUser(email, password)` which makes a `user`. Two places agree, so a mistake in one is not enough to make someone an admin.
+
+<Callout type="note" title="A 409 on sign-up tells a stranger which emails have accounts">
+Anyone can try an email and see whether it is taken. That is a trade-off most sites accept, because the user needs to know. The login must not do the same, which is why it has one answer for both failures. Sites that cannot accept it answer "check your inbox" for every sign-up and send the real message by email; that needs email, which this project does not have.
+</Callout>
+
+</Solution>
+
+## Where you are
+
+You have accounts that can be created, with a hash in the store and nothing but the safe fields in the response, a check that gives nothing away, and one error shape throughout. Nothing can log in yet. Check the project:
+
+```bash
+npx tsc
+```
+
+It should print nothing. In **Part 2** (`project-auth-service-2`) you make the login stick with a session cookie, protect routes with `requireAuth`, add roles and the admin routes, and let users change their password and log out everywhere.

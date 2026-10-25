@@ -1,0 +1,446 @@
+---
+title: Securing Your API
+summary: Harden an Express API against the common attacks - CORS, CSRF, security headers, rate limiting and path traversal - and read the OWASP API Top 10 as a checklist.
+order: 20
+takeaways:
+  - "CORS is a browser rule, not a lock on your API: it decides which websites may read your responses, and `curl` ignores it."
+  - "Allow CORS origins from an explicit list; never reflect the request's `Origin` back, and never test one with a loose regex."
+  - "With cookie sessions, refuse state-changing requests that carry an unknown `Origin`, on top of `SameSite=Lax`."
+  - "`helmet` adds a set of response headers in one line; `express-rate-limit` answers `429` with `Retry-After` when a client asks too often."
+  - "A rate limit is only as good as the client key: set `trust proxy` to the number of proxies you really have, no more."
+  - "The OWASP API Top 10 is a checklist: most items are answered by lessons you already built (authorization, validation, errors), the rest by this one."
+videos:
+  - title: "Learn CORS In 6 Minutes"
+    channel: "Web Dev Simplified"
+    duration: "6:06"
+    url: https://www.youtube.com/watch?v=PNtFSVU-YTI
+  - title: "OWASP API Security Top 10 Explained in 10 Minutes | API Security for Beginners & Developers"
+    channel: "The Gist"
+    duration: "9:14"
+    url: https://www.youtube.com/watch?v=TayqoNaBrRA
+docs:
+  - title: "MDN — Cross-Origin Resource Sharing (CORS)"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS
+  - title: "OWASP API Security Top 10 (2023)"
+    url: https://owasp.org/API-Security/editions/2023/en/0x11-t10/
+  - title: "OWASP — CSRF Prevention Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html
+  - title: "Helmet"
+    url: https://helmetjs.github.io/
+  - title: "express-rate-limit"
+    url: https://express-rate-limit.mintlify.app/
+  - title: "Express — behind proxies"
+    url: https://expressjs.com/en/guide/behind-proxies.html
+---
+
+Every API on the internet is attacked within hours of going live: bots try default passwords, guess URLs and send huge bodies. "Is your API secure?" is a standard interview question, and a weak answer ("I use HTTPS") is a quick way to lose the round. The strong answer is a short list you can say aloud: who may call me from a browser (CORS), who can trick a logged-in browser (CSRF), what the browser is told about my responses (headers), how often one client may ask (rate limits), and what the client may reach on disk (paths). This lesson adds each to the todo API of `oauth-github`, and then reads the **OWASP API Security Top 10** against it. Written for Express 5.3, `cors` 2.8, `helmet` 8.3, `express-rate-limit` 8.7 and Node 24. The first video is a short CORS explainer; the second is an overview of the OWASP list.
+
+## The OWASP API Top 10 as a checklist
+
+OWASP is a non-profit that publishes lists of the most common security mistakes. The API list (2023 edition, the newest on their site) is a good map. Most of it you have already built:
+
+| # | Risk | Where you met it |
+| --- | --- | --- |
+| API1 | Broken object level authorization | `authorization-oauth`: ownership checks, `404` for other people's todos |
+| API2 | Broken authentication | `authentication`, `sessions-and-jwt`; the login rate limit below |
+| API3 | Broken object property level authorization | `validation` (Zod drops unknown keys), `toPublic` (no `passwordHash` in responses) |
+| API4 | Unrestricted resource consumption | body size limit, `limit` caps in `pagination-and-versioning`; rate limits below |
+| API5 | Broken function level authorization | `requireRole` |
+| API6 | Unrestricted access to sensitive business flows | rate limit on sign-up below; think "what could a script abuse?" |
+| API7 | Server-side request forgery (SSRF) | below, in the checklist |
+| API8 | Security misconfiguration | CORS, headers and error output, below |
+| API9 | Improper inventory management | `/v1`, `Sunset`, the OpenAPI file |
+| API10 | Unsafe consumption of APIs | `oauth-github`: the answers from GitHub are checked with Zod |
+
+## CORS
+
+### The rule the browser enforces
+
+A browser page may freely load *other* sites' images and scripts, but JavaScript on `https://evil.example` may not **read** a response from `https://bank.example`, because the response could hold your private data. This is the **same-origin policy**. An **origin** is the triple scheme + host + port: `http://localhost:5173` and `http://localhost:4200` are different origins (the port differs), even though both are on your laptop.
+
+Your React app on `:5173` calling your API on `:4200` is cross-origin, so the browser asks the API for permission. **CORS** (Cross-Origin Resource Sharing) is that conversation, done with headers:
+
+```text
+ browser at http://localhost:5173                          API at http://localhost:4200
+   | -- OPTIONS /v1/todos  (the "preflight") ------------------->|
+   |      Origin: http://localhost:5173                           |
+   |      Access-Control-Request-Method: POST                     |
+   |      Access-Control-Request-Headers: content-type            |
+   |<-- 204  Access-Control-Allow-Origin: http://localhost:5173 --|
+   |         Access-Control-Allow-Methods / -Headers / -Credentials / -Max-Age
+   | -- POST /v1/todos  (the real request) --------------------->|
+   |<-- 201  Access-Control-Allow-Origin: http://localhost:5173 --|   (the page may read it)
+```
+
+A **simple** request (a `GET`, or a `POST` of a form or plain text, with no special headers) is sent at once and only the *reading* is checked. Anything else, such as a JSON `POST`, `PUT`, `DELETE`, or a custom header, is **preflighted**: the browser first sends an `OPTIONS` request and sends the real one only if the answer allows it.
+
+<Callout type="warning" title="CORS is not access control">
+CORS only changes what **browsers** let a *page* read. `curl`, scripts and attackers' servers ignore it completely. The request from a forbidden origin still **reaches** your server, and a simple one still runs; only the page is stopped from reading the answer. Real protection is authentication, authorization and the CSRF check below. What CORS gives you is the ability to say which websites may use your API with the user's cookie.
+</Callout>
+
+### The `cors` package
+
+The list of allowed origins and the proxy count are configuration, so they join the schema from `schemas-and-config`:
+
+```ts
+// src/config.ts (added)
+    // browsers on these origins may call the API (comma-separated, no paths)
+    CORS_ORIGINS: z
+      .string()
+      .default("http://localhost:5173")
+      .transform((list) => list.split(",").map((origin) => origin.trim()).filter(Boolean))
+      .pipe(z.array(z.url().transform((url) => new URL(url).origin))),
+    // how many proxies (load balancers) sit in front of this API; 0 means none
+    TRUST_PROXY: z.coerce.number().int().min(0).max(10).default(0),
+```
+
+```ts
+// src/middleware/cors.ts
+import cors from "cors";
+import { config } from "../config.ts";
+
+// An array is an allowlist: a listed Origin is echoed back (with `Vary: Origin`),
+// any other gets no CORS headers at all. The package also answers OPTIONS itself.
+export const corsMiddleware = cors({
+  origin: config.CORS_ORIGINS,
+  credentials: true, // let the browser send and accept the session cookie
+  allowedHeaders: ["Content-Type"],
+  maxAge: 600, // the browser may remember a preflight answer for ten minutes
+});
+```
+
+An **array** is an allowlist: for a listed `Origin` the package answers with that exact origin in `Access-Control-Allow-Origin` (plus `Vary: Origin`, so caches keep one copy per origin); for anything else it sends **no** CORS headers, and the browser blocks the page. `credentials: true` adds `Access-Control-Allow-Credentials: true`, which a page needs before `fetch(..., { credentials: "include" })` may send and receive cookies. The package also answers the preflight itself, so `OPTIONS` never reaches your routes. It must come **before** anything that can answer or reject a request, otherwise an error response goes out without CORS headers and the page only sees "Failed to fetch".
+
+What the API sends (with `curl`, which lets you set any `Origin`):
+
+```bash
+curl -si -X OPTIONS localhost:4200/v1/todos -H 'Origin: http://localhost:5173' -H 'Access-Control-Request-Method: POST'
+# HTTP/1.1 204 No Content
+# Access-Control-Allow-Origin: http://localhost:5173
+# Vary: Origin
+# Access-Control-Allow-Credentials: true
+# Access-Control-Allow-Methods: GET,HEAD,PUT,PATCH,POST,DELETE
+# Access-Control-Allow-Headers: Content-Type
+# Access-Control-Max-Age: 600
+
+curl -si -X OPTIONS localhost:4200/v1/todos -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST'
+# HTTP/1.1 204 No Content        <- no Access-Control-Allow-Origin line at all
+```
+
+I also ran `fetch` calls from two static pages in the browser, `http://localhost:5173` (on the list) and `http://localhost:5174` (not on it):
+
+| Call from the page | From `:5173` | From `:5174` |
+| --- | --- | --- |
+| `fetch(api + "/")` | `200`, readable | `TypeError: Failed to fetch`, although the server did answer |
+| JSON `POST` or `GET` with `credentials: "include"` | works, the cookie is sent | `Failed to fetch` |
+| a request with a header the API did not allow (`X-Custom`) | `Failed to fetch` (the preflight refuses it) | `Failed to fetch` |
+
+`Failed to fetch` hides the reason on purpose; the browser console names it.
+
+<Callout type="note" title="Cross-origin is not cross-site">
+`localhost:5173` and `localhost:4200` are different **origins** but the same **site** (the site is the registrable domain, here `localhost`, without the port). `SameSite=Lax` cookies therefore travel between them in development. In production, if the app is on `app.example.com` and the API on `api.example.com`, that is still one site; if they are on two different domains, the cookie needs `SameSite=None; Secure`, and browsers are tightening what they allow third-party cookies to do. `auth-end-to-end` deals with this; the simplest way out is to serve both under one domain.
+</Callout>
+
+### Four ways to get CORS wrong
+
+I ran four configurations against three origins (the app, an unrelated site and `evilexample.com`):
+
+```text
+config                                      app.example.com   evil.test   evilexample.com
+cors({ origin: true, credentials: true })   echoed            echoed      echoed
+cors({ origin: "*", credentials: true })    *                 *           *
+cors({ origin: /example\.com$/, ... })      echoed            (none)      echoed
+cors({ origin: ["https://app.example.com"], credentials: true })
+                                            echoed            (none)      (none)
+```
+
+- `origin: true` **reflects any origin** back, and with `credentials: true` every website on earth may then act as your logged-in user. It is "no CORS protection", written in a way that looks like protection.
+- `origin: "*"` with credentials is refused by browsers (the specification forbids it), so it fails safe, but it shows the confusion. `"*"` is right only for fully public data with no cookies (a public read-only API).
+- A **regex without anchors** matches too much: `/example\.com$/` accepts `evilexample.com`. If you must match a pattern, anchor both ends and include the dot: `/^https:\/\/([a-z0-9-]+\.)?example\.com$/`.
+- A **list** compared with exact strings is the boring, safe choice. Keep it in the environment (`CORS_ORIGINS`), different per deployment.
+
+## CSRF: the other direction
+
+CORS controls what a foreign page may *read*. **CSRF** (cross-site request forgery) is about what a foreign page may *cause*. If you are logged in to the API (the browser holds your `sid` cookie) and open `evil.example`, its page can make your browser send `POST /v1/auth/logout` or a form post to your API, and the browser attaches your cookie. The page cannot read the result, but the action already happened.
+
+You have two defences. `SameSite=Lax` on the session cookie (from `sessions-and-jwt`) stops browsers sending it on cross-site `POST`s, but it works only in browsers that implement it, and not between sites that count as the same site (a sibling subdomain, or another `localhost` port). So add a second, simple layer. A browser **always** sends an `Origin` header on a cross-origin `POST`, and a page cannot change it. Refuse any state-changing request from an origin you did not list:
+
+```ts
+// src/middleware/requireTrustedOrigin.ts
+import type { NextFunction, Request, Response } from "express";
+import { config } from "../config.ts";
+import { HttpError } from "../errors.ts";
+
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+// Cookie sessions + a browser on another site = CSRF risk. A browser always sends
+// `Origin` on a cross-site POST, so a state-changing request from an origin we do
+// not know is refused. No Origin (curl, tests, server-to-server) is allowed:
+// those clients are not riding on a victim's cookie.
+export function requireTrustedOrigin(req: Request, res: Response, next: NextFunction) {
+  const origin = req.get("origin");
+  if (!SAFE_METHODS.has(req.method) && origin && !config.CORS_ORIGINS.includes(origin)) {
+    next(new HttpError(403, "FORBIDDEN_ORIGIN", "Requests from this origin are not allowed"));
+    return;
+  }
+  next();
+}
+```
+
+A request **without** `Origin` (curl, a test, another server) passes: those clients are not riding on a victim's browser cookie, and they would need the cookie anyway. I tested it from the unlisted page by building a form that posts to `/v1/auth/logout` and submitting it (forms are not covered by CORS at all, so the request is sent): the server logged `POST /v1/auth/logout 403`, not `204`. A request with a JSON body is already protected twice: a preflight is needed, and `requireJson` answers `415` to a form post.
+
+<Callout type="tip" title="Tokens in headers do not have this problem">
+CSRF exists because browsers attach cookies by themselves. An API that expects `Authorization: Bearer ...` set by your own JavaScript is not exposed to it. That is one point for JWTs, and it is paid for in `sessions-and-jwt` with the question of where to store the token.
+</Callout>
+
+## Security headers with Helmet
+
+Besides the body, a response carries headers that tell the browser how to treat it. `helmet` sets a sensible bundle with one call:
+
+```ts
+app.use(helmet());
+```
+
+The ones it adds, as I measured them on this API (Helmet 8.3):
+
+| Header | What it does |
+| --- | --- |
+| `Strict-Transport-Security` | after one HTTPS visit, the browser uses HTTPS only for a year; ignored over plain HTTP |
+| `X-Content-Type-Options: nosniff` | the browser must trust `Content-Type` instead of guessing (a JSON file cannot become a script) |
+| `Content-Security-Policy` | which sources a page may load scripts, styles and images from |
+| `X-Frame-Options: SAMEORIGIN` | other sites may not put the response in an `iframe` (clickjacking) |
+| `Cross-Origin-Resource-Policy: same-origin` | other origins may not embed the response with `no-cors` tags such as `img` |
+| `Referrer-Policy: no-referrer` | no URL is leaked to other sites |
+| `X-Powered-By` removed | Express no longer announces itself |
+
+A JSON API returns no pages, so most of this is a cheap safety net. `Content-Security-Policy` matters more for sites that serve HTML (your Next.js app). The `Cross-Origin-Resource-Policy` header looks as if it would break your React app, but it does not apply to CORS `fetch` calls: the calls from `:5173` above worked with Helmet on. Helmet also does not make you safe by itself. It is one line of defence among many, and a header cannot repair an authorization bug.
+
+## Rate limiting
+
+Without a limit a client can try ten thousand passwords a minute, scrape every list, or send a million sign-ups. A **rate limiter** counts requests per client in a **window** and answers `429 Too Many Requests` after the limit. `argon2` made each guess slow for the attacker's hardware too, but only a limit stops a patient attack: `authentication` promised this one.
+
+```ts
+// src/middleware/rateLimit.ts
+import { ipKeyGenerator, rateLimit } from "express-rate-limit";
+import type { Options } from "express-rate-limit";
+import type { Request } from "express";
+import { HttpError } from "../errors.ts";
+
+function limiter(options: Partial<Options>) {
+  return rateLimit({
+    standardHeaders: "draft-8", // RateLimit and RateLimit-Policy headers
+    legacyHeaders: false, // no X-RateLimit-* copies
+    // the package has already set Retry-After; the error handler writes our JSON shape
+    handler: (req, res, next) => {
+      next(new HttpError(429, "RATE_LIMITED", "Too many requests, try again later"));
+    },
+    ...options,
+  });
+}
+
+const clientIp = (req: Request) => ipKeyGenerator(req.ip ?? "unknown"); // IPv6-safe
+
+const emailOf = (req: Request) =>
+  typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+
+// everything: a generous ceiling per client
+export const apiLimiter = limiter({ windowMs: 60_000, limit: 120 });
+
+// login: failed attempts only, so a real user is never blocked by logging in often
+// 1. per IP and account: stops guessing one password list against one account
+export const loginByAccount = limiter({
+  windowMs: 15 * 60_000,
+  limit: 5,
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => `${clientIp(req)}|${emailOf(req)}`,
+});
+// 2. per IP: stops one machine trying one password against many accounts
+export const loginByIp = limiter({
+  windowMs: 15 * 60_000,
+  limit: 20,
+  skipSuccessfulRequests: true,
+  keyGenerator: clientIp,
+});
+
+// sign-up: every attempt counts
+export const signupLimiter = limiter({ windowMs: 60 * 60_000, limit: 10 });
+```
+
+- `apiLimiter` is the ceiling for everything: 120 requests a minute per client.
+- `loginByAccount` allows **5 failed logins per IP and email** in 15 minutes. `skipSuccessfulRequests: true` means only status `400` and above counts, so a real user who logs in often is never blocked. The key contains the IP as well as the email on purpose: keyed by email alone, anybody could lock *you* out by failing on your address.
+- `loginByIp` allows 20 failures per IP, which catches **password spraying** (one common password tried against many accounts, each below the per-account limit).
+- `signupLimiter` counts every request, since each creates an account.
+- `ipKeyGenerator` shortens an IPv6 address to its network. A person on IPv6 has billions of addresses, so without it every request could come from a "new" client.
+- The handler passes a `429` to `next`, so the answer has the same JSON shape as every other error. The package sets `Retry-After` first.
+
+The routes only list the limiters before the handler:
+
+```ts
+// src/routes/auth.ts (changed)
+authRouter.post("/signup", signupLimiter, requireJson, async (req, res) => { /* as before */ });
+authRouter.post("/login", loginByIp, loginByAccount, requireJson, async (req, res) => { /* as before */ });
+```
+
+Trying it, with Ada's password wrong seven times:
+
+```text
+401 401 401 401 401 429 429
+```
+
+```bash
+curl -si -X POST localhost:4200/v1/auth/login -H 'Content-Type: application/json' -d '{"email":"ada@example.com","password":"x"}'
+# HTTP/1.1 429 Too Many Requests
+# RateLimit: "5-in-15min"; r=0; t=900
+# Retry-After: 900
+# {"error":{"code":"RATE_LIMITED","message":"Too many requests, try again later"}}
+```
+
+Facts from the run: after the lock the **right** password also gets `429` (that is the cost of the feature, for that IP and email only); another account from the same IP still answers `401`; 25 correct logins in a row were not blocked, and the next wrong one was a plain `401`. Because three limiters ran on that request, the response repeated the `RateLimit` header once per limiter (I cut the extra lines above). Clients should act on `Retry-After`.
+
+### The client key: `trust proxy`
+
+A limiter needs to know *who* is asking, and it uses `req.ip`. Behind a load balancer or a platform like Render, every connection comes from the proxy, and the real address arrives in the `X-Forwarded-For` header. Express reads that header only if you tell it how many proxies to believe, with `app.set("trust proxy", n)`; the app takes `n` from `TRUST_PROXY` (default `0`). Get it wrong in either direction:
+
+- Too low behind a proxy: all users share the proxy's address, so one heavy user blocks everyone.
+- Too high, or `true`: **anyone can invent an address**. I sent eight failed logins, each with a different `X-Forwarded-For: 10.0.0.N`:
+
+```text
+TRUST_PROXY=0:  401 401 401 401 401 429 429 429
+TRUST_PROXY=1 (no proxy really there):  401 401 401 401 401 401 401 401
+```
+
+With `1` and no proxy in front, the client's header *is* the address, and the limit disappears. Count the real proxies in front of your server (usually one on a hosting platform), and set exactly that.
+
+<Callout type="warning" title="The default store lives in memory">
+The counts are kept inside the Node process. A restart resets them, and with two server instances each keeps its own count, so the effective limit is double. For a real deployment use a shared store (Redis, in the optional `stretch-redis-queues` lesson). Here, memory is fine for learning.
+</Callout>
+
+## Path traversal
+
+`files-and-paths` warned about `?file=../../.env`. When a file name comes from a client, `path.join(uploads, name)` happily walks out of the folder. The fix is to resolve the final path and check that it is still inside:
+
+```ts
+// src/safePath.ts
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { badRequest } from "./errors.ts";
+
+// Join a name that came from a client onto a folder, and refuse anything that
+// ends up outside it ("../../.env", "/etc/passwd", "a/../../b").
+export function safeJoin(folder: string, name: string): string {
+  const root = resolve(folder);
+  const target = resolve(root, name); // resolves ".." and ignores `root` for absolute names
+  const inside = relative(root, target);
+  if (inside === ".." || inside.startsWith(".." + sep) || isAbsolute(inside)) {
+    throw badRequest("That path is not allowed");
+  }
+  return target;
+}
+```
+
+```text
+"photo.png"     -> /srv/app/uploads/photo.png
+"2026/10/a.png" -> /srv/app/uploads/2026/10/a.png
+"..hidden"      -> /srv/app/uploads/..hidden
+"../../.env"    -> refused
+"a/../../b"     -> refused
+"/etc/passwd"   -> refused
+".."            -> refused
+```
+
+`resolve` collapses every `..` first and lets an absolute name replace the folder, so the check sees where the path really points. A name such as `..hidden` is a valid file, which is why the check looks for `..` followed by a separator, not just for the characters `..`. A symbolic link inside the folder can still point outside; for user uploads, store files under names you generate (the `file-uploads` lesson does) and keep the client's name only as text in the database.
+
+## The rest of the checklist
+
+Some items are not code in `app.ts`:
+
+- **Body size.** `express.json({ limit: "100kb" })` is already the default; writing it down makes the limit a decision. A bigger body gets `413`, which the error handler already maps. Cap other inputs too: password length (a Zod `max`), page size, upload size.
+- **Mass assignment (API3).** Build objects field by field or from a Zod schema, never `Object.assign(todo, req.body)`. And never return a whole database row: `toPublic` exists so `passwordHash` cannot leak.
+- **Error output (API8).** The error handler sends `Something went wrong` for unexpected errors and logs the details; a stack trace in a response is a map for attackers. Keep `NODE_ENV=production` in production.
+- **SSRF (API7).** If you ever fetch a URL that a client provided (a webhook, an avatar link), the client can aim your server at `http://localhost:5432` or the cloud's metadata address. Allow only known hosts and `https`, and never follow redirects blindly.
+- **Dependencies.** Run `npm audit` and keep packages updated; most real attacks use a known bug in an old library. Commit `package-lock.json`.
+- **Secrets.** In the environment, never in git (`schemas-and-config`). Rotate a secret that was ever pasted into a chat or log.
+
+## Putting it together
+
+```ts
+// src/app.ts (changed)
+app.set("trust proxy", config.TRUST_PROXY);
+
+app.use(helmet()); // security headers on every response, including errors
+app.use(corsMiddleware); // before everything that can answer, so preflights never reach a route
+app.use(logger);
+app.use(apiLimiter);
+app.use(express.json({ limit: "100kb" }));
+app.use(cookieParser());
+app.use(requireTrustedOrigin);
+```
+
+The order is the lesson: headers and CORS first, so even rejections carry them; the global limiter before the body is parsed, so a flood is cheap to refuse; the origin check after cookies are read and before any route. All code ran against a copy of the todo API.
+
+## Common mistakes
+
+- Treating CORS as protection, or "fixing" a CORS error by reflecting every origin.
+- Testing an origin with an unanchored regex or `includes`.
+- `trust proxy` set to `true` "so it works", which lets anybody choose their own IP.
+- One global rate limit and nothing stricter on login and sign-up.
+- Counting successful logins against the limit (locking out real users), or keying only by email (letting attackers lock them out).
+- Joining a client's file name onto a folder without checking where it ends up.
+- Believing `helmet()` alone makes the API secure.
+
+<Exercise title="Predict the result">
+The API allows only `https://app.example.com`. A script on `https://evil.example` runs `fetch("https://api.example.com/v1/todos/1", { method: "DELETE", credentials: "include" })`, and the victim is logged in. (a) Does the browser send a preflight? (b) Is the delete executed if the API has **no** CSRF check and the `sid` cookie is `SameSite=None`? (c) Does the script get to read the answer?
+
+<Solution>
+(a) Yes. `DELETE` is not a simple method, so the browser sends an `OPTIONS` preflight first with `Origin: https://evil.example`. (b) The preflight answer has no `Access-Control-Allow-Origin` for that origin, so the browser **never sends** the `DELETE`: for a non-simple request, CORS does protect the action. (c) No. If the request had been a simple one, such as a form-style `POST`, it would have been sent with the cookie and executed, and only the reading would be blocked. That is why the `Origin` check exists: it protects exactly the simple requests that CORS lets through.
+</Solution>
+</Exercise>
+
+<Exercise title="Review this configuration">
+A teammate says "CORS is solved, I added this". Find the problems.
+
+```ts
+app.use(cors({ origin: (origin, done) => done(null, true), credentials: true }));
+app.set("trust proxy", true);
+app.use(rateLimit({ windowMs: 15 * 60_000, limit: 5 }));
+app.get("/v1/files", (req, res) => res.sendFile(path.join(UPLOADS, String(req.query.name))));
+```
+
+<Solution>
+1. The `origin` function always allows, so every origin is echoed back with credentials: any website can use a logged-in user's cookies and read the answers. Compare with a list: `origin: config.CORS_ORIGINS`.
+2. `trust proxy` is `true`, so a client can send any `X-Forwarded-For` and get a fresh rate-limit key each time. Use the real number of proxies (the package even logs a warning for `true`).
+3. The limit of 5 per 15 minutes applies to the **whole API**, including harmless `GET`s: real users are blocked after five clicks. Use a generous global limit, and strict ones on login and sign-up only, with `skipSuccessfulRequests` for login.
+4. Nothing checks the file name: `?name=../../.env` reads any file. Use `safeJoin(UPLOADS, name)`, and validate `name` with Zod (`String(undefined)` is the text `"undefined"`).
+5. Smaller points: the limit is not in a shared store, and the file route has no `requireAuth`.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the lockout">
+Alice reports that she cannot log in. Her logs show `429` after 5 attempts, and she says she typed the right password each time. The limiter is `rateLimit({ windowMs: 15 * 60_000, limit: 5 })` on `/login`, with no other options. What is wrong, and what else would you change to stop an attacker from locking her out deliberately?
+
+<Solution>
+Every request counts, successful or not, so five successful logins (for example, from several tabs or a script) use up the limit. Add `skipSuccessfulRequests: true` so only failures count. For the deliberate lockout: do not key by email alone. Key by IP **and** email, so an attacker's failures only lock *their* IP for Alice, and add a per-IP limiter so they cannot just try other accounts. If the API sits behind a proxy, check that `trust proxy` is correct, otherwise "their IP" is the proxy's and everybody shares one counter.
+</Solution>
+</Exercise>
+
+<Exercise title="Limit a password reset">
+Add a `POST /v1/auth/forgot` route (it emails a reset link). Write the limiter: at most 3 requests per hour per IP **and** per email address, with the same JSON error. Then say why the route should answer `202 Accepted` with the same text whether or not the email exists.
+
+<Solution>
+```ts
+// src/middleware/rateLimit.ts (added)
+export const forgotByIp = limiter({ windowMs: 60 * 60_000, limit: 3, keyGenerator: clientIp });
+
+// keyed by email alone on purpose: the limit protects the inbox of the person,
+// so one address cannot be flooded with mails from many IPs
+export const forgotByEmail = limiter({
+  windowMs: 60 * 60_000,
+  limit: 3,
+  keyGenerator: (req) => `forgot|${emailOf(req)}`,
+});
+
+// authRouter.post("/forgot", forgotByIp, forgotByEmail, requireJson, handler)
+```
+
+Every request counts here (no `skipSuccessfulRequests`), because every request sends a mail. Keying by email alone is the right choice for this route: unlike login, the worst a stranger can do is delay a reset by an hour, while without it they could bury the owner's inbox. The route answers `202` with "If that address has an account, we sent a link" in both cases; otherwise it tells attackers which email addresses have accounts (**user enumeration**), the same reason the login error never says whether the email or the password was wrong.
+</Solution>
+</Exercise>

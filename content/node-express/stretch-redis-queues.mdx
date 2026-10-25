@@ -1,0 +1,719 @@
+---
+title: "Stretch: Redis and Caching"
+summary: "Run Redis, talk to it from Node with ioredis, and put a cache with a time to live and safe invalidation in front of a slow database."
+order: 32
+takeaways:
+  - "Redis is an in-memory key-value server that every process can reach, so it holds what must survive a restart of one Node process or be seen by several of them."
+  - "Redis stores text and runs commands one at a time, so an `INCR` from a hundred clients adds exactly a hundred."
+  - "Cache-aside means look in Redis first, and on a miss load from the real source and store the result with a time to live; a cached value without an expiry is a bug."
+  - "A cache is an optimisation and never a dependency: when Redis is down, the code goes to the source instead of failing."
+  - "When the data changes, delete the cached key after the write, and let the time to live clean up whatever you forgot."
+  - "Put everything the answer depends on into the key, above all the user, and remember that cached values are JSON text, so dates come back as strings."
+videos:
+  - title: "Redis in 100 Seconds"
+    channel: "Fireship"
+    duration: "2:26"
+    url: https://www.youtube.com/watch?v=G1rOthIU-uo
+  - title: "Redis Crash Course"
+    channel: "Web Dev Simplified"
+    duration: "27:30"
+    url: https://www.youtube.com/watch?v=jgpVdJB2sKQ
+docs:
+  - title: "Redis — Documentation"
+    url: https://redis.io/docs/latest/develop/
+  - title: "Redis — Node.js clients"
+    url: https://redis.io/docs/latest/develop/clients/nodejs/
+  - title: "Redis — SET command"
+    url: https://redis.io/docs/latest/commands/set/
+  - title: "ioredis"
+    url: https://github.com/redis/ioredis
+---
+
+An API that is slow usually asks the database the same question over and over. The fix is a small, very fast store that sits next to the database and that every server of your API can reach, and very often that store is Redis. In interviews "how would you speed up this endpoint?" ends here, and so do "how would you rate limit across three servers?" and "how do you send emails without making the user wait?", which the next two lessons answer on the same Redis.
+
+This is an optional stretch lesson, written for Redis 8.10, ioredis 6.0, Express 5.3 and Node 24, and it continues the style of the `node-express` module. It is the first of three: this one covers Redis and caching, `stretch-redis-counters` covers rate limits, sessions and running Redis for real, and `stretch-background-jobs` covers job queues with BullMQ. Every file was run in a sandbox project with the Homebrew Redis. I could not use Docker here, so the Docker command below is the standard one but untried.
+
+## What Redis is, and when a `Map` is not enough
+
+**Redis** is a server that keeps data in memory and answers simple commands over the network. You give it a **key** (a string) and it stores a **value** under it: a string, a number, a hash (an object of strings), a list, a set, a sorted set. There are no tables, joins or query planner, which is why it is so fast.
+
+You already have a place to keep data in memory: a `Map` in your Node process. Redis is better in three cases:
+
+- **More than one process.** Two copies of your API each have their own `Map`, so a cache or a counter in a `Map` is different in each. Redis is one place that all of them share.
+- **Restarts.** A `Map` is empty after every deploy. Redis keeps its data while your Node processes come and go.
+- **Built-in expiry.** Redis deletes a key by itself when its time to live ends. With a `Map` you write that code, and you forget the cleanup.
+
+One more property matters later: Redis runs commands **one at a time**. If a hundred clients send `INCR visits` together, the counter goes up by exactly a hundred. Nothing is lost and you need no lock.
+
+### Install it and try it
+
+```bash
+brew install redis          # macOS with Homebrew
+redis-server                # starts it on port 6379 and stays in this terminal
+```
+
+On Ubuntu, `sudo apt install redis-server` does the same. With Docker (untried here) use `docker run -p 6379:6379 redis:8`. A free hosted Redis gives you a URL like `rediss://default:password@host:6380` instead. In a second terminal, `redis-cli ping` should answer `PONG`.
+
+### The commands you will use
+
+`redis-cli` is a shell for Redis. This is a real session; the lines starting with `>` are what I typed, and the others are what came back:
+
+```text
+> set greeting hello
+OK
+> get greeting
+"hello"
+> get nothing
+(nil)
+> set session:abc {"userId":1} EX 30
+OK
+> ttl session:abc
+(integer) 30
+> incr visits
+(integer) 1
+> incr visits
+(integer) 2
+> incrby visits 10
+(integer) 12
+> set lock:report 1 NX EX 10
+OK
+> set lock:report 2 NX EX 10
+(nil)
+> hset product:1 name Keyboard price 4999
+(integer) 2
+> hgetall product:1
+1) "name"
+2) "Keyboard"
+3) "price"
+4) "4999"
+> del greeting
+(integer) 1
+```
+
+What to take from it:
+
+- `GET` of a key that does not exist answers `(nil)`, which is `null` in Node.
+- `EX 30` stores the key with a **time to live** of 30 seconds. `TTL` shows what is left; `-1` means the key never expires and `-2` that it does not exist.
+- `INCR` adds one and returns the new number, starting from 0 if the key is missing. The read and the write cannot be split by another client.
+- `NX` means "only if the key does not exist yet". The second `set lock:report` answered `(nil)`: somebody already holds that key. This is how a simple lock works.
+- Keys are plain strings. The habit is to write them as `kind:id`, like `product:1`, and to start a cache's keys with a fixed word such as `cache:`, which keeps them apart from other uses of the same Redis.
+
+<Callout type="warning" title="Do not run KEYS * on a real server">
+`KEYS *` walks every key while Redis answers nobody else, which on a big database can freeze your API for seconds. Use `SCAN` instead, for example `redis-cli --scan --pattern 'cache:*'`. The tests below use `KEYS` only because their database holds a handful of keys.
+</Callout>
+
+## Redis from Node
+
+Install `ioredis`, the client that BullMQ (the last lesson of the three) also uses, and try it in a scratch file:
+
+```bash
+npm install ioredis
+```
+
+```ts
+// ex/hello.ts
+import { Redis } from "ioredis";
+
+const redis = new Redis("redis://localhost:6390");
+
+await redis.set("greeting", "hello");
+console.log(await redis.get("greeting")); // hello
+console.log(await redis.get("missing")); // null
+
+await redis.set("session:abc", JSON.stringify({ userId: 1 }), "EX", 30);
+console.log(await redis.ttl("session:abc")); // 30
+
+console.log(await redis.incr("visits"), await redis.incr("visits")); // 1 2
+console.log(await redis.incr("greeting").catch((e) => e.message)); // not a number
+
+await redis.hset("product:1", { name: "Keyboard", price: 4999 });
+console.log(await redis.hgetall("product:1")); // every value comes back as a string
+
+await redis.del("greeting", "session:abc", "visits", "product:1");
+await redis.quit();
+```
+
+Running it prints:
+
+```text
+hello
+null
+30
+1 2
+ERR value is not an integer or out of range
+{ name: 'Keyboard', price: '4999' }
+```
+
+Things worth noticing:
+
+- Every command is a method that returns a promise, and a missing key gives `null`.
+- Redis stores **text**. The hash value that went in as the number `4999` comes out as the string `'4999'`, and `INCR` on a key that holds `hello` is an error. To store an object you store `JSON.stringify(object)` and parse it when you read it.
+- The options after the key read like the CLI: `redis.set(key, value, "EX", 30)` is `SET key value EX 30`.
+- You create **one client per process** and reuse it. A client opens a connection and sends commands over it; making one per request would open thousands of connections.
+
+## A cache in front of a slow database
+
+The project is a tiny products API with a pretend slow database. It is the first stage of the code that the next two lessons extend, so keep it. Create the folder and install what it needs:
+
+```bash
+mkdir redis-cache && cd redis-cache
+npm init -y && npm pkg set type=module
+npm install express zod ioredis
+npm install -D typescript @types/node@24 @types/express vitest supertest @types/supertest
+npm pkg set scripts.dev="node --watch --env-file-if-exists=.env src/server.ts" scripts.test="vitest run" scripts.typecheck="tsc"
+```
+
+Copy `tsconfig.json` and `vitest.config.ts` from the earlier projects, and put `REDIS_URL=redis://localhost:6379` and `PORT=4400` in a `.env` file. First the Redis client and the fake database:
+
+```ts
+// src/redis.ts
+import { Redis } from "ioredis";
+
+// BullMQ workers need maxRetriesPerRequest: null so they wait for a lost
+// connection instead of giving up; everything else keeps a small limit.
+export function createRedis(options: { forWorker?: boolean } = {}): Redis {
+  const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", {
+    maxRetriesPerRequest: options.forWorker ? null : 2,
+  });
+  // the place to log connection problems (ioredis only prints them itself if nobody listens)
+  redis.on("error", (err) => console.error("redis:", err.message));
+  return redis;
+}
+```
+
+```ts
+// src/products.ts
+// stands in for a slow database
+export type Product = { id: number; name: string; priceCents: number; updatedAt: string };
+
+const products = new Map<number, Product>([
+  [
+    1,
+    { id: 1, name: "Keyboard", priceCents: 4999, updatedAt: "2026-10-01T09:00:00.000Z" },
+  ],
+  [2, { id: 2, name: "Mouse", priceCents: 1999, updatedAt: "2026-10-01T09:00:00.000Z" }],
+]);
+
+export const stats = { loads: 0 }; // how often the "database" was really asked
+
+const slow = () => new Promise((resolve) => setTimeout(resolve, 200));
+
+export async function findProduct(id: number): Promise<Product | null> {
+  stats.loads += 1;
+  await slow();
+  return products.get(id) ?? null;
+}
+
+export async function updateProduct(
+  id: number,
+  patch: Partial<Pick<Product, "name" | "priceCents">>,
+) {
+  const product = products.get(id);
+  if (!product) return null;
+  const updated = { ...product, ...patch, updatedAt: new Date().toISOString() };
+  products.set(id, updated);
+  return updated;
+}
+```
+
+About `createRedis`: the `error` listener is where you log connection problems. Without one, `ioredis` still survives (I checked: it prints `[ioredis] Unhandled error event` and the process keeps running), but the message bypasses your logger. And `maxRetriesPerRequest: 2` makes a command give up after two retries while the connection is lost, instead of waiting forever, so a dead Redis becomes an error you can handle. (`forWorker` is for the last lesson.)
+
+### Cache-aside
+
+The pattern has a name, **cache-aside**, and three steps: look in the cache; on a miss load from the real source; store what you loaded, with a time to live. Here it is as one small class:
+
+```ts
+// src/cache.ts
+import type { Redis } from "ioredis";
+
+export type Cached<T> = { value: T; hit: boolean };
+
+export class Cache {
+  private redis: Redis;
+  private prefix: string;
+  private inFlight = new Map<string, Promise<unknown>>();
+
+  constructor(redis: Redis, prefix = "cache:") {
+    this.redis = redis;
+    this.prefix = prefix;
+  }
+
+  // cache-aside: look in Redis, and on a miss load the value and store it
+  async remember<T>(
+    key: string,
+    ttlSeconds: number,
+    load: () => Promise<T>,
+  ): Promise<Cached<T>> {
+    const redisKey = this.prefix + key;
+
+    try {
+      const raw = await this.redis.get(redisKey);
+      if (raw !== null) return { value: JSON.parse(raw) as T, hit: true };
+    } catch {
+      // Redis is down or slow: the cache is an optimisation, so go to the source
+    }
+
+    // five requests missing at the same moment share ONE load
+    let pending = this.inFlight.get(redisKey) as Promise<T> | undefined;
+    if (!pending) {
+      pending = this.loadAndStore(redisKey, ttlSeconds, load).finally(() =>
+        this.inFlight.delete(redisKey),
+      );
+      this.inFlight.set(redisKey, pending);
+    }
+    return { value: await pending, hit: false };
+  }
+
+  private async loadAndStore<T>(
+    redisKey: string,
+    ttlSeconds: number,
+    load: () => Promise<T>,
+  ) {
+    const value = await load();
+    if (value !== null && value !== undefined) {
+      // a little random extra life, so keys saved together do not all expire together
+      const ttl = ttlSeconds + Math.floor(Math.random() * ttlSeconds * 0.1);
+      await this.redis.set(redisKey, JSON.stringify(value), "EX", ttl).catch(() => {});
+    }
+    return value;
+  }
+
+  // call this when the source of truth changes
+  async forget(key: string): Promise<void> {
+    await this.redis.del(this.prefix + key).catch(() => {});
+  }
+}
+```
+
+Read it slowly, because every line is a decision:
+
+- `remember(key, ttlSeconds, load)` takes the **function that loads the value**, so callers never write the three steps themselves. The `hit` flag it returns is only for logs and headers.
+- The first `try/catch` makes Redis **optional**. If `get` throws because Redis is down, the code carries on as a miss. A cache that takes your API down when it breaks is worse than no cache.
+- `inFlight` fixes the **stampede**. Without it, five requests that miss in the same 200 milliseconds would all call the slow database. With it, the first starts the load and the other four wait for the same promise.
+- `null` and `undefined` are not stored. "Not found" is an answer that changes the moment somebody creates the product, and a cached `null` would hide it until the expiry.
+- The time to live gets up to 10 percent of random extra life. If a thousand keys are saved in one second with the same TTL, they all expire in the same second and the database gets a thousand requests at once. The jitter spreads them out.
+- Writing to the cache is allowed to fail (`.catch(() => {})`): the caller already has its value.
+
+Now the routes and the server:
+
+```ts
+// src/app.ts
+import express from "express";
+import { z } from "zod";
+import type { Cache } from "./cache.ts";
+import { findProduct, updateProduct } from "./products.ts";
+
+const PRODUCT_TTL_SECONDS = 60;
+const idSchema = z.coerce.number().int().positive();
+const patchSchema = z.object({
+  name: z.string().min(1).optional(),
+  priceCents: z.number().int().min(0).optional(),
+});
+
+export function createApp(deps: { cache: Cache }) {
+  const { cache } = deps;
+  const app = express();
+  app.use(express.json());
+
+  app.get("/v1/products/:id", async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+    if (!id.success) return void res.status(400).json({ error: { code: "BAD_ID" } });
+
+    const { value, hit } = await cache.remember(
+      `product:${id.data}`,
+      PRODUCT_TTL_SECONDS,
+      () => findProduct(id.data),
+    );
+    if (!value) return void res.status(404).json({ error: { code: "NOT_FOUND" } });
+
+    res.set("X-Cache", hit ? "HIT" : "MISS").json({ data: value });
+  });
+
+  app.patch("/v1/products/:id", async (req, res) => {
+    const id = idSchema.safeParse(req.params.id);
+    const patch = patchSchema.safeParse(req.body);
+    if (!id.success || !patch.success) {
+      return void res.status(400).json({ error: { code: "BAD_REQUEST" } });
+    }
+
+    const product = await updateProduct(id.data, patch.data);
+    if (!product) return void res.status(404).json({ error: { code: "NOT_FOUND" } });
+
+    await cache.forget(`product:${id.data}`); // after the write, so the next read loads the new row
+    res.json({ data: product });
+  });
+
+  return app;
+}
+```
+
+```ts
+// src/server.ts
+import { createApp } from "./app.ts";
+import { Cache } from "./cache.ts";
+import { createRedis } from "./redis.ts";
+
+const port = Number(process.env.PORT ?? 4400);
+const app = createApp({ cache: new Cache(createRedis()) });
+
+app.listen(port, () => console.log(`API on http://localhost:${port}`));
+```
+
+Start Redis, run `npm run dev`, and call the endpoint three times with `curl -s -o /dev/null -D - -w 'time %{time_total}s\n' localhost:4400/v1/products/1`. These are the `X-Cache` header and the time of each call:
+
+```text
+X-Cache: MISS   time 0.213354s
+X-Cache: HIT    time 0.002075s
+X-Cache: HIT    time 0.001150s
+```
+
+The first call paid for the 200 ms "database" and the others did not. Look at what is in Redis:
+
+```text
+> --scan --pattern 'cache:*'
+"cache:product:1"
+> ttl cache:product:1
+(integer) 61
+> get cache:product:1
+"{\"id\":1,\"name\":\"Keyboard\",\"priceCents\":4999,\"updatedAt\":\"2026-10-01T09:00:00.000Z\"}"
+```
+
+The TTL is 61, not 60: that is the jitter. And the value is JSON text, which brings a common mistake.
+
+<Callout type="warning" title="A Date in the cache comes back as a string">
+`JSON.stringify` turns a `Date` into text and `JSON.parse` does not turn it back. The first request, a miss, returns a real `Date` and the second, a hit, returns a string, so one function gives two different types. Keep dates as ISO strings in your data from the start (as `updatedAt` does here), or parse them again after reading the cache.
+</Callout>
+
+## Keeping the cache honest
+
+A cache is a copy, and a copy can be wrong. Whatever you cache, decide **how it becomes right again**.
+
+**Invalidate on write.** The `PATCH` route changes the product and then calls `cache.forget`. The order matters: write first, delete second. If you delete first, a read that arrives between the two lines loads the old row and stores it again. This is the real result of a `PATCH` followed by two reads:
+
+```text
+PATCH {"priceCents":3999}  ->  {"data":{"id":1,"name":"Keyboard","priceCents":3999,...}}
+GET  ->  X-Cache: MISS   (the next read loads the new row)
+GET  ->  X-Cache: HIT
+```
+
+**The TTL is the safety net.** Even with the delete, a read that started before the write can finish after it and store the old row. That rare race is why you never cache without a time to live: the wrong value then lives for a minute, not forever. Choose the TTL by asking how long a wrong value is acceptable. A product price might be 60 seconds; a feature flag, 5.
+
+**Put everything the answer depends on into the key.** This is the most serious cache bug, and it is a security bug (see the second exercise). The key `product:1` is fine because every user sees the same product. A key like `dashboard` for a page that shows the logged-in user's data serves the first user's page to the next user for the whole TTL. The key must contain the user id, and the language, currency or role as well if the answer changes with them. If you cannot say what the key must contain, do not cache that response.
+
+**Do not cache** data that must be exact (a bank balance, the stock count at checkout), data that is cheap to compute (a cache hit costs a network trip too), or data that changes on every request.
+
+## Tests
+
+Redis tests need a real Redis, because the behaviour you want to check, such as expiry, lives in the server. They also delete data, so they follow the rule from `testing-time-and-databases`: **never run against a database you care about**. A Redis server has 16 numbered databases (0 to 15) and 0 is where a developer's own data lives. The setup below uses databases 10 and up, one per Vitest worker, and empties only that one before each test.
+
+Create `test/setup.ts`, `test/helpers.ts`, `test/cache.test.ts` and `test/products.test.ts`, add `setupFiles: ["test/setup.ts"]` to `vitest.config.ts`, and run them with `TEST_REDIS_URL=redis://localhost:6379 npx vitest run`. The helper `buildApp()` creates the app and returns a `close` function. What the tests must check:
+
+- **Cache:** a miss loads and a hit does not; the key has a TTL of at most 10 percent over the one given; keys saved together do not all get the same TTL; a key really expires (Redis keeps its own clock, so `vi.useFakeTimers` cannot help, and the test waits 1.1 seconds); five calls at once share one load; `null` is not stored; `forget` works; a `Date` comes back as a string; and a Redis that is down gives the loaded value, not an error.
+- **Routes** (with Supertest, as in earlier lessons): `MISS` then `HIT` with one database load; a 404 is not cached; a bad id is a 400; and a `PATCH` clears the cache, so the next read shows the new price.
+
+<Solution>
+
+```ts
+// test/setup.ts
+// This file runs before every test file, in each worker, before any src/ file is imported.
+import { afterAll, beforeEach } from "vitest";
+import { Redis } from "ioredis";
+
+// Tests delete data, so they get their own databases: 10 to 15, one per worker.
+// A default Redis has databases 0 to 15, and 0 is where a developer's own data lives.
+const base = process.env.TEST_REDIS_URL ?? "redis://localhost:6379";
+if (new URL(base).pathname.length > 1) {
+  throw new Error("TEST_REDIS_URL must not name a database: the tests pick their own");
+}
+const db = 10 + (Number(process.env.VITEST_POOL_ID ?? 1) % 6);
+const url = `${base}/${db}`;
+process.env.REDIS_URL = url; // createRedis() reads this
+
+const cleaner = new Redis(url);
+
+beforeEach(async () => {
+  await cleaner.flushdb(); // only this database, never FLUSHALL
+});
+
+afterAll(async () => {
+  await cleaner.quit();
+});
+```
+
+```ts
+// test/helpers.ts
+import { createApp } from "../src/app.ts";
+import { Cache } from "../src/cache.ts";
+import { createRedis } from "../src/redis.ts";
+
+export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// the app, and a function that closes what it opened
+export function buildApp() {
+  const redis = createRedis();
+  const app = createApp({ cache: new Cache(redis) });
+  return { app, redis, close: () => redis.quit() };
+}
+```
+
+```ts
+// test/cache.test.ts
+import { Redis } from "ioredis";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Cache } from "../src/cache.ts";
+import { createRedis } from "../src/redis.ts";
+import { sleep } from "./helpers.ts";
+
+const redis = createRedis();
+const cache = new Cache(redis);
+
+afterEach(async () => {
+  await redis.flushdb();
+});
+
+describe("Cache.remember", () => {
+  it("loads on a miss, then serves from Redis", async () => {
+    const load = vi.fn(async () => ({ name: "Keyboard" }));
+
+    const first = await cache.remember("p:1", 60, load);
+    const second = await cache.remember("p:1", 60, load);
+
+    expect(first).toEqual({ value: { name: "Keyboard" }, hit: false });
+    expect(second).toEqual({ value: { name: "Keyboard" }, hit: true });
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("stores the value with a time to live of ttl plus at most 10%", async () => {
+    await cache.remember("p:1", 100, async () => "x");
+
+    const ttl = await redis.ttl("cache:p:1");
+
+    expect(ttl).toBeGreaterThan(95);
+    expect(ttl).toBeLessThanOrEqual(110);
+  });
+
+  it("spreads the expiry of keys saved together, so they do not all expire at once", async () => {
+    for (let i = 0; i < 20; i++) await cache.remember(`p:${i}`, 1000, async () => i);
+
+    const ttls = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => redis.ttl(`cache:p:${i}`)),
+    );
+
+    expect(new Set(ttls).size).toBeGreaterThan(1);
+  });
+
+  it("lets the key expire (Redis keeps its own clock, so fake timers cannot help)", async () => {
+    const load = vi.fn(async () => "x");
+    await cache.remember("short", 1, load);
+
+    await sleep(1100);
+    const again = await cache.remember("short", 1, load);
+
+    expect(again.hit).toBe(false);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares one load between requests that miss at the same moment", async () => {
+    const load = vi.fn(async () => {
+      await sleep(50);
+      return "x";
+    });
+
+    await Promise.all(Array.from({ length: 5 }, () => cache.remember("p:1", 60, load)));
+
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache null or undefined, so a product created later is found", async () => {
+    await cache.remember("p:9", 60, async () => null);
+
+    expect(await redis.exists("cache:p:9")).toBe(0);
+  });
+
+  it("forget removes the key", async () => {
+    const load = vi.fn(async () => "x");
+    await cache.remember("p:1", 60, load);
+
+    await cache.forget("p:1");
+    const after = await cache.remember("p:1", 60, load);
+
+    expect(after.hit).toBe(false);
+  });
+
+  it("turns a Date into a string, because the cache stores JSON", async () => {
+    const date = new Date("2026-10-01T09:00:00Z");
+    await cache.remember("d", 60, async () => ({ at: date }));
+
+    const { value } = await cache.remember("d", 60, async () => ({ at: date }));
+
+    expect(typeof value.at).toBe("string"); // not a Date: parse it again if you need one
+  });
+
+  it("falls back to the source when Redis is down", async () => {
+    const dead = new Redis({
+      port: 6399,
+      lazyConnect: true,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+    });
+    dead.on("error", () => {});
+    const broken = new Cache(dead);
+
+    const result = await broken.remember("p:1", 60, async () => "from the database");
+
+    expect(result).toEqual({ value: "from the database", hit: false });
+  });
+});
+```
+
+Run `TEST_REDIS_URL=redis://localhost:6379 npx vitest run`:
+
+```text
+ Test Files  2 passed (2)
+      Tests  13 passed (13)
+```
+
+The route tests (`test/products.test.ts`) are not printed: they are four short Supertest tests that follow the list above, and they are in the sandbox project. Notes on the tests:
+
+- `setup.ts` sets `process.env.REDIS_URL` before any test file runs, and `createRedis()` reads it when called. Each worker gets its own database from `VITEST_POOL_ID`, so two test files running at once do not empty each other's data. It refuses a `TEST_REDIS_URL` that already names a database, so a copied production URL cannot be used by mistake.
+- The "Redis is down" test points a client at port 6399, where nothing listens, with `maxRetriesPerRequest: 0` and no retries, so the `get` fails at once.
+- `buildApp()` is the one place that wires the app together. The next two lessons add a line to it instead of touching every test.
+
+</Solution>
+
+### Break it on purpose
+
+Make each change in `src/`, run the suite, check that the named test goes red, and undo it. These are the results in the sandbox project:
+
+| Break this | Result |
+| ---------- | ------ |
+| `cache.ts`: remove the `inFlight` sharing | The "shares one load" test fails |
+| `cache.ts`: store without `"EX"` | Two tests fail (the TTL and the expiry) |
+| `cache.ts`: store `null` as well | Two tests fail (the cache test and the 404 route test) |
+| `cache.ts`: let Redis errors through | The "Redis is down" test fails |
+| `cache.ts`: no random extra life | The "spreads the expiry" test fails, but only after I added it |
+| `app.ts`: do not call `cache.forget` | The "clears the cache" test fails |
+
+The jitter row is the lesson. My first version of the suite stayed green with the jitter removed, because a TTL of exactly 60 passes "at most 10 percent over". A rule that no test notices is a hope; for every behaviour you add, ask which test would go red if it disappeared.
+
+## Exercises
+
+<Exercise title="Predict the output of redis-cli">
+Here is a session on an empty database. What does each command print?
+
+```text
+> set a 5
+> incr a
+> set a hello NX
+> get a
+> expire a 100
+> ttl a
+> set a 1
+> ttl a
+```
+
+<Solution>
+
+```text
+> set a 5
+OK
+> incr a
+(integer) 6
+> set a hello NX
+(nil)
+> get a
+"6"
+> expire a 100
+(integer) 1
+> ttl a
+(integer) 100
+> set a 1
+OK
+> ttl a
+(integer) -1
+```
+
+`INCR` works on the text `5` and gives 6. `SET ... NX` does nothing because `a` exists, and answers `(nil)`. `GET` shows `"6"` in quotes: Redis stores text. `EXPIRE` answers 1 (it worked) and `TTL` shows 100. The surprise is the last line: a plain `SET` **removes the expiry**, so the key now lives forever. That is how a session or a counter loses its TTL by accident when somebody "just updates the value". Use `SET key value KEEPTTL`, or give `EX` again.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the cache bug">
+A teammate caches the logged-in user's order list like this, and QA reports that Ada sometimes sees Bob's orders. Find the bug and fix it.
+
+```ts
+app.get("/v1/orders", requireAuth, async (req, res) => {
+  const { value } = await cache.remember("orders", 30, () => loadOrders(req.user.id));
+  res.json({ data: value });
+});
+```
+
+<Solution>
+
+The key `orders` is the same for every user. Whoever asks first fills it, and for the next 30 seconds everyone gets that user's orders. Put the user in the key:
+
+```ts
+app.get("/v1/orders", requireAuth, async (req, res) => {
+  const { value } = await cache.remember(`orders:user:${req.user.id}`, 30, () =>
+    loadOrders(req.user.id),
+  );
+  res.json({ data: value });
+});
+```
+
+Anything that changes the answer belongs in the key. Also call `cache.forget(`orders:user:${id}`)` when that user places or cancels an order. And write a test with two users that fails on the old code: log in as Ada, read the orders, log in as Bob, read them, and check that Bob's list is not Ada's.
+</Solution>
+</Exercise>
+
+<Exercise title="Measure the hit ratio">
+A cache that nobody measures may be doing nothing. Count the hits and the misses of every `remember` call **in Redis** (so that all your servers add to the same numbers), and write a `cacheStats()` function that returns `{ hits, misses, hitRatio }`.
+
+<Solution>
+
+```ts
+// ex/exercises/cache-stats.ts
+import { Cache, type Cached } from "../../stage1/src/cache.ts";
+import { createRedis } from "../../stage1/src/redis.ts";
+
+const redis = createRedis();
+
+// counts every lookup in Redis, so the numbers are shared by all servers
+class CountingCache extends Cache {
+  override async remember<T>(
+    key: string,
+    ttlSeconds: number,
+    load: () => Promise<T>,
+  ): Promise<Cached<T>> {
+    const result = await super.remember(key, ttlSeconds, load);
+    await redis
+      .incr(result.hit ? "stats:cache:hits" : "stats:cache:misses")
+      .catch(() => {});
+    return result;
+  }
+}
+
+async function cacheStats() {
+  const [hits, misses] = (await redis.mget("stats:cache:hits", "stats:cache:misses")).map(
+    Number,
+  );
+  const total = hits + misses;
+  return {
+    hits,
+    misses,
+    hitRatio: total === 0 ? 0 : Math.round((hits / total) * 100) / 100,
+  };
+}
+
+const cache = new CountingCache(redis);
+await cache.remember("a", 60, async () => 1); // miss
+await cache.remember("a", 60, async () => 1); // hit
+await cache.remember("a", 60, async () => 1); // hit
+await cache.remember("b", 60, async () => 2); // miss
+console.log(await cacheStats()); // { hits: 2, misses: 2, hitRatio: 0.5 }
+
+await redis.flushdb();
+await redis.quit();
+```
+
+It prints `{ hits: 2, misses: 2, hitRatio: 0.5 }`. The counters are plain `INCR` keys, so no lock is needed even with many servers. A low ratio means the TTL is too short, the keys are too specific (a user id in a key that does not need it), or the data is not worth caching. Redis also counts for itself: `INFO stats` has `keyspace_hits` and `keyspace_misses`, but they count every command of every user of that Redis, not just this cache.
+</Solution>
+</Exercise>

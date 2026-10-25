@@ -1,0 +1,192 @@
+"use client";
+
+import { useEffect, useState, useSyncExternalStore } from "react";
+
+type Tab = { id: string; file: string; code: string };
+
+const TABS: Tab[] = [
+  {
+    id: "React",
+    file: "Counter.tsx",
+    code: `import { useState } from "react";
+
+export function Counter() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <button onClick={() => setCount(count + 1)}>
+      Clicked {count} times
+    </button>
+  );
+}`,
+  },
+  {
+    id: "Node.js",
+    file: "server.js",
+    code: `import express from "express";
+
+const app = express();
+
+// A tiny JSON API
+app.get("/api/hello", (req, res) => {
+  res.json({ message: "Hello, world" });
+});
+
+app.listen(3000);`,
+  },
+  {
+    id: "Next.js",
+    file: "app/page.tsx",
+    code: `// A Server Component: runs on the server
+export default async function Page() {
+  const res = await fetch("https://api.example.com/posts");
+  const posts = await res.json();
+
+  return (
+    <ul>
+      {posts.map((p) => <li key={p.id}>{p.title}</li>)}
+    </ul>
+  );
+}`,
+  },
+];
+
+type Kind = "plain" | "kw" | "str" | "fn" | "com";
+type Token = { kind: Kind; text: string };
+
+const KEYWORDS =
+  "import|from|export|default|function|const|return|async|await|new|let|if|else";
+const TOKEN_RE = new RegExp(
+  `(\\/\\/.*)|("[^"\\n]*")|\\b(${KEYWORDS})\\b|\\b([A-Za-z_]\\w*)(?=\\()|([\\s\\S])`,
+  "g",
+);
+
+function tokenize(code: string): Token[] {
+  const out: Token[] = [];
+  const push = (kind: Kind, text: string) => {
+    const last = out[out.length - 1];
+    if (last && last.kind === kind) last.text += text;
+    else out.push({ kind, text });
+  };
+  for (const m of code.matchAll(TOKEN_RE)) {
+    if (m[1]) push("com", m[1]);
+    else if (m[2]) push("str", m[2]);
+    else if (m[3]) push("kw", m[3]);
+    else if (m[4]) push("fn", m[4]);
+    else push("plain", m[5]);
+  }
+  return out;
+}
+
+const TOKENS = TABS.map((t) => tokenize(t.code));
+const LENGTHS = TABS.map((t) => t.code.length);
+const TOKEN_CLASS: Record<Kind, string> = {
+  plain: "text-[var(--tok-plain)]",
+  kw: "text-[var(--tok-kw)]",
+  str: "text-[var(--tok-str)]",
+  fn: "text-[var(--tok-fn)]",
+  com: "text-[var(--tok-com)] italic",
+};
+
+const HOLD_TICKS = 70; // ~2.5s pause on the finished snippet
+const CHARS_PER_TICK = 2;
+
+function subscribeMotion(cb: () => void) {
+  const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+}
+const prefersReducedMotion = () =>
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function Snippet({ tokens, limit }: { tokens: Token[]; limit: number }) {
+  let left = limit;
+  const nodes = [];
+  for (let i = 0; i < tokens.length && left > 0; i++) {
+    const t = tokens[i];
+    const text = t.text.slice(0, left);
+    left -= text.length;
+    nodes.push(
+      <span key={i} className={TOKEN_CLASS[t.kind]}>
+        {text}
+      </span>,
+    );
+  }
+  return <>{nodes}</>;
+}
+
+/** Window that types out a short React, Node.js and Next.js snippet in turn. */
+export function HeroCode() {
+  const reduced = useSyncExternalStore(subscribeMotion, prefersReducedMotion, () => true);
+  const [paused, setPaused] = useState(false);
+  const [state, setState] = useState({ tab: 0, chars: 0, hold: 0 });
+
+  useEffect(() => {
+    if (reduced || paused) return;
+    const id = window.setInterval(() => {
+      setState((s) => {
+        if (s.chars < LENGTHS[s.tab]) return { ...s, chars: s.chars + CHARS_PER_TICK };
+        if (s.hold < HOLD_TICKS) return { ...s, hold: s.hold + 1 };
+        return { tab: (s.tab + 1) % TABS.length, chars: 0, hold: 0 };
+      });
+    }, 36);
+    return () => window.clearInterval(id);
+  }, [reduced, paused]);
+
+  const { tab } = state;
+  const typing = !reduced && state.chars < LENGTHS[tab];
+  const shown = reduced ? LENGTHS[tab] : state.chars;
+
+  return (
+    <div
+      onPointerEnter={() => setPaused(true)}
+      onPointerLeave={() => setPaused(false)}
+      className="relative"
+    >
+      <div
+        aria-hidden
+        className="from-accent/40 absolute -inset-px rounded-2xl bg-gradient-to-br via-violet-500/30 to-sky-400/40 opacity-70 blur-md"
+      />
+      <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-[var(--code-bg)] shadow-2xl shadow-indigo-950/30">
+        <div className="flex items-center gap-3 border-b border-[var(--code-line)] bg-[var(--code-bar)] px-4 py-2.5">
+          <div className="flex gap-1.5" aria-hidden>
+            <span className="h-2.5 w-2.5 rounded-full bg-[#ff5f57]" />
+            <span className="h-2.5 w-2.5 rounded-full bg-[#febc2e]" />
+            <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
+          </div>
+          <div role="tablist" aria-label="Example code" className="ml-1 flex gap-1">
+            {TABS.map((t, i) => (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={i === tab}
+                onClick={() => setState({ tab: i, chars: 0, hold: 0 })}
+                className={`cursor-pointer rounded-md px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-indigo-300 ${i === tab ? "bg-white/10 text-white" : "text-zinc-400 hover:text-zinc-200"}`}
+              >
+                {t.id}
+              </button>
+            ))}
+          </div>
+          <span className="ml-auto hidden font-mono text-[11px] text-zinc-500 sm:block">
+            {TABS[tab].file}
+          </span>
+        </div>
+        <pre
+          aria-hidden
+          className="h-[17.5rem] overflow-hidden px-5 py-4 font-mono text-[12.5px] leading-6 sm:text-[13px]"
+        >
+          <code>
+            <Snippet tokens={TOKENS[tab]} limit={shown} />
+            <span
+              className={`ml-px inline-block h-[1.1em] w-[2px] translate-y-[3px] bg-indigo-300 ${typing ? "" : "caret"}`}
+            />
+          </code>
+        </pre>
+        <p className="sr-only">
+          Example {TABS[tab].id} code: {TABS[tab].code}
+        </p>
+      </div>
+    </div>
+  );
+}

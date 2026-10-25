@@ -1,0 +1,588 @@
+---
+title: "Project: Notes API, Part 1"
+summary: "Start a notes REST API with Express 5, TypeScript and Zod: set up the project, write the schemas and the in-memory store, then build create, read and list with filters and pagination."
+order: 27
+takeaways:
+  - "Give each file one job: schemas say what input may look like, the store holds the data, the routes translate between HTTP and the store, and one error handler decides how every failure looks."
+  - "Parse every request with a schema before using it, because `z.object` drops fields you did not list, so a client can never set its own `id` or `createdAt`."
+  - "Let the server make the ids and the timestamps, and answer 201 with a `Location` header when something is created."
+  - "A malformed id is a 400 and a well-formed id that nobody has is a 404, so a typo and a missing note can be told apart."
+  - "A list route has to validate its query too: filters, search, sort, `page` and `limit` each get a rule, a default and a clear error message."
+  - "Decide the product rules before you code, such as notes are pinned first, tags are lowercase, and titles are trimmed, then write them down in one place."
+videos: []
+docs:
+  - title: "Express — Routing"
+    url: https://expressjs.com/en/guide/routing.html
+  - title: "Express — Error handling"
+    url: https://expressjs.com/en/guide/error-handling.html
+  - title: "Zod — Defining schemas"
+    url: https://zod.dev/api
+  - title: "Node.js — crypto.randomUUID()"
+    url: https://nodejs.org/api/crypto.html
+---
+
+"Build a small REST API" is the most common backend take-home task there is, and it is also the best way to find out whether the pieces from the last twenty-six lessons really fit together: the Express chain, the error handler, Zod validation, status codes, pagination and tests. This project uses all of them and nothing else. There is no database yet (that is the next module) and no login yet (that is `project-auth-service-1` to `-3`), so the whole app is about doing the basics cleanly.
+
+It comes in two parts. **Part 1** (this lesson) sets up the project and builds creating, reading and listing notes. **Part 2** adds updating and deleting, the tests, and a round of breaking the code on purpose. It was written for Express 5.3, Zod 4.6, Node 24, TypeScript 7 and Vitest 5, and every file was built, typechecked and tested in a sandbox project.
+
+## What you will build
+
+A JSON API for notes. A note has a title, a body, some tags, and a pinned flag. You can create, read, change and delete notes, and you can list them with a search, a tag filter, sorting and pages.
+
+```text
+GET     /health                  → { "status": "ok" }
+GET     /v1/notes                → a page of notes (filters, sort, page, limit)
+POST    /v1/notes                → create a note               → 201 + Location
+GET     /v1/notes/:id            → one note                    → 200 or 404
+PATCH   /v1/notes/:id            → change some fields          → 200 (Part 2)
+DELETE  /v1/notes/:id            → delete a note               → 204 (Part 2)
+```
+
+A note, as the API sends it:
+
+```json
+{
+  "id": "d7a91ac7-a048-429b-8a6c-31ceb7819114",
+  "title": "Buy milk",
+  "body": "",
+  "tags": ["home", "shop"],
+  "pinned": false,
+  "createdAt": "2026-10-25T07:59:47.616Z",
+  "updatedAt": "2026-10-25T07:59:47.616Z"
+}
+```
+
+### The rules (decide first, then code)
+
+Writing the rules down before the first line of code is half of API design. These are the rules of this project, and the tests in Part 2 check each of them:
+
+- The **server** makes `id` (a UUID) and the two timestamps. The client can never set them, even if it sends them.
+- `title` is required, trimmed, 1 to 120 characters. `body` is optional, up to 10,000 characters, and is `""` when missing.
+- `tags` is an optional list of up to 10 strings. Each tag is trimmed and lowercased, 1 to 30 characters, and repeats are dropped.
+- `pinned` is optional and `false` when missing.
+- An id that is not a UUID is a **400**. A UUID that no note has is a **404**.
+- The list shows **pinned notes first**, and the chosen sort orders the notes inside each group. The default sort is newest-updated first.
+- Every error has one shape: `{ "error": { "code", "message", "details"? } }`, including broken JSON, unknown URLs and crashes.
+- A crash (a bug) answers 500 with a bland message. The real error goes to the log, never to the client.
+
+### Requirements for the whole project
+
+- [ ] `POST /v1/notes` creates a note, cleans the input and answers 201 with a `Location` header
+- [ ] `GET /v1/notes/:id` returns one note, with 400 for a bad id and 404 for a missing one
+- [ ] `GET /v1/notes` lists notes with `tag`, `q` (searches title and body), `pinned`, `sort`, `page` and `limit`, and returns `meta` with the totals
+- [ ] `PATCH /v1/notes/:id` changes only the fields that are sent, refuses an empty change, and moves `updatedAt`
+- [ ] `DELETE /v1/notes/:id` answers 204, and the note is gone afterwards
+- [ ] Every failure uses the same JSON error shape, and a 500 never leaks details
+- [ ] Unknown fields in a request are ignored
+- [ ] The routes and the rules above have tests, and you have seen the tests fail
+
+<Callout type="tip" title="Write your own version first">
+Each stage says what to build and what to check. Try it yourself, even if it comes out rough, and only then open the solution and compare. The difference teaches more than the copy.
+</Callout>
+
+## Stage 1: Set up, errors and a health check
+
+Make the project. This is the same setup as the lessons on TypeScript and Express, in one block:
+
+```bash
+mkdir notes-api && cd notes-api
+npm init -y
+npm pkg set type=module scripts.dev="node --watch src/server.ts" scripts.start="node src/server.ts" scripts.typecheck="tsc" scripts.test="vitest run"
+npm install express zod
+npm install -D typescript @types/node@24 @types/express vitest supertest @types/supertest
+mkdir src test
+```
+
+Use the `@types/node` major that matches your Node (`node --version`). Then write these files yourself, using what you know:
+
+1. `tsconfig.json`: the settings from `node-typescript` (`module: nodenext`, `erasableSyntaxOnly`, `allowImportingTsExtensions`, `noEmit`, `strict`, and `types: ["node"]`). Include `src`, `test` and `vitest.config.ts`.
+2. `src/errors.ts`: an `HttpError` class with `status`, `code`, `message` and optional `details`, plus the small helpers `badRequest` and `notFound`.
+3. `src/errorHandler.ts`: the four-argument error middleware. It turns an `HttpError` into JSON, broken JSON (`entity.parse.failed`) into a 400 `INVALID_JSON`, a body over the limit (`entity.too.large`) into a 413, and **anything else** into a 500 whose message says nothing about the cause. It logs the real error for a 500 only.
+4. `src/validate.ts`: a `parse(schema, data, source)` function that returns the cleaned, typed data or throws a 400 listing every problem.
+5. `src/app.ts` and `src/server.ts`: the app (JSON body parser with a limit, `GET /health`, a JSON 404 for everything else, the error handler last) and the file that starts it. Keep them apart so the tests can import the app without opening a port.
+
+Run `npm run dev`, then try `curl localhost:4000/health` and `curl localhost:4000/nope`. You should get `{"status":"ok"}` and a JSON 404.
+
+<Solution>
+
+`tsconfig.json`:
+
+```json
+
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "types": ["node"],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "test", "vitest.config.ts"]
+}
+```
+
+```ts
+// src/errors.ts
+export class HttpError extends Error {
+  status: number;
+  code: string;
+  details?: unknown;
+
+  constructor(status: number, code: string, message: string, details?: unknown) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export const badRequest = (message: string, details?: unknown) =>
+  new HttpError(400, "BAD_REQUEST", message, details);
+
+export const notFound = (message: string) => new HttpError(404, "NOT_FOUND", message);
+```
+
+```ts
+// src/errorHandler.ts
+import type { ErrorRequestHandler } from "express";
+import { HttpError } from "./errors.ts";
+
+function toHttpError(err: unknown): HttpError {
+  if (err instanceof HttpError) return err;
+
+  // express.json() throws errors that carry a `type` string
+  const type =
+    typeof err === "object" && err !== null && "type" in err ? err.type : undefined;
+  if (type === "entity.parse.failed") {
+    return new HttpError(400, "INVALID_JSON", "Request body is not valid JSON");
+  }
+  if (type === "entity.too.large") {
+    return new HttpError(413, "PAYLOAD_TOO_LARGE", "Request body is too large");
+  }
+
+  // a bug or a failure nobody planned for: say nothing about it to the client
+  return new HttpError(500, "INTERNAL_ERROR", "Something went wrong");
+}
+
+export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
+  if (res.headersSent) {
+    next(err); // too late for JSON: let Express close the connection
+    return;
+  }
+
+  const httpError = toHttpError(err);
+  if (httpError.status >= 500) console.error(err); // the real error stays in the log
+
+  res.status(httpError.status).json({
+    error: {
+      code: httpError.code,
+      message: httpError.message,
+      ...(httpError.details !== undefined && { details: httpError.details }),
+    },
+  });
+};
+```
+
+```ts
+// src/validate.ts
+import type { z } from "zod";
+import { badRequest } from "./errors.ts";
+
+// Returns the cleaned data, typed from the schema, or throws a 400 that lists every problem.
+export function parse<T extends z.ZodType>(
+  schema: T,
+  data: unknown,
+  source: "body" | "params" | "query",
+): z.output<T> {
+  const result = schema.safeParse(data);
+  if (result.success) return result.data;
+
+  throw badRequest(`Invalid request ${source}`, {
+    issues: result.error.issues.map((issue) => ({
+      field: issue.path.join(".") || source,
+      message: issue.message,
+    })),
+  });
+}
+```
+
+```ts
+// src/app.ts (first version, no notes yet)
+import express from "express";
+import { notFound } from "./errors.ts";
+import { errorHandler } from "./errorHandler.ts";
+
+export const app = express();
+
+app.use(express.json({ limit: "100kb" }));
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
+// nothing answered: turn it into an error so it gets the same JSON shape
+app.use((req, res, next) => {
+  next(notFound(`Cannot ${req.method} ${req.path}`));
+});
+
+// must be last
+app.use(errorHandler);
+```
+
+```ts
+// src/server.ts
+import { app } from "./app.ts";
+
+const port = Number(process.env.PORT ?? 4000);
+
+app.listen(port, () => {
+  console.log(`Notes API on http://localhost:${port}`);
+});
+```
+
+The handler's last line of defence is the `return new HttpError(500, ...)` at the end of `toHttpError`: anything it does not recognise becomes a plain 500, so a mistake in your own code cannot leak a stack trace or a database error to a stranger. I tried both URLs:
+
+```text
+$ curl -i localhost:4000/health
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"status":"ok"}
+
+$ curl localhost:4000/v1/notes
+{"error":{"code":"NOT_FOUND","message":"Cannot GET /v1/notes"}}
+```
+
+Port 3000 is where many tools (a Next.js dev server, for one) already listen, so the API defaults to 4000. Set `PORT` to change it.
+
+</Solution>
+
+## Stage 2: Schemas and the store
+
+Now the two files that hold the rules. Neither of them knows what HTTP is.
+
+**`src/schemas.ts`** has the Zod schemas:
+
+- `newNoteSchema` for `POST`: the fields and defaults from the rules above. Give every field its own error message, so a client gets "title is required" and not "Invalid input".
+- `idParamsSchema`: `id` must be a UUID (`z.uuid()`).
+- `listQuerySchema` for `GET /v1/notes`. Query values arrive as strings, so numbers need `z.coerce.number()` and the boolean needs `z.stringbool()` (restricted to the words `true` and `false`, since the default also accepts `yes` and `1`). `sort` is one of six values, with a leading `-` for descending, and is turned into `{ field, direction }`. `page` defaults to 1, `limit` to 10 with a maximum of 100.
+
+**`src/store.ts`** keeps the notes in a `Map` (it remembers insertion order and finds by id quickly) and offers `resetNotes`, `findNote`, `createNote` and `listNotes`. `createNote` makes the id with `crypto.randomUUID()` and both timestamps. `listNotes` applies the filters, puts pinned notes first, sorts the rest (titles without regard to case) and slices out one page, and it returns the page together with the total number of matches.
+
+Before there is any HTTP, check them with a scratch script:
+
+```ts
+// scratch.ts (delete it afterwards)
+import { listQuerySchema, newNoteSchema } from "./src/schemas.ts";
+import { createNote, listNotes } from "./src/store.ts";
+
+createNote(newNoteSchema.parse({ title: "  Buy milk ", tags: ["Home", "home"] }));
+createNote(newNoteSchema.parse({ title: "Zebra", pinned: true }));
+
+const { items, total } = listNotes(listQuerySchema.parse({}));
+console.log(total, items.map((note) => `${note.title} ${JSON.stringify(note.tags)} pinned=${note.pinned}`));
+```
+
+Run it with `node scratch.ts`. You should see the pinned note first, the title trimmed, and the tags lowercase with the repeat gone.
+
+<Solution>
+
+```ts
+// src/schemas.ts
+import { z } from "zod";
+
+const title = z
+  .string({
+    error: (issue) =>
+      issue.input === undefined ? "title is required" : "title must be a string",
+  })
+  .trim()
+  .min(1, "title cannot be empty")
+  .max(120, "title is at most 120 characters");
+
+const body = z
+  .string({ error: "body must be a string" })
+  .max(10_000, "body is at most 10,000 characters");
+
+// "Work", " work " and "WORK" are one tag; the Set drops the repeats
+const tags = z
+  .array(
+    z
+      .string({ error: "each tag must be a string" })
+      .trim()
+      .toLowerCase()
+      .min(1, "a tag cannot be empty")
+      .max(30, "a tag is at most 30 characters"),
+    { error: "tags must be a list" },
+  )
+  .max(10, "at most 10 tags")
+  .transform((list) => [...new Set(list)]);
+
+const pinned = z.boolean({ error: "pinned must be true or false" });
+
+// POST: only the title is required
+export const newNoteSchema = z.object(
+  {
+    title,
+    body: body.default(""),
+    tags: tags.default([]),
+    pinned: pinned.default(false),
+  },
+  { error: "Send a JSON object" },
+);
+
+export const idParamsSchema = z.object({ id: z.uuid("id must be a valid id") });
+
+const sortValues = [
+  "createdAt",
+  "-createdAt",
+  "updatedAt",
+  "-updatedAt",
+  "title",
+  "-title",
+] as const;
+
+const positiveInt = (name: string) =>
+  z.coerce
+    .number({ error: `${name} must be a number` })
+    .int(`${name} must be a whole number`)
+    .min(1, `${name} must be 1 or more`);
+
+export const listQuerySchema = z.object({
+  tag: z.string().trim().toLowerCase().min(1, "tag cannot be empty").optional(),
+  q: z.string().trim().min(1, "q cannot be empty").optional(),
+  // only the two words: z.stringbool() alone would also accept "yes" and "1"
+  pinned: z
+    .stringbool({
+      truthy: ["true"],
+      falsy: ["false"],
+      error: "pinned must be true or false",
+    })
+    .optional(),
+  sort: z
+    .enum(sortValues, { error: `sort must be one of: ${sortValues.join(", ")}` })
+    .default("-updatedAt")
+    .transform((value) =>
+      value.startsWith("-")
+        ? {
+            field: value.slice(1) as "createdAt" | "updatedAt" | "title",
+            direction: -1 as const,
+          }
+        : { field: value as "createdAt" | "updatedAt" | "title", direction: 1 as const },
+    ),
+  page: positiveInt("page").default(1),
+  limit: positiveInt("limit").max(100, "limit is at most 100").default(10),
+});
+
+export type NewNote = z.output<typeof newNoteSchema>;
+export type ListQuery = z.output<typeof listQuerySchema>;
+```
+
+```ts
+// src/store.ts
+import { randomUUID } from "node:crypto";
+import type { ListQuery, NewNote } from "./schemas.ts";
+
+export type Note = {
+  id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  pinned: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const notes = new Map<string, Note>(); // a Map keeps insertion order and finds by id fast
+
+// for tests: an empty store again
+export function resetNotes(): void {
+  notes.clear();
+}
+
+export function findNote(id: string): Note | undefined {
+  return notes.get(id);
+}
+
+export function createNote(input: NewNote): Note {
+  const now = new Date().toISOString();
+  const note: Note = { id: randomUUID(), ...input, createdAt: now, updatedAt: now };
+  notes.set(note.id, note);
+  return note;
+}
+
+// titles sort without regard to case: "apple" comes before "Banana"
+function sortKey(note: Note, field: ListQuery["sort"]["field"]): string {
+  return field === "title" ? note.title.toLowerCase() : note[field];
+}
+
+export function listNotes(query: ListQuery): { items: Note[]; total: number } {
+  const { tag, q, pinned, sort, page, limit } = query;
+  const needle = q?.toLowerCase();
+
+  const matching = [...notes.values()].filter(
+    (note) =>
+      (tag === undefined || note.tags.includes(tag)) &&
+      (pinned === undefined || note.pinned === pinned) &&
+      (needle === undefined ||
+        note.title.toLowerCase().includes(needle) ||
+        note.body.toLowerCase().includes(needle)),
+  );
+
+  // pinned notes always come first; the chosen sort orders the notes within each group
+  matching.sort((a, b) => {
+    const left = sortKey(a, sort.field);
+    const right = sortKey(b, sort.field);
+    return (
+      Number(b.pinned) - Number(a.pinned) ||
+      (left < right ? -1 : left > right ? 1 : 0) * sort.direction
+    );
+  });
+
+  const start = (page - 1) * limit;
+  return { items: matching.slice(start, start + limit), total: matching.length };
+}
+```
+
+The scratch script printed:
+
+```text
+2 [ 'Zebra [] pinned=true', 'Buy milk ["home"] pinned=false' ]
+```
+
+Three details are worth a second look.
+
+- `z.object` **removes** keys it does not know. That is the whole defence against mass assignment: when a client sends `{ "title": "x", "id": "mine" }`, the parsed data has no `id`. If the schema let unknown keys through, `{ id: randomUUID(), ...input }` would let the client's `id` win, because the spread comes last. Part 2 has a test for it, and the break-on-purpose round shows it failing.
+- The `sort` field is typed from the schema (`ListQuery["sort"]["field"]`), so the store cannot be asked to sort by a field the schema does not allow.
+- The `Set` in the `tags` schema removes repeats after each tag was trimmed and lowercased, which is why `"Home"` and `"home"` become one tag.
+
+</Solution>
+
+## Stage 3: The routes
+
+Last piece of Part 1. Write `src/routes.ts` with an Express `Router` that has three routes, and mount it in `app.ts` at `/v1/notes`:
+
+- `GET /` parses the query with `listQuerySchema`, calls `listNotes`, and answers `{ data, meta }`, where `meta` has `page`, `limit`, `total` and `totalPages`.
+- `POST /` parses the body with `newNoteSchema`, creates the note and answers **201** with the note and a `Location` header. Build the header from `req.baseUrl`, so it stays right if the router is mounted somewhere else.
+- `GET /:id` returns one note. Write a helper `noteFromParams(params)` that validates the id (400) and then looks the note up (404), because `PATCH` and `DELETE` in Part 2 need exactly the same two steps.
+
+The handlers should be short. They parse, call the store and answer, and every failure is a thrown error that the error handler turns into JSON.
+
+<Solution>
+
+```ts
+// src/routes.ts
+import { Router } from "express";
+import { notFound } from "./errors.ts";
+import { idParamsSchema, listQuerySchema, newNoteSchema } from "./schemas.ts";
+import { createNote, findNote, listNotes } from "./store.ts";
+import type { Note } from "./store.ts";
+import { parse } from "./validate.ts";
+
+export const notesRouter = Router();
+
+// a bad id is a 400, a well-formed id nobody has is a 404
+function noteFromParams(params: unknown): Note {
+  const { id } = parse(idParamsSchema, params, "params");
+  const note = findNote(id);
+  if (!note) throw notFound(`No note with id ${id}`);
+  return note;
+}
+
+// GET /v1/notes?tag=work&q=milk&pinned=true&sort=title&page=2&limit=5
+notesRouter.get("/", (req, res) => {
+  const query = parse(listQuerySchema, req.query, "query");
+  const { items, total } = listNotes(query);
+
+  res.json({
+    data: items,
+    meta: {
+      page: query.page,
+      limit: query.limit,
+      total,
+      totalPages: Math.ceil(total / query.limit),
+    },
+  });
+});
+
+// POST /v1/notes  { "title": "...", "body": "...", "tags": ["..."] }
+notesRouter.post("/", (req, res) => {
+  const note = createNote(parse(newNoteSchema, req.body, "body"));
+  res.status(201).location(`${req.baseUrl}/${note.id}`).json({ data: note });
+});
+
+// GET /v1/notes/:id
+notesRouter.get("/:id", (req, res) => {
+  res.json({ data: noteFromParams(req.params) });
+});
+```
+
+And the two lines that connect the router in `src/app.ts`:
+
+```ts
+// src/app.ts (two additions)
+import { notesRouter } from "./routes.ts";
+
+// ...after app.get("/health", ...) and before the 404 handler:
+app.use("/v1/notes", notesRouter);
+```
+
+A session with `npm run dev` running (your ids and times will differ). First a note, where the input is cleaned on the way in:
+
+```text
+$ curl -i -X POST localhost:4000/v1/notes -H "Content-Type: application/json" \
+    -d '{"title":"  Buy milk ","tags":["Home","home","Shop"]}'
+HTTP/1.1 201 Created
+Location: /v1/notes/d7a91ac7-a048-429b-8a6c-31ceb7819114
+Content-Type: application/json; charset=utf-8
+
+{"data":{"id":"d7a91ac7-a048-429b-8a6c-31ceb7819114","title":"Buy milk","body":"","tags":["home","shop"],"pinned":false,"createdAt":"2026-10-25T07:59:47.616Z","updatedAt":"2026-10-25T07:59:47.616Z"}}
+```
+
+I then added three more notes (`apple pie` tagged `home`, `Quarterly plan` with the body `Milk the budget` tagged `work`, and a pinned `Zebra`) and listed them in different ways. Piping into `node -p` prints just the titles:
+
+```bash
+curl -s "localhost:4000/v1/notes" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).data.map(n => n.title)"
+```
+
+```text
+default list                [ 'Zebra', 'Quarterly plan', 'apple pie', 'Buy milk' ]
+?tag=home&sort=title        [ 'apple pie', 'Buy milk' ]
+?q=MILK                     [ 'Quarterly plan', 'Buy milk' ]
+?limit=2&page=2             [ 'apple pie', 'Buy milk' ]  with meta { page: 2, limit: 2, total: 4, totalPages: 2 }
+```
+
+(The left column is my label, not curl output.) The pinned note leads the default list. The search finds "Milk" in the body of one note and the title of another, in any letter case. And bad queries and bodies list every problem at once:
+
+```text
+$ curl -i "localhost:4000/v1/notes?sort=id&limit=500"
+HTTP/1.1 400 Bad Request
+
+{"error":{"code":"BAD_REQUEST","message":"Invalid request query","details":{"issues":[{"field":"sort","message":"sort must be one of: createdAt, -createdAt, updatedAt, -updatedAt, title, -title"},{"field":"limit","message":"limit is at most 100"}]}}}
+
+$ curl -i -X POST localhost:4000/v1/notes -H "Content-Type: application/json" -d '{"title":"","tags":"a"}'
+HTTP/1.1 400 Bad Request
+
+{"error":{"code":"BAD_REQUEST","message":"Invalid request body","details":{"issues":[{"field":"title","message":"title cannot be empty"},{"field":"tags","message":"tags must be a list"}]}}}
+```
+
+<Callout type="warning" title="curl needs the Content-Type header">
+Without `-H "Content-Type: application/json"`, `express.json()` ignores the body, `req.body` is `undefined`, and the API answers 400 "Send a JSON object". That is the right answer to a body it cannot read, and the message tells the caller what to fix.
+</Callout>
+
+</Solution>
+
+## Where you are
+
+You have an API that creates, reads and lists notes, with checked input, one error shape and no way to crash it by sending odd data. Check the project before moving on:
+
+```bash
+npx tsc
+```
+
+It should print nothing. In **Part 2** (`project-notes-api-2`) you add `PATCH` and `DELETE`, write the test suite (38 tests with Vitest and Supertest), and break the code on purpose to find out which of your tests would really notice.

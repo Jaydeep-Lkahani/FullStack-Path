@@ -1,0 +1,303 @@
+---
+title: Real-Time Chat with Socket.IO
+summary: Build the chat on the Socket.IO server - rooms, validated events, acknowledgements, pushes from REST routes - and a React hook that rejoins its rooms after a reconnection.
+order: 24
+takeaways:
+  - "A room is a named group of sockets: `io.to(room)` sends to all of it, `socket.to(room)` to everyone except the sender."
+  - "Being connected is not being allowed: check room membership before accepting a message, and validate every payload like any other input."
+  - "A client may emit without an acknowledgement callback, so give the callback a default or check that it is a function."
+  - "A REST handler can push to a user's open tabs through a private room such as `user:7`."
+  - "A reconnected client is a new socket in no rooms, so a client must join its rooms again on every `connect`, and replace its list with the server's history."
+  - "Rooms and history in one process's memory do not scale to several instances; that needs the Redis adapter and sticky sessions."
+videos:
+  - title: "Learn Socket.io In 30 Minutes"
+    channel: "Web Dev Simplified"
+    duration: "27:27"
+    url: https://www.youtube.com/watch?v=ZKEqqIO7n-k
+docs:
+  - title: "Socket.IO (GitHub)"
+    url: https://github.com/socketio/socket.io
+  - title: "Socket.IO client (GitHub)"
+    url: https://github.com/socketio/socket.io-client
+  - title: "MDN — WebSocket API"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API
+---
+
+The last lesson, `websockets`, set up the Socket.IO server with a login check and an `Origin` check. A connection that nobody talks on is useless, so here we add the chat itself: **rooms**, validated events with **acknowledgements**, a push from a normal REST route, and a **React** hook for the client. Written for Socket.IO 4.8, React 19 and Node 24, and it continues the code of that lesson (the `events.ts`, `io.ts` and `socketAuth.ts` files). The video is about five years old and covers the basics of events and rooms; details may differ a little from 4.8, and the code below is what ran.
+
+## Rooms and events
+
+A **room** is only a name; sockets `join` and `leave` it, and an empty room disappears. Rooms live on the server, so the client cannot join one by itself except by asking:
+
+```ts
+// src/realtime/chat.ts
+import { messageInputSchema, roomSchema } from "./events.ts";
+import type { ChatMessage, ChatUser } from "./events.ts";
+import type { ChatServer, ChatSocket } from "./io.ts";
+
+const HISTORY_SIZE = 50;
+const history = new Map<string, ChatMessage[]>(); // room -> the last messages, in memory
+let nextMessageId = 1;
+
+const noop = () => {}; // a client may send an event without an acknowledgement callback
+
+async function membersOf(io: ChatServer, room: string): Promise<ChatUser[]> {
+  const sockets = await io.in(room).fetchSockets();
+  const byId = new Map(sockets.map((s) => [s.data.user.id, s.data.user])); // one entry per person
+  return [...byId.values()];
+}
+
+export function registerChatHandlers(io: ChatServer, socket: ChatSocket) {
+  const user = socket.data.user;
+
+  socket.on("room:join", async (input, ack = noop) => {
+    const room = roomSchema.safeParse(input);
+    if (!room.success) return ack({ ok: false, error: room.error.issues[0].message });
+
+    await socket.join(room.data);
+    socket.to(room.data).emit("room:joined", { room: room.data, user }); // everyone but this socket
+    ack({ ok: true, history: history.get(room.data) ?? [], members: await membersOf(io, room.data) });
+  });
+
+  socket.on("room:leave", (input) => {
+    const room = roomSchema.safeParse(input);
+    if (!room.success || !socket.rooms.has(room.data)) return;
+    void socket.leave(room.data);
+    socket.to(room.data).emit("room:left", { room: room.data, user });
+  });
+
+  socket.on("message:send", (input, ack = noop) => {
+    const parsed = messageInputSchema.safeParse(input);
+    if (!parsed.success) return ack({ ok: false, error: parsed.error.issues[0].message });
+    const { room, text } = parsed.data;
+
+    // being connected is not being allowed: only members of the room may talk in it
+    if (!socket.rooms.has(room)) return ack({ ok: false, error: "Join the room first" });
+
+    const message: ChatMessage = { id: nextMessageId++, room, user, text, at: new Date().toISOString() };
+    const recent = history.get(room) ?? [];
+    history.set(room, [...recent, message].slice(-HISTORY_SIZE));
+
+    io.to(room).emit("message:new", message); // everyone in the room, the sender included
+    ack({ ok: true, id: message.id });
+  });
+
+  // "disconnecting" fires while the socket is still in its rooms; "disconnect" is too late
+  socket.on("disconnecting", () => {
+    for (const room of socket.rooms) {
+      if (room === socket.id || room.startsWith("user:")) continue;
+      socket.to(room).emit("room:left", { room, user });
+    }
+  });
+}
+```
+
+Points that matter:
+
+- **Validate every payload** with the Zod schemas from `validation`, and answer errors through the acknowledgement. A handler that throws is not caught by Socket.IO.
+- **Connected is not allowed.** `message:send` checks `socket.rooms.has(room)`. Without that line, any logged-in user could write to any room by guessing its name; this is the socket version of the ownership check in `authorization-oauth`.
+- **`ack = noop`.** A client may emit without a callback. I tried a handler that does `ack("pong")` and a client that sent the event without one: the server threw `ack is not a function`, an uncaught exception, which ends a Node process. Give the parameter a default, or check `typeof ack === "function"`.
+- **`disconnecting`, not `disconnect`.** When `disconnect` fires the socket has already left its rooms, so you cannot tell whom to notify. `disconnecting` still has `socket.rooms`.
+- **Presence by person.** `fetchSockets()` returns sockets, so the code collects one entry per user id (two tabs are one member).
+- **History is in memory** (last 50 per room) and is lost on restart; the chat capstone moves it to PostgreSQL.
+
+### Pushing from a normal route
+
+The sockets are only half of the use. A REST handler can push too, because `notifyUser` sends to the user's private room:
+
+```ts
+// src/routes/todos.ts (added to POST, after createTodo)
+notifyUser(user.id, "todo:created", { id: todo.id, title: todo.title }); // every open tab of this user
+```
+
+Two clients, Ada and Bob, in the room `general`, talking to the finished server. What the program printed:
+
+```text
+ada join general -> {"ok":true,"history":[],"members":[{"id":2,"name":"ada"}]}
+[ada room:joined] {"room":"general","user":{"id":3,"name":"bob"}}
+bob join general -> {"ok":true,"history":[],"members":[{"id":2,"name":"ada"},{"id":3,"name":"bob"}]}
+[ada message:new] {"id":1,"room":"general","user":{"id":2,"name":"ada"},"text":"hello bob", ...}
+ada send -> {"ok":true,"id":1}
+[bob message:new] {"id":1,"room":"general","user":{"id":2,"name":"ada"},"text":"hello bob", ...}
+bob send (not in "random") -> {"ok":false,"error":"Join the room first"}
+bad room name -> {"ok":false,"error":"room must be 1-30 characters: a-z, 0-9 and -"}
+empty text -> {"ok":false,"error":"text cannot be empty"}
+[ada todo:created] {"id":25,"title":"Written over HTTP"}      <- Ada posted a todo with curl; Bob heard nothing
+[ada room:left] {"room":"general","user":{"id":3,"name":"bob"}}   <- Bob disconnected
+```
+
+Ada did not receive her own `room:joined` (that is `socket.to`), but she did receive her own `message:new` (that is `io.to`).
+
+## The React client
+
+The client is a singleton socket, plus a hook for a screen that shows a room:
+
+```ts
+// client/src/socket.ts
+import { io } from "socket.io-client";
+import type { Socket } from "socket.io-client";
+import type { ClientToServerEvents, ServerToClientEvents } from "../../src/realtime/events.ts";
+
+const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:4200";
+
+// the generics are the other way round from the server: first what we receive, then what we send
+export const socket: Socket<ServerToClientEvents, ClientToServerEvents> = io(API_URL, {
+  withCredentials: true, // send the session cookie
+  autoConnect: false, // connect when a screen needs it, not when the file is imported
+});
+```
+
+```ts
+// client/src/useChatRoom.ts
+import { useEffect, useState } from "react";
+import type { ChatMessage } from "../../src/realtime/events.ts";
+import { socket } from "./socket.ts";
+
+export function useChatRoom(room: string) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [connected, setConnected] = useState(socket.connected);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // "connect" fires on the first connection AND after every automatic reconnection.
+    // A reconnected socket is a new socket that is in no rooms, so we join again here.
+    async function onConnect() {
+      setConnected(true);
+      setError(null);
+      const result = await socket.emitWithAck("room:join", room);
+      if (result.ok) setMessages(result.history); // replace: we may have missed some while offline
+      else setError(result.error);
+    }
+    const onDisconnect = () => setConnected(false);
+    const onConnectError = (e: Error) => setError(e.message === "UNAUTHORIZED" ? "Log in first" : e.message);
+    const onMessage = (message: ChatMessage) => {
+      if (message.room === room) setMessages((previous) => [...previous, message]);
+    };
+
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.on("connect_error", onConnectError);
+    socket.on("message:new", onMessage);
+    if (socket.connected) void onConnect();
+    else socket.connect();
+
+    return () => {
+      // remove exactly the listeners this effect added, or each re-run would add duplicates
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+      socket.off("connect_error", onConnectError);
+      socket.off("message:new", onMessage);
+      socket.emit("room:leave", room);
+    };
+  }, [room]);
+
+  async function send(text: string) {
+    const result = await socket.timeout(3000).emitWithAck("message:send", { room, text });
+    if (!result.ok) setError(result.error);
+  }
+
+  return { messages, connected, error, send };
+}
+```
+
+Why it looks like this:
+
+- `autoConnect: false` stops the connection from opening on import; the effect connects when a screen needs it.
+- **The `connect` handler joins the room**, not the effect body. The event fires on the first connection and after every automatic reconnection, and a reconnected client is a brand-new socket in no rooms. I tested it in the browser: I dropped the connection with `socket.io.engine.close()` (the tab showed `offline`), had Bob send a message while Ada was offline, and 4 seconds later the tab was `online` again with a **new socket id**, back in the room, and the history held the message sent while it was away. Replacing the list with the server's history is what repairs the gap.
+- The cleanup calls `socket.off` with the same functions it registered. With `React.StrictMode` the effect runs twice in development, and without it every re-run would add another listener and show each message twice.
+- `emitWithAck` with `socket.timeout(3000)` rejects instead of waiting forever when the server does not answer (I tried a handler that never calls the callback: the promise rejected with `operation has timed out`).
+- The React Compiler needs no `useCallback` around these handlers; they are re-created per effect run, which is what the effect needs.
+
+## Scaling and limits
+
+Everything above lives in one Node process: rooms, sockets and history are in its memory. To run two instances behind a load balancer you need the Redis adapter (`@socket.io/redis-adapter`), which copies room broadcasts between servers, and **sticky sessions** for the long-polling transport, since its requests must reach the server that holds the connection. That, and background jobs, is the optional `stretch-redis-queues` lesson. Also budget for the open connections themselves: each costs memory and a file descriptor, and a server that holds 50,000 idle sockets is a different engineering problem from one that answers 50,000 requests.
+
+## Common mistakes
+
+- No payload validation, no size limit, no rate limit per socket.
+- Trusting a `userId` or a room that the client sent.
+- Calling the acknowledgement without checking that the client sent one.
+- Joining rooms only once, so a reconnected client silently stops receiving.
+- Adding listeners in an effect without removing them.
+- Keeping chat history only in memory in production.
+
+<Exercise title="Review this handler">
+A teammate wrote the message handler for a support-chat feature. Find the problems.
+
+```ts
+io.on("connection", (socket) => {
+  socket.on("join", (room) => socket.join(room));
+
+  socket.on("message", (data, ack) => {
+    db.messages.insert({ userId: data.userId, room: data.room, text: data.text });
+    io.emit("message", data);
+    ack("saved");
+  });
+});
+```
+
+<Solution>
+1. There is no authentication: nobody checked who connected, and no `Origin` check either. Add a connection middleware and `allowRequest`.
+2. `userId` comes from the payload, so any client can write as any user. Use `socket.data.user.id`, set by the middleware.
+3. Nothing is validated: `data.text` may be a megabyte, an array or missing, and `room` may not be a string. Validate with Zod and cap the size.
+4. Anybody can `join` any room, including `"support-staff"` or another customer's room. Decide who may join which room on the server.
+5. `message` does not check that the sender is in the room.
+6. `io.emit` sends every message to every connected user. It should be `io.to(room).emit`.
+7. `ack("saved")` crashes the process when a client sends no callback, and it says "saved" before knowing the insert worked (the insert is not awaited, so a failure is unhandled). Default the callback, `await` the insert, and answer with the real outcome.
+8. The echoed `data` is whatever the client sent, including extra fields. Build the outgoing object on the server, with the server's timestamp and id.
+</Solution>
+</Exercise>
+
+<Exercise title="Limit the senders">
+A user can emit `message:send` a thousand times a second. Write `createSocketLimiter(limit, windowMs)` that returns a function `allow()`, true for the first `limit` calls in each window and false after, and say where you would use it so a flooding client gets an error but stays connected.
+
+<Solution>
+```ts
+// ex/rate-limit.ts
+export function createSocketLimiter(limit: number, windowMs: number) {
+  let windowStart = Date.now();
+  let count = 0;
+  return function allow(): boolean {
+    const now = Date.now();
+    if (now - windowStart >= windowMs) {
+      windowStart = now;
+      count = 0;
+    }
+    count += 1;
+    return count <= limit;
+  };
+}
+```
+
+```ts
+// in the "connection" handler: one limiter per socket, so the counters are not shared
+const allow = createSocketLimiter(5, 5_000);
+
+socket.on("message:send", (input, ack = noop) => {
+  if (!allow()) return ack({ ok: false, error: "You are sending too fast" });
+  // ...validate and send as before
+});
+```
+
+Run with a limit of 5 per 200 ms, a burst of 8 calls gave `ok ok ok ok ok no no no`, and one call after the window gave `ok`. The closure keeps the counters per socket, which is why the limiter is created inside the connection handler. Disconnecting a client that keeps flooding after repeated warnings (`socket.disconnect()`) is a sensible second step. The `express-rate-limit` package from `security` does not apply here, because it counts HTTP requests, not events on an open socket.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the reconnect bug">
+Users report that after their Wi-Fi drops and comes back, the chat shows "online" but no new messages arrive. Why?
+
+```ts
+useEffect(() => {
+  socket.connect();
+  socket.emit("room:join", room);
+  socket.on("message:new", onMessage);
+  return () => {
+    socket.off("message:new", onMessage);
+  };
+}, [room]);
+```
+
+<Solution>
+The join happens once, in the effect. When the connection drops, Socket.IO reconnects by itself, but the reconnected client is a new socket (it gets a new `id`) that is in **no rooms**, so the server no longer sends it anything for `general`. The `connect` event fires again after every reconnection, so the join belongs in a `connect` handler (and runs at once if the socket is already connected), as in `useChatRoom`. The same handler should replace the message list with the history from the join acknowledgement, to fill the gap from the time offline. I reproduced the fix by closing the transport with `socket.io.engine.close()`: the socket came back with a new id, rejoined, and the message sent meanwhile by another user appeared.
+</Solution>
+</Exercise>

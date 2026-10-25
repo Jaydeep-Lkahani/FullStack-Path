@@ -1,0 +1,294 @@
+---
+title: WebSockets and Socket.IO
+summary: Understand how WebSockets differ from HTTP, what Socket.IO adds on top, and set up an authenticated Socket.IO server inside an Express API, with the Origin check that CORS does not give you.
+order: 23
+takeaways:
+  - "HTTP is request and response: the client always speaks first. A WebSocket is one long-lived connection that either side can send on at any time."
+  - "A WebSocket starts as an HTTP request that asks to switch protocols (`101 Switching Protocols`), so cookies and the `Origin` header travel with it."
+  - "Socket.IO adds named events, acknowledgements, rooms, automatic reconnection and a long-polling fallback on top of WebSockets; it is not a plain WebSocket server."
+  - "Authenticate once in a connection middleware, and check the `Origin` yourself, because CORS does not cover the upgrade."
+  - "`socket.emit`, `socket.broadcast.emit`, `io.emit`, `io.to(room).emit` and `socket.to(room).emit` reach different sets of sockets."
+videos:
+  - title: "WebSockets in 100 Seconds & Beyond with Socket.io"
+    channel: "Fireship"
+    duration: "8:31"
+    url: https://www.youtube.com/watch?v=1BfCnjr_Vjg
+docs:
+  - title: "MDN — WebSocket API"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API
+  - title: "RFC 6455 — The WebSocket Protocol"
+    url: https://datatracker.ietf.org/doc/html/rfc6455
+  - title: "Socket.IO (GitHub)"
+    url: https://github.com/socketio/socket.io
+  - title: "ws (GitHub)"
+    url: https://github.com/websockets/ws
+  - title: "MDN — Server-sent events"
+    url: https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events
+---
+
+Chat, live notifications, shared cursors, multiplayer games, stock tickers: anything where the server must tell the browser something **without being asked** needs more than request and response. "How do WebSockets differ from HTTP?" is a standard interview question, and the third capstone project (a real-time chat) is built on this lesson and the next. We start with the protocol, write a ten-line raw WebSocket, and then set up **Socket.IO** 4.8 inside the todo API of `file-uploads`, with logged-in users only. The next lesson, `realtime-chat`, adds rooms, acknowledgements and a React client. Written for Socket.IO 4.8, `ws` 8, Express 5.3 and Node 24. The docs site socket.io could not be reached while I wrote this, so the links go to the GitHub repositories; everything below was run. The video is about five years old, so a few details may differ from Socket.IO 4.8.
+
+## HTTP versus WebSockets
+
+HTTP is a conversation where the client always speaks first: the server can only answer. To show new data the old ways were to ask again and again (**polling**), or to ask and keep the request open until something happens (**long polling**). Both waste requests and add delay. Two modern tools fix it:
+
+| | Direction | Connection | Use it for |
+| --- | --- | --- | --- |
+| Normal HTTP | client asks, server answers | one request | everything that is not live |
+| Server-sent events | server to client only | one long response | live feeds, progress bars, notifications |
+| WebSocket | both ways, any time | one long-lived connection | chat, games, collaboration |
+
+If the client never needs to send during the stream, server-sent events are simpler and work over plain HTTP. If both sides talk, use WebSockets.
+
+A WebSocket **starts as an HTTP request** that asks to switch. I made that request by hand against the finished server (with `curl`, using the session cookie of a logged-in user):
+
+```bash
+curl -si -H "Cookie: sid=..." -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  "localhost:4200/socket.io/?EIO=4&transport=websocket"
+# HTTP/1.1 101 Switching Protocols
+# Upgrade: websocket
+# Connection: Upgrade
+# Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+```
+
+After the `101`, the same TCP connection no longer carries requests and responses but small **frames**, and either side may send one whenever it likes. Two things follow. The handshake is a normal request, so the **cookies and the `Origin` header arrive with it**, which is how you will authenticate below. And from here on, nothing is retried or kept for you: if the connection drops, messages sent into the void are lost.
+
+## A raw WebSocket
+
+The `ws` package is a small server for the protocol. Node 22+ and every browser also have a global `WebSocket` client:
+
+```ts
+// ex/raw-ws.ts
+import { WebSocketServer } from "ws";
+
+const wss = new WebSocketServer({ port: 4900 });
+wss.on("connection", (ws) => {
+  ws.on("message", (data) => {
+    for (const client of wss.clients) client.send(`echo: ${data}`); // "broadcast" is a loop you write
+  });
+});
+
+const socket = new WebSocket("ws://localhost:4900");
+socket.onopen = () => socket.send("hello");
+socket.onmessage = (event) => {
+  console.log("client got:", event.data); // client got: echo: hello
+  socket.close();
+  wss.close();
+};
+```
+
+That is all the protocol gives you: a stream of strings or bytes. There are no event names (you invent your own JSON format), no groups (the loop above), no reconnection, no way to know a message arrived, no login. Every chat app needs those, so most Node projects use **Socket.IO**, a library with a server and a client that adds them. Know the cost: Socket.IO speaks its own protocol *on top of* WebSocket, so its client cannot talk to a plain WebSocket server, nor the reverse.
+
+It also starts with HTTP **long polling** and upgrades to a WebSocket a moment later, so it works through proxies that block upgrades. I watched this in a page: the first transport was `polling`, and 0.8 seconds later `socket.io.engine.transport.name` was `websocket`.
+
+## Socket.IO in five ideas
+
+1. **Events.** Both sides `emit("name", data)` and listen with `on("name", handler)`. Data is JSON-like (objects, arrays, numbers; also `Buffer`s).
+2. **Acknowledgements.** The last argument of `emit` may be a callback, which the other side calls to answer: a request/response inside the connection. The client can `await socket.emitWithAck(...)`.
+3. **Rooms.** A server-side name for a group of sockets (the next lesson builds the chat on them).
+4. **Reconnection.** The client reconnects by itself, with growing delays.
+5. **Middleware.** `io.use(fn)` runs once per connection, before it is accepted.
+
+Who hears an event depends on which emit you use:
+
+| Call (on the server) | Receivers |
+| --- | --- |
+| `socket.emit(...)` | only that socket |
+| `socket.broadcast.emit(...)` | everyone except that socket |
+| `io.emit(...)` | everyone |
+| `io.to(room).emit(...)` | every socket in the room, the sender included |
+| `socket.to(room).emit(...)` | every socket in the room except the sender |
+
+## The server
+
+Socket.IO needs the underlying HTTP server, so `app.listen()` becomes `createServer(app)`; Express keeps answering REST requests on it:
+
+```ts
+// src/server.ts (changed)
+const httpServer = createServer(app);
+createIo(httpServer);
+
+httpServer.listen(config.PORT, () => {
+  logger.info({ port: config.PORT, env: config.NODE_ENV }, "server listening");
+});
+```
+
+Start with the **contract**: every event, its payload and its answer in one file. It imports only `zod`, so the React client can import its types:
+
+```ts
+// src/realtime/events.ts
+import { z } from "zod";
+
+// The contract between server and client: event names, payloads and acknowledgements.
+// Imports only `zod`, so the React client could import this file too.
+export const roomSchema = z.string().regex(/^[a-z0-9-]{1,30}$/, "room must be 1-30 characters: a-z, 0-9 and -");
+export const messageInputSchema = z.object({
+  room: roomSchema,
+  text: z.string().trim().min(1, "text cannot be empty").max(500, "text is at most 500 characters"),
+});
+
+export type ChatUser = { id: number; name: string };
+export type ChatMessage = { id: number; room: string; user: ChatUser; text: string; at: string };
+
+export type Ack<T = object> = ({ ok: true } & T) | { ok: false; error: string };
+
+// events the server sends
+export type ServerToClientEvents = {
+  "message:new": (message: ChatMessage) => void;
+  "room:joined": (event: { room: string; user: ChatUser }) => void;
+  "room:left": (event: { room: string; user: ChatUser }) => void;
+  "todo:created": (todo: { id: number; title: string }) => void;
+};
+
+// events the client sends; the last parameter is the acknowledgement the client may wait for
+export type ClientToServerEvents = {
+  "room:join": (room: unknown, ack?: (result: Ack<{ history: ChatMessage[]; members: ChatUser[] }>) => void) => void;
+  "room:leave": (room: unknown) => void;
+  "message:send": (input: unknown, ack?: (result: Ack<{ id: number }>) => void) => void;
+};
+
+export type SocketData = { user: ChatUser };
+```
+
+`room:join` gets `unknown` as its argument on purpose: types protect your code, not the network, and a client can send anything. Now the server object:
+
+```ts
+// src/realtime/io.ts
+import type { Server as HttpServer } from "node:http";
+import cookieParser from "cookie-parser";
+import { Server } from "socket.io";
+import type { Socket } from "socket.io";
+import { config } from "../config.ts";
+import { logger } from "../logger.ts";
+import { registerChatHandlers } from "./chat.ts";
+import type { ClientToServerEvents, ServerToClientEvents, SocketData } from "./events.ts";
+import { authenticate } from "./socketAuth.ts";
+
+export type ChatServer = Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
+export type ChatSocket = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
+
+let io: ChatServer | undefined;
+
+export function createIo(httpServer: HttpServer): ChatServer {
+  io = new Server(httpServer, {
+    cors: { origin: config.CORS_ORIGINS, credentials: true }, // for the long-polling requests
+    // CORS does not cover the WebSocket upgrade, so look at the Origin ourselves
+    allowRequest: (req, callback) => {
+      const origin = req.headers.origin;
+      callback(null, origin === undefined || config.CORS_ORIGINS.includes(origin));
+    },
+    maxHttpBufferSize: 10_000, // bytes per message; the default is 1 MB
+  });
+
+  io.engine.use(cookieParser()); // gives the handshake request a `cookies` object
+  io.use(authenticate);
+
+  io.on("connection", (socket) => {
+    const log = logger.child({ socketId: socket.id, userId: socket.data.user.id });
+    log.info("socket connected");
+    socket.on("disconnect", (reason) => log.info({ reason }, "socket disconnected"));
+
+    socket.join(`user:${socket.data.user.id}`); // a private room: every tab of this user
+    registerChatHandlers(io!, socket);
+  });
+
+  return io;
+}
+
+// lets REST handlers push events to a user's open tabs
+export function notifyUser<E extends keyof ServerToClientEvents>(
+  userId: number,
+  event: E,
+  ...args: Parameters<ServerToClientEvents[E]>
+): void {
+  io?.to(`user:${userId}`).emit(event, ...args);
+}
+```
+
+- The three type arguments of `Server` make `socket.emit("message:new", 42)` a compile error.
+- `cors` covers the long-polling requests, as in the `security` lesson. It does **not** cover the WebSocket upgrade, because browsers do not apply CORS to it; `allowRequest` checks the `Origin` header of every handshake against the same list. Without it, any website could open a socket to your API from a visitor's browser, and the browser would attach the visitor's cookie (**cross-site WebSocket hijacking**).
+- `maxHttpBufferSize` caps one message at 10 kB; the default is 1 MB, far too much for chat text.
+- `io.engine.use(cookieParser())` lets you reuse an Express middleware on the handshake request.
+- `registerChatHandlers` is the chat code of the next lesson (`realtime-chat`); with an empty function the server already authenticates and connects clients.
+- Every socket joins a private room `user:<id>`. A person with three tabs has three sockets, and this room reaches all of them.
+
+## Authentication
+
+A WebSocket connection is established once, so you check who it is **once**, in a connection middleware, and keep the answer on the socket:
+
+```ts
+// src/realtime/socketAuth.ts
+import type { Request } from "express";
+import type { ExtendedError } from "socket.io";
+import { SESSION_COOKIE, getSession } from "../sessions.ts";
+import { findUserById } from "../users.ts";
+import type { ChatSocket } from "./io.ts";
+
+// Runs once per connection, before "connection" fires. next(error) refuses the client.
+export function authenticate(socket: ChatSocket, next: (error?: ExtendedError) => void) {
+  // io.engine.use(cookieParser()) has already filled req.cookies, as in Express
+  const cookie: unknown = (socket.request as Request).cookies?.[SESSION_COOKIE];
+  const session = typeof cookie === "string" ? getSession(cookie) : undefined;
+  const user = session && findUserById(session.userId);
+
+  if (!user) {
+    next(new Error("UNAUTHORIZED"));
+    return;
+  }
+  socket.data.user = { id: user.id, name: user.email.split("@")[0] };
+  next();
+}
+```
+
+It uses the same session store and cookie as `requireAuth` (`sessions-and-jwt`), so a user logged in over HTTP is logged in on the socket, and a failed login stays out. What I tried, with real clients:
+
+| Connection | Result |
+| --- | --- |
+| Node client with Ada's cookie | connected |
+| no cookie | `connect_error`, message `UNAUTHORIZED` |
+| valid cookie, `Origin: https://evil.example` | refused (`websocket error`) |
+| a page on `localhost:5173` (on the list), long polling then WebSocket | connected |
+| a page on `localhost:5174` (not on the list), cookie present, either transport | refused (`xhr poll error` and `websocket error`) |
+
+Remember that authentication happens at connection time. If an admin bans the user later, the open socket stays open until you disconnect it (`io.in("user:7").disconnectSockets()`), unlike an HTTP request, which is checked every time.
+
+## Common mistakes
+
+- Believing CORS protects the WebSocket upgrade.
+- Authenticating nobody in the handshake, or trusting an id sent in an event instead of `socket.data.user`.
+- Using `io.emit` where `io.to(room).emit` was meant, which sends private data to everyone.
+- Expecting a Socket.IO client to talk to a plain WebSocket server (or the reverse).
+
+<Exercise title="Who hears it?">
+Four clients are connected. `A` and `B` are in room `x`, `C` is in room `y`, `D` is in no room. `A` then triggers this handler. Which clients receive `e1`, `e2`, `e3` and `e4`?
+
+```ts
+socket.on("go", () => {
+  socket.emit("e1");
+  socket.broadcast.emit("e2");
+  io.to("x").emit("e3");
+  socket.to("x").emit("e4");
+});
+```
+
+<Solution>
+`e1` reaches only `A`. `e2` reaches everyone except the sender: `B`, `C` and `D`. `e3` reaches the whole room `x`, sender included: `A` and `B`. `e4` reaches room `x` without the sender: only `B`. I ran this with four real clients and `onAny` listeners, and each one logged exactly these events (`A`: e1, e3; `B`: e2, e3, e4; `C`: e2; `D`: e2).
+</Solution>
+</Exercise>
+
+<Exercise title="Accept or refuse?">
+The server above allows the origin `http://localhost:5173` and uses the session cookie of the API. For each connection, say whether it is accepted: (a) a page on `http://localhost:5173` where the user is logged in; (b) the same page, user not logged in; (c) a page on `http://localhost:5174` where the user is logged in on `localhost`; (d) a Node script with a valid cookie and no `Origin` header; (e) a Node script with a valid cookie that sends `Origin: https://evil.example`.
+
+<Solution>
+(a) accepted. (b) refused: the middleware calls `next(new Error("UNAUTHORIZED"))`, and the client gets `connect_error`. (c) refused: the cookie is sent (ports do not separate cookies on `localhost`), but `allowRequest` sees an origin that is not on the list. I tried this in a browser: the long-polling request failed with `xhr poll error` and a WebSocket-only attempt with `websocket error`. (d) accepted: a request without `Origin` is not from a browser page, and it still needs the cookie, so it is allowed. (e) refused, because `evil.example` is not on the list (`websocket error`). The `Origin` header is set by the browser and a page cannot change it; a script can send anything, which is why it also has to prove who it is.
+</Solution>
+</Exercise>
+
+<Exercise title="SSE or WebSocket?">
+Pick the simpler tool for each feature: (a) a progress bar for a report that takes a minute to generate; (b) a multiplayer drawing board; (c) a notification bell that shows new comments; (d) a chat; (e) a live price ticker that the user only watches.
+
+<Solution>
+(a), (c) and (e) are server-to-server-to-browser one-way streams, so server-sent events (`EventSource`) are enough: plain HTTP, automatic reconnection, no new protocol. (b) and (d) need both sides to send often and quickly: WebSockets. Even for (c) and (e) a WebSocket is not wrong, and if you already run Socket.IO for chat, reusing it for notifications is reasonable; the table is about the simplest tool, not the only one.
+</Solution>
+</Exercise>

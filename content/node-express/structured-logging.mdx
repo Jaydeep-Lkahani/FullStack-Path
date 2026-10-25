@@ -1,0 +1,295 @@
+---
+title: Structured Logging with Pino
+summary: Replace console.log with structured pino logs that carry a level and a request id, are controlled by environment config, and keep secrets out.
+order: 21
+takeaways:
+  - "Structured logs, one JSON object per line with a level and fields, can be searched and counted; `console.log` text cannot."
+  - "Call the logger with data first and a constant message second, and put errors under the `err` key so the stack is kept."
+  - "A level setting hides everything below it, and reading it from the environment lets you turn debug output on in production without a deploy."
+  - "`pino-http` logs one line per request and gives every handler a `req.log` that already carries the request id."
+  - "Accept a caller's request id only if it looks harmless, and send it back in `X-Request-Id`, so one id follows a request across services."
+  - "Redaction hides the secret fields you list, but it is a safety net: the real rule is not to log passwords, tokens and cookies at all."
+videos:
+  - title: "Pino JS - Logging in JavaScript / Node.js applications"
+    channel: "Better Stack"
+    duration: "41:30"
+    url: https://www.youtube.com/watch?v=fluDEkA1h6w
+docs:
+  - title: "Pino"
+    url: https://getpino.io/
+  - title: "pino-http (GitHub)"
+    url: https://github.com/pinojs/pino-http
+  - title: "Pino — redaction"
+    url: https://github.com/pinojs/pino/blob/main/docs/redaction.md
+  - title: "OWASP — Logging Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html
+---
+
+At 3 a.m. the only witness to what your API did is its log. Most beginner logs are `console.log` sentences that nobody can search, with a password or a session cookie hiding in some of them, and "how do you log in production?" is a common interview question. This lesson replaces them with **structured logging** using pino, adds one log line per request with an id that follows it everywhere, and wires the log level and the pretty output to the environment. It continues the API of `security`, and the next lesson, `file-uploads`, uses the `req.log` set up here. Written for pino 10.4, pino-http 11, Express 5.3 and Node 24. The video is from 2023, so option names there may differ a little from the code below, which is what ran.
+
+## Configuration
+
+A log setting differs between your laptop, a test run and production, which is what environment variables are for (`schemas-and-config` built the validation, so we only add keys):
+
+```ts
+// src/config.ts (added)
+    // leave LOG_LEVEL out to get "info" ("silent" in tests); pretty output is for a terminal only
+    LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).optional(),
+    LOG_PRETTY: z.stringbool().default(false),
+```
+
+- `LOG_LEVEL` is optional on purpose: the logger picks `info`, or `silent` in tests so test output stays readable. In production you set `LOG_LEVEL=debug` for an hour while hunting a bug, without a code change.
+- `LOG_PRETTY` is an explicit switch, not a guess from `NODE_ENV`: you turn it on in your own `.env`, and it stays off wherever logs go to a file or a service.
+- Install `pino` and `pino-http`, and `pino-pretty` as a dev dependency (production never loads it).
+
+## Why not `console.log`
+
+`console.log("login failed for", email)` is a sentence for a person looking at a terminal. In production nobody is looking: the output is collected by a service, and you ask it questions such as "show me every `500` in the last hour" or "everything that happened in request `abc`". That needs three things plain text lacks: a **level** (how serious), **fields** (data you can filter on) and a **request id** tying lines together.
+
+**Structured logging** writes one JSON object per line. **Pino** is the standard fast logger for Node. A level is a number, and setting the level hides everything below it:
+
+| Level | Number | Use |
+| --- | --- | --- |
+| `fatal` | 60 | the process cannot go on |
+| `error` | 50 | a request failed because of a bug or outage: somebody should look |
+| `warn` | 40 | unusual but handled: a failed login, a `4xx` |
+| `info` | 30 | normal events: server started, request completed, file stored |
+| `debug` | 20 | detail for developers; off by default |
+| `trace` | 10 | even more |
+
+## The logger
+
+```ts
+// src/logger.ts
+import pino from "pino";
+import { config } from "./config.ts";
+
+export const logger = pino({
+  level: config.LOG_LEVEL ?? (config.NODE_ENV === "test" ? "silent" : "info"),
+  // secrets never reach the log, whoever logs the object they sit in
+  redact: {
+    paths: [
+      "req.headers.cookie",
+      "req.headers.authorization",
+      'res.headers["set-cookie"]',
+      "*.password",
+    ],
+    censor: "[redacted]",
+  },
+  // pino-pretty is a devDependency: it is loaded only when asked for
+  transport: config.LOG_PRETTY ? { target: "pino-pretty" } : undefined,
+});
+```
+
+Output at the default level, from a small script (`ex/log-demo.ts`):
+
+```ts
+logger.debug("hidden at the default level");
+logger.info({ user: { email: "ada@example.com", password: "hunter2" } }, "sign-up received");
+logger.child({ job: "cleanup" }).info({ removed: 3 }, "old uploads removed");
+logger.error({ err }, "could not read the file");
+```
+
+```text
+{"level":30,"time":1792690836946,"pid":15935,"hostname":"...","user":{"email":"ada@example.com","password":"[redacted]"},"msg":"sign-up received"}
+{"level":30,"time":1792690836947,"pid":15935,"hostname":"...","job":"cleanup","removed":3,"msg":"old uploads removed"}
+{"level":50,"time":1792690836947,"pid":15935,"hostname":"...","err":{"type":"SyntaxError","message":"Expected property name or '}' in JSON at position 1 ...","stack":"SyntaxError: ..."},"msg":"could not read the file"}
+```
+
+- The call is **data first, message second**: `logger.info({ fields }, "message")`. The message stays a constant sentence you can search for; the variable parts go into fields (`"removed old uploads: 3"` can't be counted, `removed: 3` can).
+- `child({ job: "cleanup" })` makes a logger that adds those fields to every line. Request loggers are made the same way.
+- Errors go under the key **`err`**: pino then prints `type`, `message` and `stack` as fields. Gluing an error into the message (`"failed: " + err`) keeps only its text and loses the stack.
+- `LOG_LEVEL=warn` prints only the error line; `LOG_LEVEL=debug` also prints the first.
+- With `LOG_PRETTY=true` the same lines are shown as coloured text for a human. It is a development tool: formatting costs time, and a log service wants the JSON.
+
+## Keeping secrets out
+
+**Redaction** replaces chosen paths in every object before it is written. The `password` in the sign-up line above shows `[redacted]`. Rules:
+
+- A path is exact: `"*.password"` covers `user.password` but not `password` at the top or `body.user.password`. `ex/redact.ts` also showed `body.card.number` and `body.tokens[*]` working, and that a field named `passwd` (a typo, or a different name) stays visible. Redaction is a safety net behind a habit of **not putting secrets in objects you log**.
+- Never log passwords, session ids, tokens, full card numbers or `Cookie`/`Authorization` headers. Personal data (emails, names) is not forbidden, but logs are copied around and kept for months, so log an id where an id is enough.
+
+## Logging every request, with an id
+
+Writing `logger.info` in every route would be repetitive, and you would forget one. `pino-http` is a middleware that logs one line per request when it finishes, and gives each request its own child logger:
+
+```ts
+// src/middleware/httpLogger.ts
+import { randomUUID } from "node:crypto";
+import { pinoHttp } from "pino-http";
+import { logger } from "../logger.ts";
+
+// an id from a caller or proxy is kept only if it looks harmless
+const SAFE_ID = /^[\w-]{1,64}$/;
+
+// one line per request when it finishes, and `req.log` for every line written during it
+export const httpLogger = pinoHttp({
+  logger,
+  genReqId: (req, res) => {
+    const given = req.headers["x-request-id"];
+    const id = typeof given === "string" && SAFE_ID.test(given) ? given : randomUUID();
+    res.setHeader("X-Request-Id", id);
+    return id;
+  },
+  // the defaults log every header of both sides; keep only what helps to find a request again
+  serializers: {
+    req: (req) => ({ id: req.id, method: req.method, url: req.url }),
+    res: (res) => ({ statusCode: res.statusCode }),
+  },
+  // the level says how the request went, so "show me the problems" is a filter
+  customLogLevel: (req, res, error) => {
+    if (error || res.statusCode >= 500) return "error";
+    if (res.statusCode >= 400) return "warn";
+    return "info";
+  },
+});
+```
+
+- `genReqId` gives every request an id, and returns it to the caller in `X-Request-Id`. If a caller or a proxy already sent one, it is reused, so a single id can follow a request through several services (the idea from the `express-middleware` exercise). The pattern check matters: the id goes into your logs, and a client could otherwise put long text or fake log entries into your logs. I tried two ids in a header: `x-request-id: trace-abc-123` came back unchanged, and `bad id with spaces!` was replaced by a UUID.
+- `customLogLevel` sets the level from the outcome (`5xx` error, `4xx` warn, the rest info). Then "all the problems" is the filter `level >= 40`.
+- `serializers` choose what is printed. The defaults write **every header** of the request and the response, which makes each line about a kilobyte of noise and a place for secrets to leak; this keeps the id, method, URL and status.
+
+`app.ts` now has `app.use(httpLogger)` where `logger` was, and inside any handler `req.log` is that request's logger, with the id already attached. Here is a login, a failed login, a request that brings its own id, and a request to a todo that does not exist (hostname cut):
+
+```text
+{"level":30,"req":{"id":"43a87994-...","method":"POST","url":"/v1/auth/login"},"res":{"statusCode":200},"responseTime":60,"msg":"request completed"}
+{"level":40,"req":{"id":"49fa168e-...","method":"POST","url":"/v1/auth/login"},"event":"login_failed","msg":"login failed"}
+{"level":40,"req":{"id":"49fa168e-...","method":"POST","url":"/v1/auth/login"},"res":{"statusCode":401},"responseTime":35,"msg":"request completed"}
+{"level":30,"req":{"id":"trace-abc-123","method":"GET","url":"/v1/todos/1"},"res":{"statusCode":200},"responseTime":1,"msg":"request completed"}
+{"level":40,"req":{"id":"30778abc-...","method":"GET","url":"/v1/todos/9999"},"res":{"statusCode":404},"responseTime":0,"msg":"request completed"}
+```
+
+The second and third lines share one `req.id`: the id is what connects "login failed" (the *event* the route chose to report) to its status line. To find everything about one request you search the log service for that id; to see only the problems on a terminal, `node src/server.ts | jq 'select(.level >= 40)'`.
+
+## Using it in the code you have
+
+The error handler stops using `console.error`; the `5xx` path logs the real error and the client still gets the generic message:
+
+```ts
+// src/middleware/errorHandler.ts (changed)
+if (httpError.status >= 500) {
+  req.log.error({ err }, "request failed"); // the real error stays in the log
+}
+```
+
+Tried with a route that throws a `TypeError`: the client saw `500 {"error":{"code":"INTERNAL_ERROR","message":"Something went wrong"}}`, and the log held one `error` line with the `err` (type, message, stack) and the request id, plus the usual summary line for the `500` with the same id.
+
+The login route reports one event per failure, so you can count failures per minute (and later alert on a spike):
+
+```ts
+// src/routes/auth.ts (changed)
+if (!user) {
+  req.log.warn({ event: "login_failed" }, "login failed"); // one line per failure: easy to count
+  throw unauthorized("Invalid email or password"); // the same text for both causes
+}
+```
+
+And `server.ts` replaces its `console.log` with `logger.info({ port, env }, "server listening")`.
+
+## Good habits
+
+- Log **events and outcomes**, not every step. A line should answer "what happened and to what", with ids.
+- Pick levels honestly. If every line is `error`, nobody reads `error`.
+- Do not log inside tight loops, and never `await` something slow just to log.
+- Logs are not metrics or error tracking: counting, alerting and grouping errors is what the `monitoring` lesson adds (Sentry).
+
+## Common mistakes
+
+- `console.log` in production code, and a log level that cannot be changed without a deploy.
+- Logging whole `req.body` or `req.headers`, which carry passwords and cookies.
+- Logging errors as strings (`logger.error("failed: " + err)`) and losing the stack.
+- Accepting any `X-Request-Id` a client sends.
+- Believing redaction is complete: it only hides the paths you listed.
+- Pretty-printing in production, or logging inside tight loops.
+
+<Exercise title="Predict the output">
+```ts
+const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
+const request = logger.child({ requestId: "r1" });
+
+logger.debug("a");
+request.info("b");
+request.warn({ status: 404 }, "c");
+logger.error({ err: new Error("d") }, "e");
+```
+
+Which messages (`a` to `e`) are printed with `LOG_LEVEL` unset, with `warn`, with `error` and with `silent`? Which lines carry `requestId`?
+
+<Solution>
+Unset (so `info`): `b`, `c` and `e`; `a` is a `debug` line, below `info`. With `warn`: `c` and `e`. With `error`: only `e`. With `silent`: nothing. Only the lines written through `request` (`b` and `c`) carry `"requestId":"r1"`; `e` was written through the parent logger. I ran it with each setting and got exactly those messages. Note that `d` is never printed as a message: it is the text of the error inside the `err` field of line `e`.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the log calls">
+Rewrite this so it is safe and searchable.
+
+```ts
+function savePayment(card: { number: string; owner: string }, userEmail: string) {
+  console.log("saving card " + card.number + " for " + userEmail);
+  try {
+    gateway.charge(card);
+  } catch (err) {
+    logger.error("payment failed: " + err);
+  }
+}
+```
+
+<Solution>
+```ts
+function savePayment(card: { number: string; owner: string }, userEmail: string) {
+  const log = logger.child({ feature: "payments" });
+  log.info({ last4: card.number.slice(-4) }, "saving card");
+  try {
+    gateway.charge(card);
+  } catch (err) {
+    log.error({ err }, "payment failed");
+  }
+}
+```
+
+The original printed the full card number and the email with `console.log`, as one unsearchable sentence. The fix logs only the last four digits as a field, uses a child logger so every line has `feature: "payments"`, keeps the message a constant, and passes the error under `err`. Run with a failing gateway, the old code printed `"msg":"payment failed: Error: gateway timeout"` with no stack, and the new code printed an `err` object with `type`, `message` and `stack`.
+</Solution>
+</Exercise>
+
+<Exercise title="Redact the checkout">
+This request body is about to be logged: `{ headers: { authorization, cookie }, body: { email, password, card: { number, cvc, expires } } }`. Write the logger options so that the token, the cookie, the password, the card number and the cvc never appear, while the email and the expiry stay. Then name one way your rules could still leak a secret.
+
+<Solution>
+```ts
+import pino from "pino";
+
+const log = pino({
+  redact: {
+    paths: [
+      "headers.authorization",
+      "headers.cookie",
+      "body.password",
+      "body.card.number",
+      "body.card.cvc",
+    ],
+    censor: "[redacted]",
+  },
+});
+```
+
+For the object above the log shows `"authorization":"[redacted]"`, `"cookie":"[redacted]"`, `"password":"[redacted]"`, and the `number` and `cvc` as `[redacted]`, with `email` and `expires` unchanged (I ran the same idea in `ex/redact.ts`). The rules still leak whenever the secret is somewhere the paths do not name: a field with another name (`passwd`, `pwd`), the same value inside an error message (`"Invalid card 4242..."`), or the same object logged under a different key (`req.body` instead of `body`). Redaction is a net: the real protection is not logging the object at all.
+</Solution>
+</Exercise>
+
+<Exercise title="Log who made the request">
+Add the id of the logged-in user (or `null`) to the "request completed" line of every request. `requireAuth` sets `req.user` later in the chain than the logger, so say why the value is still there. Then add a log line to the todo `DELETE` route that says which todo was removed.
+
+<Solution>
+```ts
+// src/middleware/httpLogger.ts (added to the options)
+customProps: (req) => ({ userId: req.user?.id ?? null }),
+```
+
+```ts
+// src/routes/todos.ts (in the DELETE handler, after removing the todo)
+req.log.info({ todoId: todo.id }, "todo deleted");
+```
+
+`pino-http` calls `customProps` again when the response finishes, and by then `requireAuth` has set `req.user` (a request refused before login gets `null`). I tried it with a stand-in middleware that sets the user after the logger: the completion line gained `"userId":7`. But lines you write with `req.log` inside a handler were bound **at the start** of the request, before login, and showed `"userId":null`. To put the id on those too, rebind in `requireAuth` with `req.log = req.log.child({ userId: user.id })` (that adds it to handler lines but not to the completion line; with both, the key appears twice, so pick one for the field). Because `req.log` is already the request's child logger, the "todo deleted" line carries the request id without writing it anywhere.
+</Solution>
+</Exercise>

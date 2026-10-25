@@ -1,11 +1,13 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { CheckIcon, CopyIcon } from "./course/icons";
 
-/** `<pre>` replacement for MDX code blocks: adds a copy button. */
+/** `<pre>` replacement for MDX code blocks: window bar with language label and copy button. */
 export function CodePre(props: React.ComponentProps<"pre">) {
   const ref = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
+  const language = (props as Record<string, unknown>)["data-language"];
 
   async function copy() {
     const text = ref.current?.textContent ?? "";
@@ -19,15 +21,31 @@ export function CodePre(props: React.ComponentProps<"pre">) {
   }
 
   return (
-    <div className="group relative">
-      <button
-        type="button"
-        onClick={copy}
-        aria-label="Copy code"
-        className="border-border bg-background/80 text-muted hover:text-foreground absolute top-2 right-2 z-10 rounded-md border px-2 py-1 text-xs opacity-0 transition group-focus-within:opacity-100 group-hover:opacity-100 focus:opacity-100"
-      >
-        {copied ? "Copied!" : "Copy"}
-      </button>
+    <div className="codeblock">
+      <div className="codeblock-bar">
+        <span className="codeblock-dots" aria-hidden>
+          <i />
+          <i />
+          <i />
+        </span>
+        {typeof language === "string" && language && (
+          <span className="codeblock-lang">{language}</span>
+        )}
+        <button
+          type="button"
+          onClick={copy}
+          aria-label="Copy code"
+          data-copied={copied}
+          className="codeblock-copy focus-visible:outline-accent focus-visible:outline-2"
+        >
+          {copied ? (
+            <CheckIcon className="size-3.5" />
+          ) : (
+            <CopyIcon className="size-3.5" />
+          )}
+          <span aria-live="polite">{copied ? "Copied!" : "Copy"}</span>
+        </button>
+      </div>
       <pre ref={ref} {...props} />
     </div>
   );

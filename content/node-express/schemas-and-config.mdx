@@ -1,0 +1,228 @@
+---
+title: Sharing Schemas, OpenAPI and Config
+summary: Reuse the Zod schemas beyond the request handlers, in the frontend, in the OpenAPI file and in the environment check, and know which rules a schema cannot enforce.
+order: 15
+takeaways:
+  - "A schema file that imports only `zod` can be shared with the frontend, so the browser and the server apply the same rules."
+  - "Client-side validation is only for convenience; the server must always validate, because anyone can call the API without your app."
+  - "`z.toJSONSchema` turns a Zod schema into JSON Schema, which OpenAPI 3.1 uses, so part of the spec can be generated from the code."
+  - "The environment is input too: check `process.env` once at startup with a schema, and refuse to start when it is wrong."
+  - "A schema checks the shape of one request; rules that need stored data (unique, exists, owned) stay in the handler, and the database has the last word."
+videos: []
+docs:
+  - title: "Zod — Converting to JSON Schema"
+    url: https://zod.dev/json-schema
+  - title: "Zod — Defining schemas"
+    url: https://zod.dev/api
+  - title: "Node.js: process.env"
+    url: https://nodejs.org/api/process.html
+---
+
+In `validation` the schemas replaced the hand-written checks of the todo API, and the types came for free. A schema is worth more than that: it is a precise, machine-readable description of your data, so you can use it in more places than the handlers. This lesson shares it with the frontend, generates part of the OpenAPI file from it, and uses the same idea to check the environment variables. It closes with the rules a schema cannot check. Written for Zod 4.6, Express 5.3 and Node 24; it continues the `/v1` todo API with the schemas in `src/schemas/`.
+
+## One schema, many uses
+
+The schema now does the work of five things:
+
+1. **Validation** at runtime.
+2. **Types**: `z.infer` replaces hand-written interfaces.
+3. **Cleaning**: trimming, defaults, dropping unknown fields.
+4. **Documentation**: a schema is a precise description of the input.
+5. **Sharing**, below.
+
+### Sharing with the frontend
+
+`schemas/todo.ts` imports only `zod`: no Express, no `node:` modules. That means a React app can import the same file and use it in a form with `zodResolver` (the `react/forms` lesson), so the browser and the server apply **the same rules**. The usual layout is a monorepo with a small shared package:
+
+```text
+notes-app/
+  packages/
+    shared/src/todo.ts      the schemas and inferred types
+  apps/
+    api/                    Express, imports "shared"
+    web/                    React, imports "shared"
+```
+
+You will build exactly this in the `fullstack-integration` module. Without a monorepo, teams copy the file or generate the types from the OpenAPI file; a shared package is the simplest of the three.
+
+<Callout type="warning" title="Client validation is for convenience only">
+Checking in the browser gives the user an instant message. It protects nothing, because anyone can skip your React app and call the API with curl. The server validates every request, always, even when the form already did.
+</Callout>
+
+### Generating the OpenAPI schema
+
+In `openapi-and-bruno` a warning said a spec can drift from the code, and that generating it from the schemas is one cure. Zod 4 can do that:
+
+```ts
+import { z } from "zod";
+import { newTodoSchema } from "./schemas/todo.ts";
+
+console.log(JSON.stringify(z.toJSONSchema(newTodoSchema, { io: "input" }), null, 2));
+```
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "done": { "default": false, "type": "boolean" }
+  },
+  "required": ["title"]
+}
+```
+
+(Printed more compactly here.) The output follows JSON Schema 2020-12, which is what OpenAPI 3.1 uses, so you can paste it under `components.schemas.NewTodo` or write a small script that does it. `io: "input"` means "what the client sends"; without it the `done` field counts as required, because the **output** always has it. Rules written as code, such as the `refine` for PATCH, cannot be expressed in JSON Schema and are left out, so the spec describes the shape, not every rule.
+
+## Validate the environment too
+
+The `node-typescript` lesson promised that Zod would replace the hand-written checks of `process.env`. The same pattern works, with one difference: if the environment is wrong, the program should refuse to start.
+
+```ts
+// src/config.ts
+import { z } from "zod";
+
+const configSchema = z.object({
+  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  GREETING: z.string().default("Hello"),
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+});
+
+const result = configSchema.safeParse(process.env);
+if (!result.success) {
+  console.error("Invalid environment:\n" + z.prettifyError(result.error));
+  process.exit(1);
+}
+
+export const config = result.data;
+```
+
+`z.prettifyError` writes the issues as readable text. Running with `PORT=abc NODE_ENV=prod node src/config.ts` prints the following and exits with code `1`:
+
+```text
+Invalid environment:
+✖ Invalid input: expected number, received NaN
+  → at PORT
+✖ Invalid option: expected one of "development"|"production"|"test"
+  → at NODE_ENV
+```
+
+A wrong setting fails in the first second after a deploy, with a clear message, instead of an hour later when the code first reads it. `config.PORT` is a real `number`.
+
+
+## What validation cannot check
+
+A schema checks the **shape** of one request, using nothing but that request. Two kinds of rules stay in the handler:
+
+- **Rules that need data.** "The title must be unique" needs the store, so `titleTaken` and the `409` stay where they are. Likewise "this todo exists" (`404`) and "you own this todo" (`404` or `403`, in `authorization-oauth`).
+- **Rules that need the database.** Even after a unique check, two requests at once can both pass it. The final guard is a `UNIQUE` constraint in the database, which you meet in the `databases` module.
+
+Think of three layers: the browser (friendly), the API schema (the border guard), the database constraints (the last line of defence).
+
+
+## Common mistakes
+
+- Putting Express or Node imports in the schema file, which stops the frontend from sharing it.
+- Trusting the browser's check and skipping the server's.
+- Editing a generated OpenAPI schema by hand and forgetting that the next run overwrites it.
+- Reading `process.env.X` in many files, each with its own idea of the default. Read it once, in `config.ts`.
+
+<Exercise title="Add a priority">
+Todos get a `priority` of `"low"`, `"normal"` or `"high"`. It is optional when creating (default `"normal"`), and PATCH can change it. Change the schemas in `src/schemas/todo.ts`, then check them with a short script.
+
+<Solution>
+```ts
+// src/schemas/todo.ts (changed lines)
+const priority = z.enum(["low", "normal", "high"]);
+
+export const newTodoSchema = z.object({
+  title,
+  done: done.default(false),
+  priority: priority.default("normal"),
+});
+
+export const replaceTodoSchema = z.object({ title, done, priority });
+
+export const patchTodoSchema = z
+  .object({ title, done, priority })
+  .partial()
+  .refine((body) => Object.keys(body).length > 0, {
+    error: "Send at least one of: title, done, priority",
+  });
+
+export const todoSchema = z.object({
+  id: z.int(),
+  title,
+  done,
+  priority,
+  createdAt: z.iso.datetime(),
+});
+```
+
+```ts
+console.log(newTodoSchema.parse({ title: "a" }));
+// { title: 'a', done: false, priority: 'normal' }
+console.log(newTodoSchema.safeParse({ title: "a", priority: "urgent" }).error?.issues[0]?.message);
+// Invalid option: expected one of "low"|"normal"|"high"
+console.log(patchTodoSchema.parse({ priority: "high" }));
+// { priority: 'high' }
+```
+
+The types update by themselves, so `createTodo` now fails to compile until it sets `priority: input.priority`, and TypeScript shows you exactly where. The `openapi.yaml` file needs the same field; that is the cost of a spec you write by hand.
+</Solution>
+</Exercise>
+
+<Exercise title="Describe the issues in the spec">
+The `400` answers now carry `details.issues`, a list of `{ field, message }`. Change the `Error` schema in `openapi.yaml` to say so, keeping `details` optional, and lint the file.
+
+<Solution>
+```yaml
+details:
+  type: object
+  description: Extra facts about the error. A 400 for invalid input lists every problem in `issues`.
+  properties:
+    issues:
+      type: array
+      items:
+        type: object
+        required: [field, message]
+        properties:
+          field: { type: string, example: title }
+          message: { type: string, example: title is required }
+```
+
+```bash
+npx @redocly/cli lint openapi.yaml
+```
+
+The file is still valid, with the same two style warnings as before. Because `details` is not in the `required` list of `error`, the `404` and `409` answers, which have no details, still match the spec. A client generator can now produce a typed `issues` array, which is the data a form needs to show an error under the right field.
+</Solution>
+</Exercise>
+
+<Exercise title="Check the environment">
+The next lessons need a PostgreSQL address and a session secret. Write `envSchema` with `DATABASE_URL` (a URL that starts with `postgres://` or `postgresql://`), `SESSION_SECRET` (at least 32 characters) and `PORT` (a number from 1 to 65535, default `3000`). Print the problems for a bad environment with `z.prettifyError`.
+
+<Solution>
+```ts
+import { z } from "zod";
+
+const envSchema = z.object({
+  DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+  SESSION_SECRET: z.string().min(32, "SESSION_SECRET must be at least 32 characters"),
+  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+});
+
+const bad = envSchema.safeParse({ DATABASE_URL: "mysql://localhost/x", SESSION_SECRET: "short" });
+if (!bad.success) console.log(z.prettifyError(bad.error));
+```
+
+```text
+✖ Invalid URL
+  → at DATABASE_URL
+✖ SESSION_SECRET must be at least 32 characters
+  → at SESSION_SECRET
+```
+
+`z.url` accepts any scheme by default; the `protocol` option restricts it to the pattern you give. With an empty environment you get `expected string, received undefined` for both required variables, so the message names the variable but not why it matters. Add your own messages when the variable name alone is not enough. Never print the *value* of a secret in an error message.
+</Solution>
+</Exercise>

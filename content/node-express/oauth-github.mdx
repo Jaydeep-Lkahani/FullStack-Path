@@ -1,0 +1,411 @@
+---
+title: Sign in with GitHub (OAuth)
+summary: Understand the OAuth authorization code flow and build "Sign in with GitHub" in Express, with state, PKCE and safe account handling, ending in the same session cookie as a password login.
+order: 19
+takeaways:
+  - "OAuth lets a user give your app limited access to their account on another service, such as GitHub, without giving you their password; for sign-in you use it to ask who the user is."
+  - "In the authorization code flow the browser is sent to GitHub, comes back with a one-time `code`, and only your server trades that code and its `client_secret` for an access token."
+  - "`state` (a random value you check on return) stops attackers from forcing their own login on a victim, and PKCE ties the code to the browser that asked for it."
+  - "Identify the user by GitHub's numeric id, and never merge a GitHub login into a password account just because the email looks the same."
+  - "OAuth ends with your own session: after the callback you call `startSession`, and every route after that works as before."
+videos:
+  - title: "OAuth 2.0 + PKCE Explained: Authentication, Tokens & Security | API Authentication"
+    channel: "CsMadeEz"
+    duration: "9:17"
+    url: https://www.youtube.com/watch?v=gEIfV3ZSt-8
+  - title: "OAuth 2.0 and OpenID Connect (in plain English)"
+    channel: "OktaDev"
+    duration: "62:17"
+    url: https://www.youtube.com/watch?v=996OiexHze0
+docs:
+  - title: "GitHub — Authorizing OAuth apps"
+    url: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps
+  - title: "GitHub — Creating an OAuth app"
+    url: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app
+  - title: "oauth.net — OAuth 2.0"
+    url: https://oauth.net/2/
+  - title: "RFC 7636 — Proof Key for Code Exchange (PKCE)"
+    url: https://datatracker.ietf.org/doc/html/rfc7636
+---
+
+Users do not want one more password, and you do not want to be responsible for one more. "Sign in with GitHub" (or Google, or Apple) hands the hard part to a company that does it for a living, and it is a favourite interview topic because it mixes redirects, secrets and security reasoning. The good news is that it adds little to what you built: after the dance with GitHub, your API creates the **same session cookie** as `sessions-and-jwt`, and `requireAuth`, roles and ownership from `authorization-oauth` work unchanged. Written for a GitHub **OAuth App**, Express 5.3 and Node 24 with its built-in `fetch`; the code continues the API of the last lesson. The first video is a short overview and the second a long talk from 2018: its idea of the flows is still right, but it predates the advice to use PKCE everywhere.
+
+## What OAuth is
+
+**OAuth 2.0** is a standard for **delegated authorization**: "let this app do limited things in my GitHub account, without giving it my password". The user logs in at GitHub (never at your site), says yes on a consent screen, and your app receives a **token** that can do only what was approved, called its **scopes**.
+
+"Sign in with GitHub" uses that to ask one question: who is this? **OpenID Connect** (OIDC) is a layer on top of OAuth that standardises the answer with a signed *ID token*; Google uses it. GitHub's OAuth has no ID token, so your server asks GitHub's API for the user instead. Four roles appear in every explanation:
+
+| Role | Here |
+| --- | --- |
+| Resource owner | the user |
+| Client | your API (it has a `client_id` and a secret `client_secret`) |
+| Authorization server | `github.com/login/oauth`, where the user logs in and agrees |
+| Resource server | `api.github.com`, which accepts the token |
+
+## The authorization code flow
+
+```text
+ browser                        your API                          GitHub
+    | GET /v1/auth/github ------->|
+    |<-- 302 to github.com/login/oauth/authorize?client_id&redirect_uri&scope&state&code_challenge
+    | ------------------------------------------------------------>|  user logs in, clicks "Authorize"
+    |<-- 302 to your callback?code=abc&state=xyz ------------------|
+    | GET /v1/auth/github/callback?code=abc&state=xyz ->|
+    |                             | -- POST /login/oauth/access_token (code, client_secret, code_verifier) -->|
+    |                             |<-- { access_token } -----------------------------------------------------|
+    |                             | -- GET /user, GET /user/emails (Bearer token) ->|
+    |                             |<-- who the user is ------------------------------|
+    |<-- 302 to your app + Set-Cookie: sid=... (your own session)
+```
+
+Why a code, and not the token straight in the redirect? A redirect travels through the **browser**: it shows up in history, logs and extensions. The code is useless alone: it works once, for ten minutes, and only together with the `client_secret` that never leaves your server. The access token is only ever handled on the back channel between your API and GitHub.
+
+## Register the app
+
+You do this once, on GitHub (the app is yours, so only you can create it):
+
+1. Profile picture → **Settings** → **Developer settings** → **OAuth apps** → **New OAuth App**.
+2. Give it a name and a homepage URL (`http://localhost:5173` is fine), and set the **Authorization callback URL** to `http://localhost:4200/v1/auth/github/callback`. GitHub accepts a redirect only if it matches a registered URL **exactly**.
+3. After registering, copy the **Client ID** and click **Generate a new client secret**.
+
+Both go in `.env` (which is in `.gitignore`), never in the code and never in a frontend:
+
+```text
+GITHUB_CLIENT_ID=your-client-id
+GITHUB_CLIENT_SECRET=your-client-secret
+```
+
+The environment schema from `schemas-and-config` learns about them, and refuses to start if only one is set:
+
+```ts
+// src/config.ts (added)
+    API_URL: z.url().default("http://localhost:4200"), // where browsers reach this API
+    FRONTEND_URL: z.url().default("http://localhost:5173"), // where users land after login
+
+    // a GitHub OAuth app; leave both out to switch "Sign in with GitHub" off
+    GITHUB_CLIENT_ID: z.string().min(1).optional(),
+    GITHUB_CLIENT_SECRET: z.string().min(1).optional(),
+    GITHUB_URL: z.url().default("https://github.com"),
+    GITHUB_API_URL: z.url().default("https://api.github.com"),
+  })
+  .refine((env) => Boolean(env.GITHUB_CLIENT_ID) === Boolean(env.GITHUB_CLIENT_SECRET), {
+    error: "Set both GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET, or neither",
+  });
+```
+
+`GITHUB_URL` and `GITHUB_API_URL` default to the real addresses; changing them lets tests point the code at a stand-in server.
+
+## The code
+
+```ts
+// src/routes/github.ts
+import { createHash, randomBytes } from "node:crypto";
+import { Router } from "express";
+import { z } from "zod";
+import { config } from "../config.ts";
+import { HttpError } from "../errors.ts";
+import { startSession } from "../sessions.ts";
+import { findOrCreateGithubUser } from "../users.ts";
+import { parse } from "../validate.ts";
+
+const STATE_COOKIE = "oauth_state";
+const VERIFIER_COOKIE = "oauth_verifier";
+
+// lives ten minutes and is only sent to the two GitHub routes
+const flowCookie = {
+  httpOnly: true,
+  sameSite: "lax", // the callback is a top-level GET from github.com, which Lax allows
+  secure: config.NODE_ENV === "production",
+  path: "/v1/auth/github",
+  maxAge: 10 * 60 * 1000,
+} as const;
+
+// what we read from GitHub is input too: check it
+const tokenSchema = z.object({ access_token: z.string().min(1) });
+const profileSchema = z.object({ id: z.int(), login: z.string() });
+const emailsSchema = z.array(
+  z.object({ email: z.string(), primary: z.boolean(), verified: z.boolean() }),
+);
+const callbackQuerySchema = z.object({ code: z.string().min(1), state: z.string().min(1) });
+
+const sha256 = (text: string) => createHash("sha256").update(text).digest("base64url");
+const failed = (message: string) => new HttpError(502, "GITHUB_ERROR", message);
+
+export function createGithubRouter(clientId: string, clientSecret: string): Router {
+  const router = Router();
+  const redirectUri = `${config.API_URL}/v1/auth/github/callback`;
+
+  async function exchangeCode(code: string, verifier: string): Promise<string> {
+    const response = await fetch(`${config.GITHUB_URL}/login/oauth/access_token`, {
+      method: "POST",
+      headers: { Accept: "application/json" }, // the default answer is form-encoded text
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        code,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+      }),
+    });
+    // a refused code is described in the body: { "error": "bad_verification_code" }
+    const token = tokenSchema.safeParse(await response.json().catch(() => null));
+    if (!token.success) {
+      throw new HttpError(401, "OAUTH_FAILED", "GitHub did not accept the login code");
+    }
+    return token.data.access_token;
+  }
+
+  async function githubGet<T extends z.ZodType>(path: string, token: string, schema: T) {
+    const response = await fetch(`${config.GITHUB_API_URL}${path}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "todo-api", // GitHub's API rejects requests without one
+      },
+    });
+    const body = schema.safeParse(await response.json().catch(() => null));
+    if (!response.ok || !body.success) throw failed(`GitHub did not answer ${path} as expected`);
+    return body.data as z.output<T>;
+  }
+
+  // GET /v1/auth/github: send the browser to GitHub
+  router.get("/", (req, res) => {
+    const state = randomBytes(16).toString("base64url");
+    const verifier = randomBytes(32).toString("base64url");
+    res.cookie(STATE_COOKIE, state, flowCookie);
+    res.cookie(VERIFIER_COOKIE, verifier, flowCookie);
+
+    const url = new URL("/login/oauth/authorize", config.GITHUB_URL);
+    url.search = new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      scope: "read:user user:email",
+      state,
+      code_challenge: sha256(verifier),
+      code_challenge_method: "S256",
+    }).toString();
+    res.redirect(url.toString());
+  });
+
+  // GET /v1/auth/github/callback?code=...&state=...: GitHub sends the browser back
+  router.get("/callback", async (req, res) => {
+    const expectedState: unknown = req.cookies?.[STATE_COOKIE];
+    const verifier: unknown = req.cookies?.[VERIFIER_COOKIE];
+    res.clearCookie(STATE_COOKIE, flowCookie); // each attempt is used once
+    res.clearCookie(VERIFIER_COOKIE, flowCookie);
+
+    if (req.query.error) {
+      res.redirect(`${config.FRONTEND_URL}/login?error=denied`); // the user pressed "Cancel"
+      return;
+    }
+
+    const { code, state } = parse(callbackQuerySchema, req.query, "query");
+    if (typeof expectedState !== "string" || typeof verifier !== "string" || state !== expectedState) {
+      throw new HttpError(400, "INVALID_STATE", "This login attempt did not start here");
+    }
+
+    const token = await exchangeCode(code, verifier);
+    const profile = await githubGet("/user", token, profileSchema);
+    const emails = await githubGet("/user/emails", token, emailsSchema);
+    const email = emails.find((entry) => entry.primary && entry.verified)?.email;
+    if (!email) {
+      throw new HttpError(403, "NO_VERIFIED_EMAIL", "Your GitHub account has no verified email");
+    }
+
+    const user = await findOrCreateGithubUser(profile.id, email.toLowerCase());
+    startSession(res, user.id);
+    res.redirect(config.FRONTEND_URL);
+  });
+
+  return router;
+}
+```
+
+Walk through it in flow order:
+
+- **Start** (`GET /v1/auth/github`). Two random values are made: `state` and a PKCE `verifier`. Both go into short-lived `httpOnly` cookies, and the browser is redirected to GitHub with `state` and the SHA-256 of the verifier (the `code_challenge`). The cookies use `SameSite=Lax`, which still travels on the top-level `GET` that brings the user back from github.com; `Strict` would drop them and break the flow. Their `path` limits them to these two routes.
+- **State.** On return, the `state` in the URL must equal the one in the cookie. Without this check an attacker could start a flow with their own GitHub account, stop before the callback, and trick a victim into opening *their* callback link: the victim would be logged in as the attacker and could save private data into the attacker's account. The attacker's link has a `state` that the victim's browser never saved, so the check fails.
+- **PKCE** (Proof Key for Code Exchange). The token request sends the original `verifier`; GitHub hashes it and compares with the `code_challenge` it saw at the start. A stolen code is worthless to anybody who does not have the verifier. GitHub supports only the `S256` method.
+- **The exchange** (`exchangeCode`) sends the code, `client_secret` and `redirect_uri` from your server. `Accept: application/json` matters, because the default answer is form-encoded text. And a refused code is described in the JSON body (`{ "error": "bad_verification_code" }`); GitHub's docs do not promise a particular status for it, so `response.ok` alone is not a safe test. The answer is checked with a Zod schema like any other input: no `access_token` means a `401`.
+- **Who is this** (`githubGet`). GitHub's API insists on a `User-Agent` header. `/user` gives the numeric `id` and the `login`; the public email can be `null`, so `/user/emails` (the reason for the `user:email` scope) lists all emails with `primary` and `verified` flags. Only a **primary, verified** email counts. Even the data from GitHub is validated, and a failure gives `502 Bad Gateway`.
+- **The end.** `findOrCreateGithubUser` finds or makes the local user, `startSession` sets the `sid` cookie and the browser goes back to your frontend.
+
+The pieces added around it are small. The user store learns about GitHub:
+
+```ts
+// src/users.ts (added; passwordHash is now `string | null` and users have `githubId: number | null`)
+// GitHub's numeric id is the identity: logins and emails can change, the id never does
+export async function findOrCreateGithubUser(githubId: number, email: string): Promise<User> {
+  const known = [...users.values()].find((user) => user.githubId === githubId);
+  if (known) return known;
+
+  // never merge into a password account just because the email matches
+  if (findUserByEmail(email)) {
+    throw conflict("An account with this email already exists. Log in with your password");
+  }
+
+  const user: User = {
+    id: nextId++,
+    email,
+    role: "user",
+    passwordHash: null,
+    githubId,
+    createdAt: new Date().toISOString(),
+  };
+  users.set(user.id, user);
+  return user;
+}
+```
+
+The session start is now a shared helper, and the password login uses it too:
+
+```ts
+// src/sessions.ts (added)
+// logging in by password and by GitHub end the same way
+export function startSession(res: Response, userId: number): void {
+  res.cookie(SESSION_COOKIE, createSession(userId), { ...cookieOptions, maxAge: SESSION_TTL_MS });
+}
+
+// src/routes/auth.ts: the router is mounted only when the app is registered
+// "Sign in with GitHub" exists only when the app is registered
+if (config.GITHUB_CLIENT_ID && config.GITHUB_CLIENT_SECRET) {
+  authRouter.use("/github", createGithubRouter(config.GITHUB_CLIENT_ID, config.GITHUB_CLIENT_SECRET));
+}
+```
+
+A GitHub-only account has no `passwordHash`, and `checkLogin` needs no change: it verifies against `dummyHash` when the hash is missing, so a password login for that account fails like any wrong password.
+
+### Choices that keep it safe
+
+- **The id is the identity.** Logins and emails change; `profile.id` does not. If you identified users by `login`, somebody who renames their account and lets a stranger take the old name could be mistaken for the old owner.
+- **No merging by email.** If a password account with the same email exists, the code refuses with `409`. The reason is **pre-hijacking**: an attacker signs up with a victim's email before the victim does (the app never checked the email, and does not know the address belongs to them), then waits. If the victim later signs in with GitHub and the app merged the accounts, the attacker's password would open the victim's account. Merging is safe only when the user proves both, for example by logging in with the password and then pressing "Connect GitHub".
+- **Minimal scopes.** `read:user user:email` can read a profile; it cannot touch repositories. The token is used once and thrown away: this app never stores it. (Newer OAuth apps also issue a refresh token, which we ignore for the same reason.)
+- **The secret stays on the server**, and the access token is never put in a redirect URL or sent to the browser.
+
+## Trying it
+
+With the real app registered, open `http://localhost:4200/v1/auth/github` in the browser: GitHub asks you to authorize, and you land on the frontend URL with the cookie set. `curl` can follow the same path one redirect at a time (the output below is against a small local stand-in for GitHub, because a curl run cannot click "Authorize"):
+
+```bash
+curl -si -c gh.jar localhost:4200/v1/auth/github          # 302 + Set-Cookie: oauth_state, oauth_verifier
+# Location: http://localhost:4300/login/oauth/authorize?client_id=fake-client-id&redirect_uri=http%3A%2F%2Flocalhost%3A4200%2Fv1%2Fauth%2Fgithub%2Fcallback&scope=read%3Auser+user%3Aemail&state=hIYC3iPKA-dl71Yt_WrEIQ&code_challenge=bkfSOHsf...&code_challenge_method=S256
+
+curl -si -b gh.jar -c gh.jar "http://localhost:4200/v1/auth/github/callback?code=...&state=..."
+# HTTP/1.1 302 Found
+# Set-Cookie: sid=G1COYFyPjrBGbSA_4hNhjZY4cwUxJgctPzUD81wo0ok; Max-Age=604800; Path=/; HttpOnly; SameSite=Lax
+# Location: http://localhost:5173
+
+curl -s -b gh.jar localhost:4200/v1/auth/me
+# {"data":{"id":4,"email":"octocat@example.com","role":"user","githubId":583231,"createdAt":"2026-10-22T17:21:35.772Z"}}
+```
+
+Things that went wrong on purpose, and what the API answered:
+
+| Test | Answer |
+| --- | --- |
+| `state` in the URL changed | `400 INVALID_STATE` |
+| Callback opened without the cookies (another browser) | `400 INVALID_STATE` |
+| The same code used a second time | `401 OAUTH_FAILED` |
+| Wrong PKCE verifier cookie | `401 OAUTH_FAILED` |
+| The same GitHub user signs in again | the same account (id 4) |
+| GitHub email not verified | `403 NO_VERIFIED_EMAIL` |
+| GitHub email equals a password account | `409 CONFLICT` |
+| User pressed "Cancel" at GitHub | `302` to `/login?error=denied` |
+| Password login for the GitHub-only account | `401 Invalid email or password` |
+
+## Common mistakes
+
+- Skipping `state`, or comparing it only when it is present.
+- Putting the `client_secret` in frontend code or committing it to git.
+- Trusting `response.ok` alone for the token exchange, when GitHub reports problems in the body.
+- Identifying people by email or `login` instead of the numeric id.
+- Accepting an email that GitHub has not verified, or merging accounts on it.
+- A callback URL with a wildcard, or one that does not match exactly (GitHub then refuses to redirect).
+
+<Exercise title="Compute the code challenge">
+Write a function that turns a PKCE `verifier` into its `code_challenge` (SHA-256, then base64url). What does the example verifier `dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk` from RFC 7636 give? How long are a fresh verifier and its challenge when made from 32 random bytes?
+
+<Solution>
+```ts
+// ex/pkce.ts
+import { createHash, randomBytes } from "node:crypto";
+
+const challengeFor = (verifier: string) =>
+  createHash("sha256").update(verifier).digest("base64url");
+
+// the example from RFC 7636, appendix B
+console.log(challengeFor("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"));
+
+// a fresh pair: 32 random bytes give a 43-character verifier
+const verifier = randomBytes(32).toString("base64url");
+console.log(verifier.length, challengeFor(verifier).length);
+```
+
+```text
+E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+43 43
+```
+
+The first line matches the value printed in the RFC. 32 bytes are 256 bits, and base64url writes 6 bits per character, so 43 characters (without `=` padding); a SHA-256 hash is also 32 bytes, so the challenge is 43 characters too. The verifier stays secret on the server (here in an `httpOnly` cookie), and only the one-way challenge travels through the browser to GitHub.
+</Solution>
+</Exercise>
+
+<Exercise title="Review this callback">
+A teammate sends this callback for review. How many problems can you find?
+
+```ts
+router.get("/callback", async (req, res) => {
+  const token = await exchangeCode(String(req.query.code), "");
+  const profile = await githubGet("/user", token, profileSchema);
+  console.log("signed in", profile.login, token);
+
+  let user = findUserByEmail(profile.email ?? `${profile.login}@users.noreply.github.com`);
+  user ??= await createUser(profile.login, "unused");
+
+  res.redirect(`${String(req.query.return_to)}?token=${token}&user=${user.id}`);
+});
+```
+
+<Solution>
+1. There is no `state` check, so an attacker can make a victim log in as the attacker (login CSRF).
+2. There is no PKCE verifier (an empty string), so a stolen code can be used by anyone.
+3. The token is written to the log, and again in the redirect URL, where the browser, proxies and history see it. The token belongs on the back channel only; the browser should receive just a session cookie.
+4. The user is found by email: unverified, possibly missing, and invented from the `login` when it is `null`. Identify by `profile.id`, and use the verified primary email from `/user/emails` only to fill in the new account.
+5. A matching email is merged into the existing account, which allows pre-hijacking.
+6. `createUser(profile.login, "unused")` creates a password account with a guessable password, and `profile.login` is not an email. GitHub-only accounts have `passwordHash: null`.
+7. `req.query.return_to` goes straight into the redirect: an **open redirect** to any site, and the `?token=` appended to it leaks the token to that site. Redirect only to known paths (next exercise).
+8. There is no `startSession`, so the user is never logged in on this API; and the query is unvalidated (`String(undefined)` is `"undefined"`).
+</Solution>
+</Exercise>
+
+<Exercise title="Remember where the user was going">
+Let the frontend start the flow with `/v1/auth/github?next=/todos?page=2`, and after login send the user there. A careless version redirects to whatever `next` says, which turns your login into an open redirect: `?next=https://evil.example` would send people to an attacker's site right after they logged in on yours. Write `safeNext`, and say where the value must be kept during the flow.
+
+<Solution>
+```ts
+// src/safeNext.ts
+import { config } from "./config.ts";
+
+// Only paths on our own site: "/todos" is fine, "//evil.com" and "https://evil.com" are not.
+export function safeNext(value: unknown): string {
+  if (typeof value !== "string") return "/";
+  const url = new URL(value, config.FRONTEND_URL);
+  const sameSite = url.origin === new URL(config.FRONTEND_URL).origin;
+  return sameSite && value.startsWith("/") && !value.startsWith("//") ? url.pathname + url.search : "/";
+}
+```
+
+```text
+"/todos?page=2" -> /todos?page=2
+"//evil.com" -> /
+"https://evil.com/x" -> /
+"/\\evil.com" -> /
+"javascript:alert(1)" -> /
+"todos" -> /
+undefined -> /
+```
+
+Keep the value in a third flow cookie, `oauth_next`, set at the start with `res.cookie("oauth_next", safeNext(req.query.next), flowCookie)`. On return, clear it and redirect with `config.FRONTEND_URL + safeNext(req.cookies?.oauth_next)`: it is checked **again**, because a cookie is client-controlled data. Tried against the stand-in: `next=/todos?page=2` ended at `http://localhost:5173/todos?page=2`, and `next=//evil.com` and `next=https://evil.com` both ended at `http://localhost:5173/`. Parsing with `new URL` is the safe way: `/\evil.com` looks like a path, but browsers read the backslash as a slash, and the origin comparison catches it.
+</Solution>
+</Exercise>

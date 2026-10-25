@@ -1,0 +1,424 @@
+---
+title: Authentication and Passwords
+summary: Store passwords safely with argon2, build sign-up and login routes that never reveal which emails have accounts, and see why the plain-text and fast-hash shortcuts fail.
+order: 16
+takeaways:
+  - "Authentication answers \"who are you?\"; authorization, in the next lesson, answers \"what may you do?\"."
+  - "Never store a password and never encrypt it: store a slow, salted, one-way hash, so a stolen database does not hand out working passwords."
+  - "Fast hashes such as SHA-256 are wrong for passwords, because an attacker can try billions of guesses a second; argon2 is slow and memory-hungry on purpose."
+  - "An argon2 hash string holds the algorithm, its settings and the random salt, so `argon2.verify(hash, password)` needs nothing else, and `argon2.needsRehash` upgrades old hashes at login."
+  - "Login must answer the same way, in about the same time, whether the email or the password was wrong, so attackers cannot learn which emails have accounts."
+videos: []
+docs:
+  - title: "node-argon2 (the argon2 package)"
+    url: https://github.com/ranisalt/node-argon2
+  - title: "OWASP — Password Storage Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
+  - title: "OWASP — Authentication Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html
+  - title: "Node.js: crypto"
+    url: https://nodejs.org/api/crypto.html
+---
+
+Almost every real application has accounts, and almost every interview about backends asks how you would store a password. The honest answer is "I don't": you store something derived from it. This lesson builds the first half of an account system, sign-up and the password check at login, and the next lesson (`sessions-and-jwt`) makes the login stick with a cookie. `authorization-oauth` then adds roles, `security` hardens it, and `project-auth-service-1` to `-3` put it all together. Written for the `argon2` package 0.45, Express 5.3, Zod 4.6 and Node 24; it continues the `/v1` todo API from `schemas-and-config`, with the same `errors.ts`, `validate.ts` and error handler.
+
+## Authentication is not authorization
+
+Two words that sound alike and are easy to mix up:
+
+- **Authentication** (authn): proving who you are. A password, a fingerprint, a code from an app.
+- **Authorization** (authz): deciding what that person may do. "Admins can delete any todo; users only their own."
+
+You always authenticate first. The status codes follow the same split: `401 Unauthorized` really means "I don't know who you are" (it should have been called "unauthenticated"), and `403 Forbidden` means "I know who you are, and the answer is no".
+
+## Why you never store the password
+
+Think about the day your database leaks, because eventually somebody's does. There are three ways to have stored the passwords:
+
+| What you stored | After the leak |
+| --- | --- |
+| The password itself | The attacker has every password, and since people reuse them, has also reached their email and bank. |
+| The password, encrypted | Encryption can be undone with the key, and the key sits on the same server. A second leak, or one stolen config file, undoes it all. |
+| A hash of the password | A **hash function** only goes one way: you can turn a password into a hash, but not a hash back into the password. The attacker has to guess. |
+
+At login you do not decrypt anything. You hash what the user typed and compare it with the stored hash.
+
+### Fast hashes are the wrong tool
+
+`SHA-256` is a fine hash function, and it is **fast**: that is its job. For passwords that is the problem.
+
+```ts
+// ex/fast-hash.ts
+import { createHash } from "node:crypto";
+
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+console.log(sha("password123"));
+console.log(sha("password123") === sha("password123"));
+
+const start = performance.now();
+for (let i = 0; i < 100_000; i++) sha("guess" + i);
+console.log(`100,000 SHA-256 guesses: ${(performance.now() - start).toFixed(0)} ms`);
+```
+
+```text
+ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f
+true
+100,000 SHA-256 guesses: 50 ms
+```
+
+Two things are wrong. The same password always gives the same hash, so one table of hashes for the million most common passwords (a **rainbow table**) cracks every account that uses one, and equal hashes in the database show who shares a password. And an ordinary laptop tried 100,000 guesses in 50 milliseconds; a graphics card does billions per second.
+
+The cure has two parts:
+
+- A **salt**: random bytes, different for every user, mixed into the password before hashing. The same password now gives a different hash for each user, so a prepared table is useless.
+- A **slow** algorithm: if one guess costs 40 ms instead of 0.0005 ms, an attacker's budget shrinks by the same factor. Real users log in once, and do not notice.
+
+## Hashing with argon2
+
+**argon2** won an open password-hashing competition in 2015, and OWASP lists it first. Besides time it makes every guess use a lot of **memory**, which defeats cheap graphics cards. Its `argon2id` variant is the one to use, and it is the package's default.
+
+```bash
+npm install argon2
+```
+
+```ts
+// ex/hash.ts
+import argon2 from "argon2";
+
+const password = "correct horse battery staple";
+
+const hash = await argon2.hash(password);
+console.log(hash);
+console.log(await argon2.hash(password) === hash);
+console.log(await argon2.verify(hash, password));
+console.log(await argon2.verify(hash, "wrong password"));
+```
+
+```text
+$argon2id$v=19$m=65536,p=4,t=3$L3hQN14lC25iLTAh0jlz1g$65boklQvPMkVyTB0qOlpHBJFCKekXXor8HHRZ4eb9yY
+false
+true
+false
+```
+
+(Your hash differs, because the salt is random.) Read the string between the `$` signs:
+
+| Part | Meaning |
+| --- | --- |
+| `argon2id` | the algorithm |
+| `v=19` | the algorithm version |
+| `m=65536` | memory per hash, in KiB: 64 MiB |
+| `t=3` | passes over that memory (the time cost) |
+| `p=4` | parallel lanes |
+| `L3hQ…1g` | the random **salt**, made by the package |
+| `65bo…Y` | the hash itself |
+
+Everything `verify` needs is in the string, so you keep **one text column** per user, and no separate salt. Hashing the same password twice gave two different strings, so you can never compare hashes with `===`; `argon2.verify` re-hashes with the stored salt and settings, and compares in constant time. It never throws for a wrong password; it returns `false`.
+
+Both functions are **async**: the work runs on a background thread, so a 40 ms hash does not freeze the server (the `node-event-loop` lesson explained why that matters), and there is no synchronous version to reach for by mistake.
+
+<Callout type="note" title="Node also has argon2 built in">
+Recent Node 24 releases ship `crypto.argon2()`. This course uses the `argon2` package because its `hash` and `verify` create the salt and the one-string format for you, so there is less to get wrong. npm 11 may list the package's install script as "not yet approved" in the install output; it ran without approval here, because the package finds a ready-made binary for your system.
+</Callout>
+
+### How slow is slow enough
+
+The defaults (64 MiB, three passes) cost about 40 ms here. OWASP's floor is 19 MiB with two passes and one lane. The right setting is the strongest one your server can afford for the login rate you expect: a second per login is fine for a small site and a disaster at a thousand logins per second. Exercise 3 measures it. Settings go in an options object:
+
+```ts
+await argon2.hash(password, { memoryCost: 65536, timeCost: 3, parallelism: 4 });
+```
+
+## The user store and sign-up
+
+For now users live in a `Map`, like the todos did; the `databases` module replaces it with a table. First the schemas, which use what you learned in `validation`:
+
+```ts
+// src/schemas/auth.ts
+import { z } from "zod";
+
+// trim and lowercase first, then check the shape: "  Ada@Example.com " becomes "ada@example.com"
+const email = z
+  .string({ error: "email is required" })
+  .trim()
+  .toLowerCase()
+  .pipe(z.email("email must be a valid address"));
+
+export const signupSchema = z.object({
+  email,
+  // never trim a password; the length limits keep a client from sending megabytes to hash
+  password: z
+    .string({ error: "password is required" })
+    .min(8, "password must be at least 8 characters")
+    .max(128, "password is at most 128 characters"),
+});
+
+// log in checks only that something was sent: old passwords may break today's rules
+export const loginSchema = z.object({
+  email,
+  password: z.string({ error: "password is required" }).min(1).max(128),
+});
+```
+
+Three details. The email is **normalised** (trimmed, lowercased) before the check, so `" Ada@Example.com "` and `ada@example.com` are one account. The password is never trimmed, because spaces may be part of it. And the **maximum** length protects the server, not the user: hashing a 50 MB "password" would cost memory and time. The sign-up rule is a minimum of 8 characters, and the length counts more than weird symbols (`correct horse battery` beats `P@ssw0rd!`); never force "one capital, one digit". Log in checks only that something was sent, because an account made under older rules must still work.
+
+```ts
+// src/users.ts
+import argon2 from "argon2";
+import { conflict } from "./errors.ts";
+
+export type User = {
+  id: number;
+  email: string;
+  passwordHash: string; // never leaves the server
+  createdAt: string;
+};
+
+// what the API may show: everything except the hash
+export type PublicUser = Omit<User, "passwordHash">;
+
+const users = new Map<number, User>();
+let nextId = 1;
+
+// a real hash of a throwaway password, used to keep "no such email" as slow as "wrong password"
+const dummyHash = await argon2.hash("not-a-real-password");
+
+export function toPublic({ passwordHash, ...user }: User): PublicUser {
+  return user;
+}
+
+// used by the sessions in the next lesson
+export function findUserById(id: number): User | undefined {
+  return users.get(id);
+}
+
+function findUserByEmail(email: string): User | undefined {
+  return [...users.values()].find((user) => user.email === email);
+}
+
+export async function createUser(email: string, password: string): Promise<User> {
+  const passwordHash = await argon2.hash(password); // slow, so it comes first
+
+  // check and insert with no `await` between them, or two signups could both pass
+  if (findUserByEmail(email)) throw conflict("That email is already registered");
+
+  const user: User = {
+    id: nextId++,
+    email,
+    passwordHash,
+    createdAt: new Date().toISOString(),
+  };
+  users.set(user.id, user);
+  return user;
+}
+
+// the user when the password is right, otherwise null: callers cannot tell why
+export async function checkLogin(email: string, password: string): Promise<User | null> {
+  const user = findUserByEmail(email);
+  const ok = await argon2.verify(user?.passwordHash ?? dummyHash, password);
+  return user && ok ? user : null;
+}
+```
+
+Several choices are worth a second look:
+
+- `PublicUser` and `toPublic` make leaking the hash a type error: every response goes through them.
+- In `createUser` the slow `hash` call comes **before** the "email taken?" check, and the check and `users.set` have no `await` between them. With the check first, two simultaneous sign-ups could both pass it while the hash was running, and the second would overwrite the first. (A database solves this properly with a `UNIQUE` constraint, as the last lesson said.)
+- `checkLogin` is the next section.
+
+The routes only connect the pieces. This is the file at this stage:
+
+```ts
+// src/routes/auth.ts
+import { Router } from "express";
+import { unauthorized } from "../errors.ts";
+import { requireJson } from "../middleware/requireJson.ts";
+import { loginSchema, signupSchema } from "../schemas/auth.ts";
+import { checkLogin, createUser, toPublic } from "../users.ts";
+import { parse } from "../validate.ts";
+
+export const authRouter = Router();
+
+// POST /v1/auth/signup  { "email": "...", "password": "..." }
+authRouter.post("/signup", requireJson, async (req, res) => {
+  const { email, password } = parse(signupSchema, req.body, "body");
+  const user = await createUser(email, password);
+  res.status(201).json({ data: toPublic(user) });
+});
+
+// POST /v1/auth/login  { "email": "...", "password": "..." }
+authRouter.post("/login", requireJson, async (req, res) => {
+  const { email, password } = parse(loginSchema, req.body, "body");
+  const user = await checkLogin(email, password);
+  if (!user) throw unauthorized("Invalid email or password"); // the same text for both causes
+
+  // nothing remembers the login yet: the next lesson adds a session here
+  res.json({ data: toPublic(user) });
+});
+```
+
+Mount it in `routes/v1.ts` with `v1Router.use("/auth", authRouter)`, start the server, and try it:
+
+```bash
+curl -s -X POST localhost:4200/v1/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"email":"Ada@Example.com","password":"correct horse battery"}'
+```
+
+```json
+{"data":{"id":1,"email":"ada@example.com","createdAt":"2026-10-22T16:47:34.528Z"}}
+```
+
+The email came back lowercase and there is no `passwordHash`. A short password gets the `400` with one entry in `details.issues`, and a second sign-up with the same email gets `409`.
+
+<Callout type="note" title="A 409 on sign-up tells people who has an account">
+"That email is already registered" lets anyone check whether a given address uses your service. Large sites accept the trade-off or answer the same way every time and send an email ("you already have an account"). This course keeps the clear `409`, because the clear message is the better lesson; but know that it is a trade-off.
+</Callout>
+
+## Checking a login without giving hints
+
+A login can fail in two ways: no such email, or the wrong password. If the API says which one, an attacker can try a list of emails and keep those that answer "wrong password": a list of real accounts, for free. So both failures send the **same** answer:
+
+```bash
+curl -s -X POST localhost:4200/v1/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"wrong"}'
+curl -s -X POST localhost:4200/v1/auth/login -H "Content-Type: application/json" \
+  -d '{"email":"nobody@example.com","password":"wrong"}'
+```
+
+```json
+{"error":{"code":"UNAUTHORIZED","message":"Invalid email or password"}}
+{"error":{"code":"UNAUTHORIZED","message":"Invalid email or password"}}
+```
+
+The text is not the only tell. When the email is unknown, a careless version returns at once, while a real account spends 40 ms in `verify`; the attacker only has to read a stopwatch. That is why `checkLogin` verifies against `dummyHash` (the hash of a throwaway password, made once at startup) when the user does not exist. Measured with three tries each, a real user took 36–41 ms and an unknown email 35–38 ms. The `user && ok` at the end makes sure a match against the dummy never logs anybody in.
+
+Right now a successful login only returns the user: nothing remembers it for the next request. That is the job of the next lesson, which adds a session at the marked line. You will also want a **rate limit** on this route, because slow hashing does not stop an attacker from trying many passwords against one account; the `security` lesson adds one.
+
+## Common mistakes
+
+- Storing the password, encrypting it, or hashing it with MD5, SHA-1 or plain SHA-256.
+- Comparing hashes with `===` or `==` instead of `argon2.verify`.
+- Different messages (or noticeably different times) for "no such email" and "wrong password".
+- Letting a response include the whole user object, hash included.
+- Trimming or silently truncating passwords, or capping them at 12 characters.
+- Logging the request body, which puts passwords in your log files.
+
+<Exercise title="Predict the output">
+```ts
+const a = await argon2.hash("secret");
+const b = await argon2.hash("secret");
+
+console.log(a === b);
+console.log(await argon2.verify(a, "secret"), await argon2.verify(b, "secret"));
+console.log(await argon2.verify(a, "Secret"));
+console.log(a.startsWith("$argon2id$"), a.length === b.length);
+```
+
+<Solution>
+```text
+false
+true true
+false
+true true
+```
+
+The two hashes differ because each has its own random salt, so `===` is false, and yet both verify the same password. `verify` is case sensitive, so `"Secret"` fails. Both strings start with `$argon2id$` and have the same length, because the salt and the hash have a fixed size.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+This first attempt works in a demo. Find at least five problems.
+
+```ts
+const users = new Map<string, { email: string; password: string }>();
+
+authRouter.post("/signup", (req, res) => {
+  users.set(req.body.email, { email: req.body.email, password: req.body.password });
+  res.status(201).json(users.get(req.body.email));
+});
+
+authRouter.post("/login", (req, res) => {
+  const user = users.get(req.body.email);
+  if (!user) return res.status(404).json({ error: "No account with that email" });
+  if (user.password !== req.body.password) return res.status(401).json({ error: "Wrong password" });
+  res.json(user);
+});
+```
+
+<Solution>
+1. The password is stored as plain text. Store `await argon2.hash(password)` and check with `argon2.verify`.
+2. Both routes send the user back, and with it the password (or the hash). Send `toPublic(user)`.
+3. Sign-up has no check for an existing email, so `users.set` **replaces** the old account: anyone can take over any account by signing up again with its email. Answer `409` instead.
+4. Nothing validates the body. With no JSON body `req.body` is `undefined` and the route crashes; a number as a password is stored as a number. Use `parse(signupSchema, ...)`.
+5. `404` for an unknown email and `401` for a wrong password tells attackers which emails exist. Answer `401 Invalid email or password` for both, and spend the same time on both.
+6. The email is not normalised, so `Ada@x.com` and `ada@x.com` are two accounts (and the login for one fails on the other). Trim and lowercase it in the schema.
+7. `!==` on secrets can leak through timing; `argon2.verify` compares in constant time.
+8. There is no `requireJson` and no length limit on the password.
+</Solution>
+</Exercise>
+
+<Exercise title="Measure the cost">
+Write a script that times `argon2.hash` for three settings: the OWASP minimum (19 MiB, `timeCost` 2, `parallelism` 1), the default, and 256 MiB. Run it. Which would you pick for a server that must handle 20 logins a second on one CPU core?
+
+<Solution>
+```ts
+// ex/tune.ts
+import argon2, { type HashOptions } from "argon2";
+
+async function timeIt(label: string, options: HashOptions) {
+  const runs = 5;
+  const start = performance.now();
+  for (let i = 0; i < runs; i++) await argon2.hash("a sample password", options);
+  console.log(`${label}: ${((performance.now() - start) / runs).toFixed(0)} ms per hash`);
+}
+
+await timeIt("19 MiB, t=2, p=1 (OWASP minimum)", { memoryCost: 19456, timeCost: 2, parallelism: 1 });
+await timeIt("64 MiB, t=3, p=4 (package default)", {});
+await timeIt("256 MiB, t=3, p=4", { memoryCost: 262144, timeCost: 3, parallelism: 4 });
+```
+
+```text
+19 MiB, t=2, p=1 (OWASP minimum): 20 ms per hash
+64 MiB, t=3, p=4 (package default): 37 ms per hash
+256 MiB, t=3, p=4: 161 ms per hash
+```
+
+(Numbers from one laptop; yours differ.) Twenty logins a second on one core leaves 50 ms per login, which fits the default or the minimum but not 256 MiB. The work runs on several threads, though, so measure under load with the real number of requests before you decide. Memory counts too: twenty hashes at once at 64 MiB need 1.3 GB.
+</Solution>
+</Exercise>
+
+<Exercise title="Upgrade old hashes at login">
+You decide to move from `timeCost` 2 to 4. Nobody can re-hash the stored hashes, because you do not have the passwords. Use `argon2.needsRehash` to upgrade each account the next time its owner logs in.
+
+<Solution>
+```ts
+// ex/rehash.ts
+import argon2 from "argon2";
+
+// the settings we want from now on
+const wanted = { memoryCost: 65536, timeCost: 4, parallelism: 4 };
+
+// an old hash, made with weaker settings
+const oldHash = await argon2.hash("hunter2 hunter2", { memoryCost: 19456, timeCost: 2, parallelism: 1 });
+
+async function login(storedHash: string, password: string) {
+  if (!(await argon2.verify(storedHash, password))) return null;
+
+  // the password is right and we hold the plain text for this one moment: upgrade the hash
+  if (argon2.needsRehash(storedHash, wanted)) {
+    return await argon2.hash(password, wanted);
+  }
+  return storedHash;
+}
+
+const upgraded = await login(oldHash, "hunter2 hunter2");
+console.log(upgraded?.split("$")[3]);                    // m=65536,p=4,t=4
+console.log(await login(oldHash, "wrong password"));     // null
+console.log(upgraded && argon2.needsRehash(upgraded, wanted)); // false
+```
+
+The only moment you hold the plain-text password is during a correct login, so that is where the hash is replaced. In `checkLogin` this means saving the new string to `user.passwordHash` (in the database, an `UPDATE`). Accounts that never log in keep their old hash, which is why large sites also run a "your account needs a password reset" campaign now and then.
+</Solution>
+</Exercise>

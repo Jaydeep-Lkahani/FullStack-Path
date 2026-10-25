@@ -1,0 +1,512 @@
+---
+title: "Stretch: Rate Limits and Sessions"
+summary: "Use Redis counters for a rate limiter that several servers share, keep sessions in Redis with a sliding expiry, and learn the settings that matter when Redis leaves your laptop."
+order: 33
+takeaways:
+  - "A counter with `INCR` and an expiry is a rate limiter that works across servers, because Redis runs one command at a time."
+  - "Run `INCR` and `EXPIRE` in one `MULTI`, and set the expiry with `NX`, so a crash cannot leave a counter that never ends and a busy client cannot stretch its own window."
+  - "A fixed window lets a client send twice the limit across a window boundary, and a rate limiter that cannot reach Redis should usually let the request through."
+  - "A session in Redis is a random id pointing at a small JSON value with an expiry; `GETEX` reads it and renews it in one command."
+  - "A cache wants `maxmemory` with `allkeys-lru`, a queue wants `noeviction`, so they belong on separate Redis instances, and nothing should be reachable from the internet."
+  - "Tests for expiry change the key's time to live instead of the clock, and a test of a rule is worth only as much as the change it catches."
+videos:
+  - title: "Redis Crash Course"
+    channel: "Web Dev Simplified"
+    duration: "27:30"
+    url: https://www.youtube.com/watch?v=jgpVdJB2sKQ
+docs:
+  - title: "Redis — EXPIRE command"
+    url: https://redis.io/docs/latest/commands/expire/
+  - title: "Redis — Key eviction"
+    url: https://redis.io/docs/latest/develop/reference/eviction/
+  - title: "Redis — Persistence"
+    url: https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
+  - title: "Redis — Distributed locks"
+    url: https://redis.io/docs/latest/develop/use/patterns/distributed-locks/
+---
+
+The `security` lesson limited requests with a counter in the memory of one Node process. That works with one process and fails with three, because each counts for itself and a client gets three times the limit. The same is true of login sessions kept in a `Map`: they vanish at every deploy and a second server has never heard of them. Redis fixes both with the same tool, a number or a small value with an expiry that every server reaches. This lesson builds both, then covers what to change when Redis leaves your laptop.
+
+It is the second of three optional stretch lessons and continues the project of `stretch-redis-queues` (Redis 8.10, ioredis 6.0, Express 5.3, Node 24), so start from your finished copy of it. The code was run in a sandbox project. I found one video that I could verify, the same Redis crash course as before; there is none for rate limits or session stores that I could confirm.
+
+## A rate limiter that several servers share
+
+The idea is a **fixed window**: the first request of a client starts a window of, say, 60 seconds, every request adds one to a counter, and when the window ends Redis deletes the counter. More than the limit within the window gets `429 Too Many Requests`.
+
+```ts
+// src/rateLimit.ts
+import type { Redis } from "ioredis";
+import type { RequestHandler } from "express";
+
+// fixed window: at most `limit` requests per `windowSeconds` for each client
+export function rateLimit(
+  redis: Redis,
+  limit: number,
+  windowSeconds: number,
+): RequestHandler {
+  return async (req, res, next) => {
+    const key = `rate:${req.ip}:${req.path}`;
+    try {
+      // MULTI runs both commands together, so a crash cannot leave a counter without an expiry;
+      // NX sets the expiry only when the key has none, so the window does not slide
+      const results = await redis
+        .multi()
+        .incr(key)
+        .expire(key, windowSeconds, "NX")
+        .exec();
+      const count = Number(results?.[0]?.[1] ?? 0);
+
+      res.set("RateLimit-Limit", String(limit));
+      res.set("RateLimit-Remaining", String(Math.max(0, limit - count)));
+      if (count > limit) {
+        const ttl = await redis.ttl(key);
+        res.set("Retry-After", String(Math.max(ttl, 1)));
+        res
+          .status(429)
+          .json({ error: { code: "RATE_LIMITED", message: "Too many requests" } });
+        return;
+      }
+    } catch {
+      // Redis is down: let the request through rather than block everybody
+    }
+    next();
+  };
+}
+```
+
+What the code does:
+
+- `INCR` returns the new count, and the key is created at 1 if it was missing. Because Redis runs one command at a time, two simultaneous requests get 5 and 6, never 5 and 5.
+- `EXPIRE key seconds NX` (the `NX` option needs Redis 7.0 or newer) sets the expiry **only if the key has none yet**. Without `NX`, every request would push the end of the window further away, and a client that keeps retrying while blocked would stay blocked for ever.
+- The two commands run in a `MULTI`, a transaction that Redis executes without anything in between. Without it, a crash after `INCR` and before `EXPIRE` leaves a counter with no expiry, and that client is blocked for good.
+- `Retry-After` tells the client how long to wait, taken from the key's own `TTL`.
+- When Redis fails, the `catch` lets the request through. This is called **failing open**: a rate limiter that breaks should not block all your users. For a login endpoint, where the limit protects against password guessing, you may choose to fail closed instead.
+- The key is built from `req.ip` and the path. Behind a proxy or a load balancer `req.ip` is the proxy's address, so everybody would share one counter, unless you set Express's `trust proxy` as in the `security` lesson.
+
+### Wire it in
+
+Four small changes. The router gets the middleware on the route that changes data, `createApp` takes the Redis client as well, and the server and the test helper pass it:
+
+```ts
+// src/app.ts: new imports at the top
+import type { Redis } from "ioredis";
+import { rateLimit } from "./rateLimit.ts";
+
+// src/app.ts: createApp takes the client too
+export function createApp(deps: { redis: Redis; cache: Cache }) {
+  const { redis, cache } = deps;
+  // ...
+
+  // src/app.ts: at most 5 changes per minute from one client
+  app.patch("/v1/products/:id", rateLimit(redis, 5, 60), async (req, res) => {
+```
+
+```ts
+// src/server.ts
+const redis = createRedis();
+const app = createApp({ redis, cache: new Cache(redis) });
+```
+
+In `test/helpers.ts` do the same: `createApp({ redis, cache: new Cache(redis) })`. Now send six changes in a row, and the sixth is refused. This is the real output (the headers `RateLimit-Limit`, `RateLimit-Remaining` and `Retry-After`):
+
+```text
+HTTP/1.1 200 OK                   RateLimit-Limit: 5  RateLimit-Remaining: 4
+HTTP/1.1 200 OK                   RateLimit-Limit: 5  RateLimit-Remaining: 3
+HTTP/1.1 200 OK                   RateLimit-Limit: 5  RateLimit-Remaining: 2
+HTTP/1.1 200 OK                   RateLimit-Limit: 5  RateLimit-Remaining: 1
+HTTP/1.1 200 OK                   RateLimit-Limit: 5  RateLimit-Remaining: 0
+HTTP/1.1 429 Too Many Requests    RateLimit-Limit: 5  RateLimit-Remaining: 0  Retry-After: 60
+```
+
+```text
+> --scan --pattern 'rate:*'
+"rate:::1:/v1/products/1"
+> ttl rate:::1:/v1/products/1
+(integer) 60
+> get rate:::1:/v1/products/1
+"6"
+```
+
+The counter says 6: a blocked request still counts. That is fine here, and it is why a client that keeps hammering stays blocked for the rest of its window.
+
+<Callout type="note" title="The weakness of a fixed window">
+A client can send 5 requests at second 59 of one window and 5 more at second 1 of the next: 10 requests in two seconds against a limit of "5 per minute". A **sliding window** closes that gap by keeping a sorted set of request times per client and counting those from the last 60 seconds. It costs more memory and more commands. For most APIs the fixed window is good enough; know the difference for interviews.
+</Callout>
+
+## Sessions in Redis
+
+In `sessions-and-jwt` the session store was a `Map`. Moving it to Redis gives you sessions that survive a restart and work behind several servers. The session is a long random **id** (that is all the cookie holds) pointing at a small JSON value, and the key has a time to live:
+
+```ts
+// src/sessions.ts
+import { randomBytes } from "node:crypto";
+import type { Redis } from "ioredis";
+
+export type SessionData = { userId: number };
+
+export class SessionStore {
+  private redis: Redis;
+  private ttlSeconds: number;
+
+  constructor(redis: Redis, ttlSeconds = 7 * 24 * 3600) {
+    this.redis = redis;
+    this.ttlSeconds = ttlSeconds;
+  }
+
+  async create(data: SessionData): Promise<string> {
+    const id = randomBytes(32).toString("base64url");
+    await this.redis
+      .multi()
+      .set(`session:${id}`, JSON.stringify(data), "EX", this.ttlSeconds)
+      .sadd(`user-sessions:${data.userId}`, id) // so "log out everywhere" can find them
+      .exec();
+    return id;
+  }
+
+  // reading a session also gives it a fresh week: sliding expiry
+  async get(id: string): Promise<SessionData | null> {
+    const raw = await this.redis.getex(`session:${id}`, "EX", this.ttlSeconds);
+    return raw === null ? null : (JSON.parse(raw) as SessionData);
+  }
+
+  async destroy(id: string): Promise<void> {
+    const session = await this.get(id);
+    const multi = this.redis.multi().del(`session:${id}`);
+    if (session) multi.srem(`user-sessions:${session.userId}`, id);
+    await multi.exec();
+  }
+
+  async destroyAllFor(userId: number): Promise<void> {
+    const ids = await this.redis.smembers(`user-sessions:${userId}`);
+    const multi = this.redis.multi();
+    for (const id of ids) multi.del(`session:${id}`);
+    multi.del(`user-sessions:${userId}`);
+    await multi.exec();
+  }
+}
+```
+
+- The id is 32 random bytes from `crypto.randomBytes`, which is what `sessions-and-jwt` requires; a guessable id would let anyone log in as somebody else.
+- `create` stores the session with an expiry and, in the same `MULTI`, adds the id to a **set** named `user-sessions:<userId>`. That set is what lets "log out everywhere" find every session of one user without scanning all keys.
+- `get` uses `GETEX key EX seconds` (Redis 6.2 or newer), which reads the value and renews the expiry in one command. The result is a **sliding expiry**: a session lasts a week from its last use.
+- The session holds only the `userId`, not the role. The role is read from the user store on each request, so a demoted admin loses the power at once instead of at the next login.
+- One limit: when a session expires by itself, its id stays in the user's set until the user logs out everywhere. The set only grows as fast as one user logs in, but a real service would clean it up, for example by pruning ids whose key no longer exists each time the user logs in.
+
+## Running Redis for real
+
+Three settings matter when Redis leaves your laptop.
+
+- **Memory and eviction.** Redis keeps everything in RAM, and by default (`maxmemory` is 0, meaning no limit) it grows until the machine runs out. For a **cache**, set a limit and let Redis throw away old keys: `maxmemory 256mb` and `maxmemory-policy allkeys-lru`, which evicts the least recently used keys. The Redis documentation calls `allkeys-lru` a good default if you have no reason to prefer another. For **queues and sessions** the opposite is needed: `noeviction`, because losing a job or a login is not acceptable (the next lesson depends on it). One Redis has one policy, so run the cache and the queues on **separate instances**.
+- **Persistence.** A cache can be lost at any time and rebuilt, so it needs no disk. Queues and sessions do. Redis has two ways: **RDB** snapshots the data every few minutes, so a crash loses the last minutes, and **AOF** logs every write and, with the default `appendfsync everysec`, loses at most about a second. The Redis documentation advises using both if you want safety comparable to a PostgreSQL database.
+- **Access.** Redis has no login unless you set one, and it trusts whoever can reach its port. Never expose port 6379 to the internet. Use a password (or ACL users), TLS (`rediss://` URLs) and a private network. Managed Redis services do this for you.
+
+One more thing you will hear: Redis is not the only server that speaks this protocol. Valkey is a fork with the same commands, and some hosting services run it. I ran everything here on Redis only.
+
+## Tests
+
+Create `test/rateLimit.test.ts` and `test/sessions.test.ts`, next to the cache and product tests, and run `TEST_REDIS_URL=redis://localhost:6379 npx vitest run`. What they must check:
+
+- **Rate limit:** the sixth change in a window gets 429 with a positive `Retry-After`; each URL has its own counter; the counter key has an expiry; a second request does not stretch the window; and a Redis that is down lets the request through.
+- **Sessions:** the id is long (43 characters or more); an unknown id gives `null`; every session has an expiry; reading a session renews it; `destroy` ends one session and leaves the user's others, and removes the id from the user's set; `destroyAllFor` ends every session of one user and nobody else's.
+
+Time in Redis is Redis's time, so `vi.useFakeTimers` cannot help. Change the **key's** expiry instead: `redis.expire(key, 5)` pretends that the window is nearly over.
+
+<Solution>
+
+```ts
+// test/rateLimit.test.ts
+import { Redis } from "ioredis";
+import request from "supertest";
+import { afterAll, describe, expect, it } from "vitest";
+import { createApp } from "../src/app.ts";
+import { Cache } from "../src/cache.ts";
+import { buildApp } from "./helpers.ts";
+
+const { app, redis, close } = buildApp();
+
+afterAll(close);
+
+describe("the rate limit on PATCH /v1/products/:id", () => {
+  it("answers 429 with Retry-After after 5 changes in a window", async () => {
+    for (let i = 0; i < 5; i++) {
+      await request(app)
+        .patch("/v1/products/1")
+        .send({ priceCents: 100 + i })
+        .expect(200);
+    }
+
+    const res = await request(app).patch("/v1/products/1").send({ priceCents: 999 });
+
+    expect(res.status).toBe(429);
+    expect(Number(res.headers["retry-after"])).toBeGreaterThan(0);
+    expect(res.headers["ratelimit-remaining"]).toBe("0");
+  });
+
+  it("counts each client and URL on its own", async () => {
+    for (let i = 0; i < 5; i++) {
+      await request(app)
+        .patch("/v1/products/1")
+        .send({ priceCents: 100 + i })
+        .expect(200);
+    }
+
+    await request(app).patch("/v1/products/2").send({ priceCents: 100 }).expect(200);
+  });
+
+  it("gives the counter an expiry, so the window ends", async () => {
+    await request(app).patch("/v1/products/1").send({ priceCents: 100 });
+
+    const [key] = await redis.keys("rate:*");
+    const ttl = await redis.ttl(key);
+
+    expect(ttl).toBeGreaterThan(0); // -1 would mean the counter lives forever
+    expect(ttl).toBeLessThanOrEqual(60);
+  });
+
+  it("does not stretch the window on every request (the expiry is set once)", async () => {
+    await request(app).patch("/v1/products/1").send({ priceCents: 100 });
+    const [key] = await redis.keys("rate:*");
+    await redis.expire(key, 5); // pretend 55 seconds have passed
+
+    await request(app).patch("/v1/products/1").send({ priceCents: 101 });
+
+    expect(await redis.ttl(key)).toBeLessThanOrEqual(5);
+  });
+
+  it("lets the request through when Redis is down", async () => {
+    const dead = new Redis({
+      port: 6399,
+      lazyConnect: true,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+    });
+    dead.on("error", () => {});
+    const brokenApp = createApp({ redis: dead, cache: new Cache(redis) });
+
+    await request(brokenApp)
+      .patch("/v1/products/1")
+      .send({ priceCents: 100 })
+      .expect(200);
+  });
+});
+```
+
+```ts
+// test/sessions.test.ts
+import { afterAll, describe, expect, it } from "vitest";
+import { createRedis } from "../src/redis.ts";
+import { SessionStore } from "../src/sessions.ts";
+
+const redis = createRedis();
+const store = new SessionStore(redis, 100);
+
+afterAll(() => redis.quit());
+
+describe("SessionStore", () => {
+  it("gives out a long random id for a session that can be read back", async () => {
+    const id = await store.create({ userId: 1 });
+
+    expect(id.length).toBeGreaterThanOrEqual(43); // 32 random bytes in base64url
+    expect(await store.get(id)).toEqual({ userId: 1 });
+  });
+
+  it("answers null for an unknown id", async () => {
+    expect(await store.get("not-a-session")).toBeNull();
+  });
+
+  it("gives every session an expiry", async () => {
+    const id = await store.create({ userId: 1 });
+
+    const ttl = await redis.ttl(`session:${id}`);
+
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(100);
+  });
+
+  it("renews the expiry each time the session is read (sliding)", async () => {
+    const id = await store.create({ userId: 1 });
+    await redis.expire(`session:${id}`, 5); // pretend it is nearly over
+
+    await store.get(id);
+
+    expect(await redis.ttl(`session:${id}`)).toBeGreaterThan(90);
+  });
+
+  it("destroy ends one session and leaves the others of the user", async () => {
+    const laptop = await store.create({ userId: 1 });
+    const phone = await store.create({ userId: 1 });
+
+    await store.destroy(laptop);
+
+    expect(await store.get(laptop)).toBeNull();
+    expect(await store.get(phone)).not.toBeNull();
+    expect(await redis.smembers("user-sessions:1")).toEqual([phone]); // no dead id left behind
+  });
+
+  it("destroyAllFor ends every session of one user and nobody else's", async () => {
+    const laptop = await store.create({ userId: 1 });
+    const phone = await store.create({ userId: 1 });
+    const other = await store.create({ userId: 2 });
+
+    await store.destroyAllFor(1);
+
+    expect(await store.get(laptop)).toBeNull();
+    expect(await store.get(phone)).toBeNull();
+    expect(await store.get(other)).not.toBeNull();
+  });
+});
+```
+
+Run the whole suite:
+
+```text
+ Test Files  4 passed (4)
+      Tests  24 passed (24)
+```
+
+</Solution>
+
+### Break it on purpose
+
+| Break this | Result |
+| ---------- | ------ |
+| `rateLimit.ts`: `count > limit` becomes `count >= limit` | Two tests fail (the 429 test and the per-URL test) |
+| `rateLimit.ts`: expiry of 1,000,000 seconds | The "counter has an expiry" test fails |
+| `rateLimit.ts`: remove `NX` | The "does not stretch the window" test fails |
+| `rateLimit.ts`: answer with an error when Redis fails | The "Redis is down" test fails |
+| `rateLimit.ts`: key without the path | The "each URL has its own counter" test fails |
+| `rateLimit.ts`: `INCR` and `EXPIRE` as two calls instead of one `MULTI` | **No test failed** |
+| `sessions.ts`: store without an expiry | The expiry test fails |
+| `sessions.ts`: `get` with plain `GET` | The "renews" test fails |
+| `sessions.ts`: 4 random bytes instead of 32 | The id length test fails |
+| `sessions.ts`: `destroyAllFor` without the deletes | The `destroyAllFor` test fails |
+| `sessions.ts`: `destroy` leaves the id in the set | **No test failed** at first; the set assertion was added after |
+
+Two rows are the lesson. The harm of a crash between two commands cannot be shown by a test that does not crash, so the `MULTI` rule stays a rule you review by eye, and you write that down. And the last row survived my first suite because I only checked what `get` returned, never the set behind it: whenever a function changes two things, a test must look at both.
+
+## Exercises
+
+<Exercise title="Which requests get a 429?">
+The limit is 2 requests per window. The window is 3 seconds long (a scaled-down copy of "2 per 60 seconds" so that you can run it) and the limiter is the one above. A client sends requests at t=0, 1.5, 2.9 and 3.1 seconds. Which are refused, and what does the counter say each time?
+
+<Solution>
+
+```ts
+// ex/exercises/window.ts
+import { createRedis } from "../../src/redis.ts";
+
+// the same two commands as the rate limiter, with a window of 3 seconds and a limit of 2
+const redis = createRedis();
+const start = Date.now();
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+for (const at of [0, 1500, 2900, 3100]) {
+  await sleep(at - (Date.now() - start));
+  const results = await redis.multi().incr("hits").expire("hits", 3, "NX").exec();
+  const count = Number(results?.[0]?.[1]);
+  console.log(`t=${(at / 1000).toFixed(1)}s count=${count} ${count > 2 ? "429" : "ok"}`);
+}
+
+await redis.del("hits");
+await redis.quit();
+```
+
+```text
+t=0.0s count=1 ok
+t=1.5s count=2 ok
+t=2.9s count=3 429
+t=3.1s count=1 ok
+```
+
+The window starts with the first request (t=0) and ends at t=3. The third request is inside it and makes the count 3, over the limit of 2. The fourth arrives after Redis deleted the key, so the count starts again at 1. It also shows the weakness from the note above: a client that sends its 2 allowed requests just before t=3 and 2 more just after t=3 gets 4 requests through within a fraction of a second, because the counter starts again at the boundary.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the rate limiter">
+This limiter was written by a teammate. It "works" in a quick test, and then two bugs show up in production: a client that keeps retrying while blocked is never let back in, and once in a while a client is blocked for good. Name both bugs and fix them.
+
+```ts
+const count = await redis.incr(key);
+await redis.expire(key, 60);
+if (count > 5) return void res.status(429).end();
+next();
+```
+
+<Solution>
+
+Bug 1: `EXPIRE` runs on **every** request, so each request moves the end of the window 60 seconds into the future. A blocked client that retries every 30 seconds is never released, which also makes the `Retry-After` header a lie. Bug 2: `INCR` and `EXPIRE` are two separate commands. If the process dies, or the connection drops, between them, the counter exists with no expiry, and that client stays blocked until somebody deletes the key. The fix is the one in `rateLimit.ts`: both commands in one `MULTI`, and `NX` on the expiry:
+
+```ts
+const results = await redis.multi().incr(key).expire(key, 60, "NX").exec();
+const count = Number(results?.[0]?.[1] ?? 0);
+if (count > 5) return void res.status(429).end();
+next();
+```
+
+A third problem is not a bug in the arithmetic: there is no `try/catch`, so a Redis outage becomes a 500 on every request. Decide between failing open and failing closed, and write it down.
+</Solution>
+</Exercise>
+
+<Exercise title="Cache a list and invalidate it">
+Add `GET /v1/products` that returns all products, and cache the list. Any change to any product must make the next list fresh. You do not know which keys hold lists (there could be one per page or filter), so deleting a key by name is not enough. Make it work with one extra Redis key.
+
+<Solution>
+
+Put a **version number** into the list's key. To invalidate every list, increase the number with `INCR`; the old keys are never read again, and their TTL removes them.
+
+```ts
+// ex/exercises/list-cache.ts
+import { Cache } from "../../stage1/src/cache.ts";
+import { createRedis } from "../../stage1/src/redis.ts";
+import { type Product } from "../../stage1/src/products.ts";
+
+const redis = createRedis();
+const cache = new Cache(redis);
+
+let loads = 0;
+async function listProducts(): Promise<Product[]> {
+  loads += 1;
+  return [
+    { id: 1, name: "Keyboard", priceCents: 4999, updatedAt: "2026-10-01T09:00:00.000Z" },
+  ];
+}
+
+// the version number is part of the key, so bumping it makes every old list unreachable
+async function cachedList() {
+  const version = (await redis.get("cache:products:version")) ?? "0";
+  return cache.remember(`products:list:v${version}`, 60, listProducts);
+}
+
+// call this wherever a product is created, changed or deleted
+async function productsChanged() {
+  await redis.incr("cache:products:version");
+}
+
+console.log((await cachedList()).hit); // false
+console.log((await cachedList()).hit); // true
+await productsChanged();
+console.log((await cachedList()).hit); // false: a new key
+console.log((await cachedList()).hit); // true
+console.log("loads:", loads); // 2
+console.log(await redis.keys("cache:products:*")); // the old list stays until its TTL ends
+
+await redis.flushdb();
+await redis.quit();
+```
+
+```text
+false
+true
+false
+true
+loads: 2
+[
+  'cache:products:list:v0',
+  'cache:products:list:v1',
+  'cache:products:version'
+]
+```
+
+Call `productsChanged()` in the `PATCH` route after the write. The old `v0` key stays in Redis until its TTL ends, which is the price of the trick and the reason every cached key needs a TTL. (Deleting by pattern with `SCAN` also works, but it is slower and not atomic.)
+</Solution>
+</Exercise>

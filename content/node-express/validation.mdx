@@ -1,0 +1,401 @@
+---
+title: Validating Input with Zod
+summary: Replace hand-written input checks with Zod schemas that validate the body, params and query of a request, and give you the TypeScript types for free.
+order: 14
+takeaways:
+  - "TypeScript types vanish when the program runs, so every value that comes from outside (a body, a URL parameter, a query string) must be checked at runtime."
+  - "A Zod schema describes valid data once; `safeParse` returns the cleaned data or a list of every problem, and `z.infer` gives the matching TypeScript type."
+  - "A small `parse` helper turns a failed schema into the same JSON `400` error the API already uses, with one entry per problem."
+  - "Query strings and URL params are always text, so numbers need `z.coerce.number()` and booleans need `z.stringbool()` (never `z.coerce.boolean()`, which turns `\"false\"` into `true`)."
+  - "By default Zod drops keys the schema does not list, which keeps a client from setting fields such as `id` or `role` (mass assignment)."
+videos:
+  - title: "Learn Zod In 30 Minutes"
+    channel: "Web Dev Simplified"
+    duration: "31:02"
+    url: https://www.youtube.com/watch?v=L6BE-U3oy80
+docs:
+  - title: "Zod — Defining schemas"
+    url: https://zod.dev/api
+  - title: "Zod — Formatting errors"
+    url: https://zod.dev/error-formatting
+  - title: "Express 5.x API: req.query"
+    url: https://expressjs.com/en/5x/api.html
+---
+
+Everything your API receives is untrusted: the body, the URL, the query string, even the headers. A client can be buggy, out of date, or written by someone trying to break in. If your code assumes `req.body.title` is a short string and it is really an array, the best case is a `500` error and the worst case is corrupted data or a security hole. In `rest-api-build` and `pagination-and-versioning` you wrote the checks by hand: two files with about 100 lines of `typeof` and `if`. This lesson replaces them with **Zod**, the library that `react/forms` already used in the browser, and the `authentication` and `testing-apis` lessons build on it. Written for Zod 4.6, Express 5.3 and Node 24 (the video is from 2022, before Zod 4, so a few details differ; the Zod docs are the reference); it continues the `/v1` todo API from `openapi-and-bruno`. The next lesson, `schemas-and-config`, shares these schemas with the frontend and uses them for the OpenAPI file and the environment.
+
+## Types are not validation
+
+TypeScript checks your code before it runs. It cannot check the data that arrives while it runs:
+
+```ts
+import express from "express";
+
+const app = express();
+app.use(express.json());
+
+app.post("/todos", (req, res) => {
+  const title = req.body.title as string; // you promised; nobody checked
+  res.json({ shouting: title.toUpperCase() });
+});
+```
+
+`req.body` is typed `any`, so the cast compiles. A request with `{ "title": 42 }` then crashes with `title.toUpperCase is not a function`, and the client gets an HTML error page. Types describe what you **hope** the data looks like. **Validation** is code that checks what it **is**, at the border of your program, once, so everything inside can trust the data.
+
+## Zod in five minutes
+
+You describe the data as a **schema**, then run the data through it:
+
+```ts
+import { z } from "zod";
+
+const newTodo = z.object({
+  title: z.string().trim().min(1).max(200),
+  done: z.boolean().default(false),
+});
+
+console.log(newTodo.parse({ title: "  Buy milk  ", id: 99, role: "admin" }));
+```
+
+```text
+{ title: 'Buy milk', done: false }
+```
+
+Three things happened. The title was **cleaned** (`trim`), the missing `done` got its **default**, and the keys the schema does not know (`id`, `role`) were **dropped**. That last behaviour is the fix for mass assignment, the bug from `rest-api-build`: whatever the client sends, you only ever see the fields you listed. (`z.strictObject` rejects unknown keys instead of dropping them; it is stricter, but it breaks clients that send a little extra.)
+
+`parse` throws a `ZodError` when the data is wrong. `safeParse` never throws; it returns an object you can check:
+
+```ts
+const result = newTodo.safeParse({ title: 5, done: "yes" });
+
+if (!result.success) {
+  console.log(result.error.issues);
+}
+```
+
+```text
+[
+  { expected: 'string', code: 'invalid_type', path: [ 'title' ],
+    message: 'Invalid input: expected string, received number' },
+  { expected: 'boolean', code: 'invalid_type', path: [ 'done' ],
+    message: 'Invalid input: expected boolean, received string' }
+]
+```
+
+You get **every** problem at once, each with a `path` (which field) and a `message`. A client developer would rather fix both in one go than discover them one request at a time. When the check passes, `result.data` is the cleaned value, and its TypeScript type comes from the schema:
+
+```ts
+type NewTodo = z.infer<typeof newTodo>; // { title: string; done: boolean }
+```
+
+You never write the interface by hand, so the type and the check cannot drift apart. That is the big idea of this lesson: **the schema is the single source of truth.**
+
+## Schemas for the todo API
+
+Put the schemas in their own files, one concern per file. The rules are the ones your hand-written code had:
+
+```ts
+// src/schemas/todo.ts
+// Imports only `zod`: no Express, no Node, so a React app could import this file too.
+import { z } from "zod";
+
+const title = z
+  .string({
+    error: (issue) =>
+      issue.input === undefined ? "title is required" : "title must be a string",
+  })
+  .trim()
+  .min(1, "title cannot be empty")
+  .max(200, "title is at most 200 characters");
+
+const done = z.boolean({ error: "done must be true or false" });
+
+// POST: title required, done optional
+export const newTodoSchema = z.object({ title, done: done.default(false) });
+
+// PUT: replaces the whole todo, so both fields are required
+export const replaceTodoSchema = z.object({ title, done });
+
+// PATCH: any of the fields, but at least one
+export const patchTodoSchema = z
+  .object({ title, done })
+  .partial()
+  .refine((body) => Object.keys(body).length > 0, {
+    error: "Send at least one of: title, done",
+  });
+
+// the todo as the API sends it
+export const todoSchema = z.object({
+  id: z.int(),
+  title,
+  done,
+  createdAt: z.iso.datetime(),
+});
+
+export type Todo = z.infer<typeof todoSchema>;
+export type NewTodo = z.infer<typeof newTodoSchema>;
+export type TodoPatch = z.infer<typeof patchTodoSchema>;
+```
+
+How it works:
+
+- **Messages.** Every check takes a message as its last argument (`.min(1, "title cannot be empty")`). Zod's default messages such as `Invalid input: expected string, received undefined` are accurate but not friendly. The `error` option on `z.string(...)` handles the "wrong type" case, and a function lets one schema give two messages: `title is required` when the key is missing (`issue.input` is `undefined`) and `title must be a string` otherwise.
+- **Reuse.** `title` and `done` are plain values you build other schemas from. POST, PUT and PATCH share them, so the rules cannot disagree.
+- **`.partial()`** makes every field optional, which is what PATCH means. A PATCH body of `{}` would then be valid, so `.refine()` adds a rule of our own: a function that returns `true` when the data is fine.
+- **`done.default(false)`** fills in the value when the key is missing, so a created todo always has a `done` and the code that creates it needs no `?? false`.
+- **The types** (`Todo`, `NewTodo`, `TodoPatch`) replace the interfaces you wrote in `src/todos.ts`. Delete those, and import the types from here.
+
+## Turning a failure into a 400
+
+One small helper connects Zod to the error format from `express-error-handling`. It runs a schema and either returns the typed data or throws the `badRequest` error that the error handler already knows how to send:
+
+```ts
+// src/validate.ts
+import type { z } from "zod";
+import { badRequest } from "./errors.ts";
+
+type Source = "body" | "params" | "query";
+
+// Returns the cleaned data, typed from the schema, or throws a 400 with every problem.
+export function parse<T extends z.ZodType>(
+  schema: T,
+  data: unknown,
+  source: Source,
+): z.output<T> {
+  const result = schema.safeParse(data);
+  if (result.success) return result.data;
+
+  throw badRequest(`Invalid request ${source}`, {
+    issues: result.error.issues.map((issue) => ({
+      field: issue.path.join(".") || source,
+      message: issue.message,
+    })),
+  });
+}
+```
+
+`z.output<T>` means "whatever this schema produces", so `parse(newTodoSchema, req.body, "body")` is typed `{ title: string; done: boolean }` with no extra work. The error keeps the shape of the other errors and puts the list in `details`. Problems that belong to the whole value rather than a field (for example the PATCH rule) get the `source` as their `field`. Now the routes lose their hand-written checks, and also the `!` that `input.title!` needed:
+
+```ts
+// src/routes/todos.ts (changed lines)
+import { parse } from "../validate.ts";
+import { newTodoSchema, patchTodoSchema, replaceTodoSchema } from "../schemas/todo.ts";
+
+todosRouter.post("/", requireJson, (req, res) => {
+  const input = parse(newTodoSchema, req.body, "body");
+  if (titleTaken(input.title)) {
+    throw conflict(`A todo called "${input.title}" already exists`);
+  }
+
+  const todo = createTodo(input);
+  res.status(201).location(`${req.baseUrl}/${todo.id}`).json({ data: todo });
+});
+
+// PUT uses replaceTodoSchema and PATCH uses patchTodoSchema in the same way
+```
+
+Try it:
+
+```bash
+curl -s -X POST localhost:4200/v1/todos -H 'Content-Type: application/json' \
+  -d '{"title":5,"done":"yes"}'
+```
+
+```text
+{"error":{"code":"BAD_REQUEST","message":"Invalid request body","details":{"issues":[
+  {"field":"title","message":"title must be a string"},
+  {"field":"done","message":"done must be true or false"}]}}}
+```
+
+(Line breaks added here; the real answer is one line.) Everything else is unchanged: a body of `{"title":"  Buy milk  ","id":99,"role":"admin"}` gives `201` with `"title":"Buy milk"` and no `role`, `{}` gives `title is required`, and `PATCH` with only `{"id":7}` gives `Send at least one of: title, done`.
+
+<Callout type="note" title="The error shape changed">
+Before, a bad title gave `details: { field: "title" }`. Now `details` holds a list, `details.issues[0].field`. Details are for humans and form code, but a test that checks them must follow. The `bruno/missing-title.yml` request from `openapi-and-bruno` now asserts `res.body.error.details.issues[0].field` equal to `title`, and the whole collection still passes. In a public API this would be a contract change, which is why `details` was documented as a free-form object.
+</Callout>
+
+### Why not a middleware?
+
+Many tutorials write `app.post("/todos", validate(schema), handler)`. It looks tidy, but Express cannot carry the schema's type from the middleware to the handler, so `req.body` is `any` again, and Express 5 made `req.query` read-only, so the middleware cannot replace it with the cleaned version. Calling `parse` as the first line of the handler is one line longer and fully typed. Libraries exist that solve the typing (`express-zod-api` is one); you do not need one yet.
+
+## Params and query strings
+
+Everything in a URL is text. `GET /v1/todos/7` gives `req.params.id` the **string** `"7"`, and `?page=2&done=true` gives the strings `"2"` and `"true"`. The schemas turn them into the types the code wants:
+
+```ts
+// src/schemas/params.ts
+import { z } from "zod";
+
+// only digits: Number("1e3") is 1000 and Number("0x10") is 16, and we want neither
+export const idParamsSchema = z.object({
+  id: z
+    .string()
+    .regex(/^[1-9]\d*$/, "id must be a positive whole number")
+    .transform(Number),
+});
+```
+
+`.transform(Number)` runs after the check and changes the type: the schema's output is `{ id: number }`. The `getTodo` helper in the routes file becomes:
+
+```ts
+function getTodo(params: unknown): Todo {
+  const { id } = parse(idParamsSchema, params, "params");
+  const todo = findTodo(id);
+  if (!todo) throw notFound(`No todo with id ${id}`);
+  return todo;
+}
+// every route calls getTodo(req.params)
+```
+
+The list query has more fields. It replaces the whole of `listQuery.ts`:
+
+```ts
+// src/schemas/listQuery.ts
+import { z } from "zod";
+
+export type SortField = "id" | "title" | "createdAt";
+
+const sortValues = ["id", "-id", "title", "-title", "createdAt", "-createdAt"] as const;
+
+const positiveInt = (name: string) =>
+  z.coerce
+    .number({ error: `${name} must be a number` })
+    .int(`${name} must be a whole number`)
+    .min(1, `${name} must be 1 or more`);
+
+export const listQuerySchema = z.object({
+  // z.stringbool() would also accept "yes" and "1"; we only want the two words
+  done: z.stringbool({ truthy: ["true"], falsy: ["false"] }).optional(),
+  q: z.string().optional(),
+  sort: z
+    .enum(sortValues, { error: `sort must be one of: ${sortValues.join(", ")}` })
+    .default("id")
+    .transform((value) =>
+      value.startsWith("-")
+        ? { field: value.slice(1) as SortField, direction: -1 as const }
+        : { field: value as SortField, direction: 1 as const },
+    ),
+  page: positiveInt("page").default(1),
+  limit: positiveInt("limit").max(100, "limit is at most 100").default(10),
+});
+
+export type ListQuery = z.output<typeof listQuerySchema>;
+```
+
+Read the pieces:
+
+- **`z.coerce.number()`** converts the text to a number first, then checks it. A value that is not a number (`?page=x`) fails with your message.
+- **`z.enum([...])`** accepts only the listed strings. This replaces the `SORT_FIELDS.includes(...)` check and is what stops a client from sorting by a field that does not exist.
+- **`.default(...)` comes last**, so a missing `page` becomes `1` before the other rules are applied.
+- **`.transform`** turns `"-createdAt"` into `{ field: "createdAt", direction: -1 }`, the shape `listTodos` already expects. The two `as SortField` casts are safe because the enum above has just proven the value; the `ListQuery` type now comes from the schema instead of `todos.ts`.
+
+<Callout type="warning" title="z.coerce.boolean() is a trap">
+`z.coerce.boolean()` calls JavaScript's `Boolean(value)`, and every non-empty string is truthy, so `?done=false` becomes `true`. The list would silently show finished todos when the client asked for the others. For query strings use `z.stringbool()`. Also watch `z.coerce.number()`: it turns the empty string and `null` into `0`, so `?page=` passes as page `0` and is only caught because of `.min(1)`.
+</Callout>
+
+All four problems of a bad query are reported together:
+
+```bash
+curl -s "localhost:4200/v1/todos?limit=0&sort=color&done=yes&page=x"
+```
+
+```text
+{"error":{"code":"BAD_REQUEST","message":"Invalid request query","details":{"issues":[
+  {"field":"done","message":"Invalid option: expected one of \"true\"|\"false\""},
+  {"field":"sort","message":"sort must be one of: id, -id, title, -title, createdAt, -createdAt"},
+  {"field":"page","message":"page must be a number"},
+  {"field":"limit","message":"limit must be 1 or more"}]}}}
+```
+
+A repeated key (`?limit=2&limit=3`) arrives as an array, becomes `NaN` after coercion, and fails with `limit must be a number`; the old code needed a special `single()` helper for that. And a missing id such as `/v1/todos/abc` answers `400` with `id must be a positive whole number`, while `/v1/todos/9999` is a valid id that does not exist, so it stays `404`.
+
+
+The routes now trust their input, and the input is typed. The rules about the data itself (a title is unique, a todo exists, you own it) still live in the handlers, and the next lesson says where each kind of rule belongs.
+
+## Common mistakes
+
+- Trusting the TypeScript type of `req.body`. It is `any`; only `parse` makes it real.
+- Using `z.coerce.boolean()` for query flags (see the warning above).
+- Forgetting that the default `z.object` drops unknown keys *silently*. That is usually right, but a client typo such as `titel` then looks like a missing `title`, which is why the message says "title is required".
+- Using `.parse()` in a handler and letting the `ZodError` through to the error handler, where it becomes a `500`. Wrap it in the `parse` helper so it becomes a `400`.
+- Validating only the body. Params and query strings are input too.
+
+<Exercise title="Predict the output">
+What does each line print?
+
+```ts
+import { z } from "zod";
+
+console.log(z.coerce.boolean().parse("false"));
+console.log(z.coerce.number().parse(""));
+console.log(z.string().trim().min(1).safeParse("   ").success);
+console.log(z.object({ title: z.string() }).parse({ title: "a", admin: true }));
+console.log(z.object({ done: z.boolean().default(false) }).parse({}));
+```
+
+<Solution>
+```text
+true
+0
+false
+{ title: 'a' }
+{ done: false }
+```
+
+1. Any non-empty string is truthy, so `Boolean("false")` is `true`.
+2. `Number("")` is `0`, and coerce does no check of its own.
+3. `trim` runs first, leaving `""`, which fails `min(1)`.
+4. The unknown key `admin` is dropped.
+5. A missing key gets its default.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+A teammate wrote this query schema. `GET /v1/todos?done=false` returns the finished todos. Why, and how do you fix it?
+
+```ts
+const query = z.object({ done: z.coerce.boolean().optional() });
+```
+
+<Solution>
+`z.coerce.boolean()` turns every non-empty string, including `"false"` and even `"no"`, into `true`. Use `z.stringbool` and list the words you accept:
+
+```ts
+const query = z.object({
+  done: z.stringbool({ truthy: ["true"], falsy: ["false"] }).optional(),
+});
+
+query.parse({ done: "false" });            // { done: false }
+query.safeParse({ done: "no" }).success;   // false
+query.parse({});                           // {}
+```
+
+Without the `truthy` and `falsy` options, `z.stringbool()` also accepts `"yes"`, `"on"` and `"1"`, which is fine for some APIs, but be sure that you chose it on purpose.
+</Solution>
+</Exercise>
+
+<Exercise title="A date range">
+Add two optional query parameters, `createdAfter` and `createdBefore`, both dates like `2026-10-20`. If both are present, `createdBefore` must not be earlier than `createdAfter`, and the error must point to `createdBefore`. Write the schema and test three inputs, including `2026-02-30`.
+
+<Solution>
+```ts
+const rangeQuery = z
+  .object({
+    createdAfter: z.iso.date().optional(),
+    createdBefore: z.iso.date().optional(),
+  })
+  .refine(
+    (q) => !q.createdAfter || !q.createdBefore || q.createdAfter <= q.createdBefore,
+    { error: "createdBefore must not be earlier than createdAfter", path: ["createdBefore"] },
+  );
+
+rangeQuery.safeParse({ createdAfter: "2026-10-10", createdBefore: "2026-10-20" }).success;
+// true
+rangeQuery.safeParse({ createdAfter: "2026-10-20", createdBefore: "2026-10-10" }).error?.issues;
+// [{ code: 'custom', path: ['createdBefore'], message: 'createdBefore must not be earlier ...' }]
+rangeQuery.safeParse({ createdAfter: "2026-02-30" }).error?.issues[0]?.message;
+// Invalid ISO date
+```
+
+ISO date strings of the form `YYYY-MM-DD` sort the same way as the dates they stand for, so comparing them as strings is correct. `z.iso.date()` knows the calendar, so February 30 fails. The `path` option decides which field the custom error is attached to; without it the error would have an empty path and `parse` would call its field `query`.
+</Solution>
+</Exercise>

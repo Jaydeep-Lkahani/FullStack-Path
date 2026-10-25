@@ -4,6 +4,13 @@ import rehypePrettyCode from "rehype-pretty-code";
 import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
 import { CodePre } from "./CodePre";
+import {
+  AlertTriangleIcon,
+  ChevronDownIcon,
+  InfoIcon,
+  LightbulbIcon,
+  PuzzleIcon,
+} from "./course/icons";
 
 function Callout({
   type = "note",
@@ -14,17 +21,24 @@ function Callout({
   title?: string;
   children: React.ReactNode;
 }) {
-  const styles = {
-    note: "border-accent/40 bg-accent/5",
-    tip: "border-success/40 bg-success/5",
-    warning: "border-warning/50 bg-warning/10",
+  const config = {
+    note: { tone: "text-accent", box: "callout-note", Icon: InfoIcon, label: "Note" },
+    tip: { tone: "text-success", box: "callout-tip", Icon: LightbulbIcon, label: "Tip" },
+    warning: {
+      tone: "text-warning",
+      box: "callout-warning",
+      Icon: AlertTriangleIcon,
+      label: "Watch out",
+    },
   }[type];
-  const label = title ?? { note: "Note", tip: "Tip", warning: "Watch out" }[type];
   return (
-    <aside className={`not-prose my-6 rounded-lg border-l-4 p-4 text-sm ${styles}`}>
-      <p className="mb-1 font-semibold">{label}</p>
-      <div className="[&_code]:bg-surface-hover space-y-2 [&_code]:rounded [&_code]:px-1 [&_code]:py-0.5">
-        {children}
+    <aside className={`callout not-prose ${config.box}`}>
+      <span className={`callout-icon ${config.tone}`} aria-hidden>
+        <config.Icon className="size-5" />
+      </span>
+      <div className="min-w-0">
+        <p className={`callout-title ${config.tone}`}>{title ?? config.label}</p>
+        <div className="callout-body">{children}</div>
       </div>
     </aside>
   );
@@ -32,25 +46,49 @@ function Callout({
 
 function Exercise({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="border-border bg-surface my-6 rounded-xl border p-5">
-      <h4 className="!mt-0 !mb-2 text-base font-semibold">🧩 Exercise: {title}</h4>
-      {children}
+    <section className="exercise not-prose">
+      <header className="exercise-head">
+        <span className="exercise-badge" aria-hidden>
+          <PuzzleIcon className="size-4" />
+        </span>
+        <div>
+          <p className="exercise-kicker">Exercise</p>
+          <h4 className="exercise-title">{title}</h4>
+        </div>
+      </header>
+      <div className="exercise-body prose max-w-none">{children}</div>
     </section>
   );
 }
 
 function Solution({ children }: { children: React.ReactNode }) {
   return (
-    <details className="border-border bg-background mt-3 rounded-lg border p-3">
-      <summary className="text-accent cursor-pointer text-sm font-medium">
-        Show solution
+    <details className="solution">
+      <summary>
+        <span className="solution-label">
+          <LightbulbIcon className="size-4" />
+          Show solution
+        </span>
+        <ChevronDownIcon className="chev size-4" />
       </summary>
-      <div className="mt-3">{children}</div>
+      <div className="solution-body">{children}</div>
     </details>
   );
 }
 
-const components = { pre: CodePre, Callout, Exercise, Solution };
+// remark-gfm renders task-list checkboxes as `disabled`; the "Ready to move on?"
+// checklists are meant to be ticked, so render them as plain uncontrolled inputs.
+function TaskCheckbox({
+  checked,
+  disabled: _disabled,
+  ...props
+}: React.ComponentProps<"input">) {
+  if (props.type !== "checkbox")
+    return <input {...props} checked={checked} disabled={_disabled} />;
+  return <input {...props} defaultChecked={checked} />;
+}
+
+const components = { pre: CodePre, Callout, Exercise, Solution, input: TaskCheckbox };
 
 export function Mdx({ source }: { source: string }) {
   return (

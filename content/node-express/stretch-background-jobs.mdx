@@ -1,0 +1,710 @@
+---
+title: "Stretch: Background Jobs with BullMQ"
+summary: "Move slow and unreliable work out of the request with a BullMQ queue and a separate worker process, with retries, delayed and repeating jobs, and a safe shutdown."
+order: 34
+takeaways:
+  - "A job queue lets the request finish at once and hands slow or unreliable work, such as email, to a worker process, while the job waits in Redis until it is done."
+  - "BullMQ has a `Queue` that your API uses to add jobs and a `Worker` that runs in its own process and takes them; a worker's connection needs `maxRetriesPerRequest: null`."
+  - "A job that throws is retried with `attempts` and `backoff`, an `UnrecoverableError` stops the retries, and finished jobs are removed only if you ask for it."
+  - "A job runs at least once, not exactly once, because a worker can die in the middle; write handlers so that running twice does no harm."
+  - "A job `delay` runs work later and `upsertJobScheduler` repeats it, and it is safe to call on every start because the same id never makes two schedulers."
+  - "Close the worker on SIGTERM so running jobs finish, and run the queue's Redis with `noeviction` and persistence, because losing keys loses jobs."
+videos:
+  - title: "Background Jobs in NodeJS with BullMQ. by Douglas Marques"
+    channel: "Codeminer42"
+    duration: "21:55"
+    url: https://www.youtube.com/watch?v=zLEtzg04HUI
+docs:
+  - title: "BullMQ — Documentation"
+    url: https://docs.bullmq.io/
+  - title: "BullMQ — Queues"
+    url: https://docs.bullmq.io/guide/queues
+  - title: "BullMQ — Workers"
+    url: https://docs.bullmq.io/guide/workers
+  - title: "BullMQ — Retrying failing jobs"
+    url: https://docs.bullmq.io/guide/retrying-failing-jobs
+  - title: "BullMQ — Job schedulers"
+    url: https://docs.bullmq.io/guide/job-schedulers
+  - title: "BullMQ — Going to production"
+    url: https://docs.bullmq.io/guide/going-to-production
+---
+
+Some work does not belong inside a request: sending an email, resizing an image, building a report, calling a partner API that is slow on Mondays. If the request waits for it, the user waits, a provider outage becomes your outage, and a spike in signups becomes a spike in load. The fix is to put a note on a queue ("send a welcome mail to this address") and answer at once. A separate **worker** process reads the notes and does the work, retries it when it fails, and nobody waits. In interviews this is the answer to "how do you send emails without blocking?", and every real backend has one.
+
+This is the last of three optional stretch lessons. It uses BullMQ 6.4, the most used Node queue, on top of the Redis from `stretch-redis-queues` and `stretch-redis-counters`, so start from your finished project (Redis 8.10, ioredis 6.0, Express 5.3, Node 24). Every file was run in a sandbox project. The only BullMQ video I could verify was streamed about a year ago, so it probably predates BullMQ 6 (I could confirm its title, channel and length but not watch it); use the docs for details.
+
+## How a queue works
+
+```text
+POST /v1/subscribers ──► API (Queue) ──► Redis ──► worker process ──► mail provider
+        202 at once         add job      holds the job    does the job
+```
+
+- The **producer** (your API) calls `queue.add(name, data, options)`. BullMQ writes the job into Redis and returns. The request can end.
+- The **worker** is a separate Node process that asks Redis for jobs and runs your function on each. You can run several workers, on several machines, and each job is handed to one of them at a time.
+- A **job** moves through states: `waiting` (queued), `active` (a worker is running it), `completed`, `failed`, or `delayed` (waiting for its time or for a retry).
+
+Everything lives in Redis, so jobs survive a restart of the API, and the API does not have to know whether a worker is running right now.
+
+## Set up BullMQ
+
+```bash
+npm install bullmq
+npm pkg set scripts.worker="node --watch --env-file-if-exists=.env src/worker.ts"
+```
+
+Two facts about the connection. BullMQ 6 uses `ioredis` by default, and you can pass it your own client as `connection`; it also ships adapters for node-redis. And a **worker's** ioredis client must be created with `maxRetriesPerRequest: null`, which is what `createRedis({ forWorker: true })` from the first lesson does: a worker should wait for a lost connection to come back, not give up, and BullMQ throws if the setting is missing.
+
+The Redis behind a queue must run with `maxmemory-policy noeviction`, because an evicted key is a lost job. That is the default when `maxmemory` is not set, and it is the reason to keep queues on a different instance from a cache that uses `allkeys-lru`.
+
+```ts
+// src/queue.ts
+import { Queue } from "bullmq";
+import type { Redis } from "ioredis";
+
+export const MAIL_QUEUE = "mail";
+
+export type MailJob = { to: string };
+
+export function createMailQueue(connection: Redis, prefix = "bull") {
+  const queue = new Queue<MailJob>(MAIL_QUEUE, {
+    connection,
+    prefix,
+    defaultJobOptions: {
+      attempts: 4,
+      backoff: { type: "exponential", delay: 1000, jitter: 0.3 },
+      removeOnComplete: { age: 3600, count: 1000 }, // keep an hour of successes
+      removeOnFail: { age: 7 * 24 * 3600 }, // keep a week of failures to look at
+    },
+  });
+  queue.on("error", (err) => console.error("queue error:", err.message));
+  return queue;
+}
+
+export type MailQueue = ReturnType<typeof createMailQueue>;
+
+export function enqueueWelcomeEmail(queue: MailQueue, to: string) {
+  // the same jobId twice is ignored while the first job still exists
+  // (a custom id cannot contain ":", because BullMQ builds its Redis keys with it)
+  return queue.add("welcome", { to }, { jobId: `welcome-${to}` });
+}
+```
+
+- One `Queue` object per queue name, shared by the whole API process. The generic `Queue<MailJob>` types the job data.
+- `defaultJobOptions` apply to every job: **4 attempts** with an **exponential backoff** (1 s, 2 s, 4 s ... with a `jitter` of 0.3 that randomises each wait, so a thousand failing jobs do not all retry at the same moment), and cleanup. `removeOnComplete` and `removeOnFail` matter: by default BullMQ keeps every finished job forever, and Redis fills up. Here successes are kept for an hour and failures for a week, so you can look at what went wrong.
+- `jobId` makes a job unique. Adding the same id again while that job still exists does nothing, so a double click on "subscribe" sends one mail. A custom id cannot contain a colon (exercise 2 shows the error).
+- Like Redis connections, a queue emits `error` events; the listener is where you log them.
+
+## The worker
+
+```ts
+// src/mailer.ts
+import { UnrecoverableError } from "bullmq";
+
+export type Mailer = (to: string, subject: string) => Promise<void>;
+
+export const sent: string[] = [];
+const attempts = new Map<string, number>();
+
+// a fake mail provider: "flaky" addresses fail twice, "bounce" addresses can never work
+export const fakeMailer: Mailer = async (to, subject) => {
+  const n = (attempts.get(to) ?? 0) + 1;
+  attempts.set(to, n);
+
+  if (to.includes("bounce")) throw new UnrecoverableError(`${to} does not exist`);
+  if (to.includes("flaky") && n <= 2) throw new Error("provider timeout");
+
+  sent.push(`${to}: ${subject}`);
+};
+```
+
+This fake provider stands in for a real one. An address with `flaky` fails twice with a timeout and then works; one with `bounce` can never work, and says so with `UnrecoverableError`, an error type from BullMQ that means "do not retry this".
+
+```ts
+// src/mailWorker.ts
+import { Worker } from "bullmq";
+import type { Redis } from "ioredis";
+import type { Mailer } from "./mailer.ts";
+import { MAIL_QUEUE, type MailJob } from "./queue.ts";
+
+export type MailWorkerOptions = { prefix?: string; concurrency?: number };
+
+export function createMailWorker(
+  connection: Redis,
+  send: Mailer,
+  options: MailWorkerOptions = {},
+) {
+  const worker = new Worker<MailJob>(
+    MAIL_QUEUE,
+    async (job) => {
+      // one queue can carry several kinds of job; the name says which
+      const subject = job.name === "digest" ? "Your daily digest" : "Welcome!";
+      await send(job.data.to, subject);
+    },
+    {
+      connection,
+      prefix: options.prefix ?? "bull",
+      concurrency: options.concurrency ?? 5,
+    },
+  );
+
+  worker.on("completed", (job) => console.log(`mail ${job.id} done`));
+  worker.on("failed", (job, err) =>
+    console.warn(`mail ${job?.id} failed (attempt ${job?.attemptsMade}): ${err.message}`),
+  );
+  worker.on("error", (err) => console.error("worker error:", err.message));
+  return worker;
+}
+```
+
+The function you pass to `Worker` is the job: if it returns, the job is `completed`; if it throws, the job `failed` and BullMQ decides about a retry. `concurrency: 5` lets one worker process run five jobs at the same time, which suits jobs that wait on the network. For work that burns CPU, run more worker **processes** instead, because one Node process still has one thread. The events `completed`, `failed` and `error` are for logs. The `error` listener is not optional: it is where connection problems appear, and BullMQ's docs ask for one on every worker and queue.
+
+```ts
+// src/worker.ts
+// the worker process: run it next to the API with `npm run worker`
+import { fakeMailer } from "./mailer.ts";
+import { createMailWorker } from "./mailWorker.ts";
+import { createMailQueue } from "./queue.ts";
+import { createRedis } from "./redis.ts";
+
+const worker = createMailWorker(createRedis({ forWorker: true }), fakeMailer);
+console.log("mail worker waiting for jobs");
+
+// a repeating job: upsert is safe to run on every start, it never creates a second scheduler
+const queue = createMailQueue(createRedis());
+await queue.upsertJobScheduler(
+  "daily-digest",
+  { pattern: "0 8 * * *", tz: "UTC" },
+  { name: "digest", data: { to: "team@example.com" } },
+);
+
+async function shutdown() {
+  console.log("shutting down: finishing the jobs in progress");
+  await worker.close(); // takes no new jobs, waits for the current ones
+  await queue.close();
+  process.exit(0);
+}
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+```
+
+`worker.ts` is the entry point of the second process, started with `npm run worker`. It runs the same `createMailWorker` that the tests use. The scheduler call and the shutdown handler are explained below.
+
+### Add jobs from the API
+
+Two changes. The app takes the queue, and a new route adds a job and answers `202 Accepted`, the status for "I took it, it is not done":
+
+```ts
+// src/app.ts: new imports, and the dependencies
+import { enqueueWelcomeEmail, type MailQueue } from "./queue.ts";
+
+const subscribeSchema = z.object({ email: z.email().transform((e) => e.toLowerCase()) });
+
+export function createApp(deps: { redis: Redis; cache: Cache; mailQueue: MailQueue }) {
+  const { redis, cache, mailQueue } = deps;
+  // ...
+
+  app.post("/v1/subscribers", rateLimit(redis, 5, 60), async (req, res) => {
+    const body = subscribeSchema.safeParse(req.body);
+    if (!body.success) return void res.status(400).json({ error: { code: "BAD_REQUEST" } });
+
+    const job = await enqueueWelcomeEmail(mailQueue, body.data.email);
+    // 202 Accepted: the work is queued, not done
+    res.status(202).json({ data: { email: body.data.email, jobId: job.id } });
+  });
+```
+
+In `src/server.ts` create the queue with the same client: `mailQueue: createMailQueue(redis)`. In `test/helpers.ts`, `buildApp()` creates the queue too and `close` closes it first (the full helper is in the tests section below), so the earlier tests need no change except one line: in `test/rateLimit.test.ts` pass `mailQueue` to the `createApp` call that uses a dead Redis. Now start Redis, `npm run dev` and, in another terminal, `npm run worker`, and subscribe four addresses (one twice):
+
+```bash
+for e in ada@example.com flaky@example.com bounce@example.com ada@example.com; do
+  curl -s -w ' %{http_code}\n' -X POST localhost:4400/v1/subscribers \
+    -H 'content-type: application/json' -d "{\"email\":\"$e\"}"
+done
+```
+
+```text
+{"data":{"email":"ada@example.com","jobId":"welcome-ada@example.com"}} 202
+{"data":{"email":"flaky@example.com","jobId":"welcome-flaky@example.com"}} 202
+{"data":{"email":"bounce@example.com","jobId":"welcome-bounce@example.com"}} 202
+{"data":{"email":"ada@example.com","jobId":"welcome-ada@example.com"}} 202
+```
+
+All four answered at once. The worker's terminal, a few seconds later:
+
+```text
+mail worker waiting for jobs
+mail welcome-ada@example.com done
+mail welcome-flaky@example.com failed (attempt 1): provider timeout
+mail welcome-bounce@example.com failed (attempt 1): bounce@example.com does not exist
+mail welcome-flaky@example.com failed (attempt 2): provider timeout
+mail welcome-flaky@example.com done
+```
+
+Ada got **one** mail although she was subscribed twice (the job id). The flaky address failed twice, was retried after about 1 and 2 seconds, and worked on the third attempt. The bounced address failed once and was **not** retried. This is what is in Redis afterwards:
+
+```text
+> zrange bull:mail:completed 0 -1
+1) "welcome-ada@example.com"
+2) "welcome-flaky@example.com"
+> zrange bull:mail:failed 0 -1
+1) "welcome-bounce@example.com"
+> hget bull:mail:welcome-flaky@example.com atm
+"3"
+> hget bull:mail:welcome-bounce@example.com failedReason
+"bounce@example.com does not exist"
+```
+
+## When jobs fail
+
+Every job fails sometimes: the provider times out, the disk is full, the data is bad. BullMQ gives you three tools.
+
+- **`attempts` and `backoff`.** `attempts: 4` means the job may run four times. `backoff` is the wait between runs: `{ type: "fixed", delay: 1000 }` is always one second, `exponential` doubles each time, and `jitter` randomises it. Without a backoff the retry is immediate, which is a good way to hammer a provider that is already struggling.
+- **`UnrecoverableError`.** Some failures will never get better: an address that does not exist, a payload that does not validate. Throw `UnrecoverableError` and the job goes straight to `failed`, however many attempts it had left.
+- **The failed set.** A job that used its attempts stays in `failed` with its `failedReason` and stack trace (for the time you set in `removeOnFail`). That is your list of work to look at; you can retry a job by hand with `job.retry()`. Alert on it: a growing failed set is the symptom of a broken provider.
+
+<Callout type="warning" title="A job runs at least once, not exactly once">
+A worker can die after it sent the mail and before it told Redis. BullMQ notices that the job's lock ran out (the job is called **stalled**), and gives the job to another worker. So the same job can run twice. I made this happen: I killed a worker with `kill -9` in the middle of a 3-second job, started a second worker, and it picked up the same job and ran it from the start. Your handler must therefore be safe to run twice: check first whether the work is already done (exercise 3), or pass the provider an idempotency key if it supports one.
+</Callout>
+
+## Delayed and repeating jobs
+
+Two more options need no extra code in the worker. A **delayed** job waits before it can run: `queue.add("reminder", data, { delay: 60_000 })` runs in a minute. A **repeating** job is a *job scheduler*, which creates a job on a pattern. `worker.ts` registers one with a cron pattern, every day at 8:00 UTC:
+
+```ts
+await queue.upsertJobScheduler(
+  "daily-digest",
+  { pattern: "0 8 * * *", tz: "UTC" },
+  { name: "digest", data: { to: "team@example.com" } },
+);
+```
+
+`upsert` means "create it, or update it if it exists", so the call is safe on every start of the worker: it never makes a second scheduler. The scheduler adds each run as a delayed job; I read the next one from Redis (`zrange bull:mail:repeat 0 -1 WITHSCORES` gave `daily-digest` and `1793001600000`, which is 2026-10-26 08:00 UTC). To see schedulers and delays work without waiting for 8 o'clock, I used `every: 1000`, which repeats each second:
+
+```ts
+// ex/scheduler.ts
+import { Queue, Worker } from "bullmq";
+import { Redis } from "ioredis";
+
+const prefix = "ex-scheduler";
+const queue = new Queue("tick", {
+  connection: new Redis("redis://localhost:6390"),
+  prefix,
+});
+const worker = new Worker(
+  "tick",
+  async (job) =>
+    console.log(
+      `${new Date().toISOString().slice(17, 23)} ${job.name} ${JSON.stringify(job.data)}`,
+    ),
+  {
+    connection: new Redis("redis://localhost:6390", { maxRetriesPerRequest: null }),
+    prefix,
+  },
+);
+
+// calling it twice with the same id keeps ONE scheduler
+await queue.upsertJobScheduler(
+  "every-second",
+  { every: 1000 },
+  { name: "tick", data: { n: 1 } },
+);
+await queue.upsertJobScheduler(
+  "every-second",
+  { every: 1000 },
+  { name: "tick", data: { n: 2 } },
+);
+console.log(
+  "schedulers:",
+  (await queue.getJobSchedulers()).map((s) => `${s.key} every ${s.every}`),
+);
+
+await new Promise((r) => setTimeout(r, 3500));
+console.log("remove:", await queue.removeJobScheduler("every-second"));
+console.log("schedulers after remove:", (await queue.getJobSchedulers()).length);
+
+// a delayed job
+await queue.add("later", { x: 1 }, { delay: 1500 });
+console.log("delayed count:", await queue.getDelayedCount());
+await new Promise((r) => setTimeout(r, 2000));
+console.log("delayed count after 2s:", await queue.getDelayedCount());
+
+await worker.close();
+await queue.close();
+process.exit(0);
+```
+
+```text
+40.145 tick {"n":2}
+schedulers: [ 'every-second every 1000' ]
+41.153 tick {"n":2}
+42.167 tick {"n":2}
+43.183 tick {"n":2}
+remove: true
+schedulers after remove: 0
+delayed count: 1
+45.212 later {"x":1}
+delayed count after 2s: 0
+```
+
+Calling `upsertJobScheduler` twice with the same id left one scheduler, and the second call's data (`n: 2`) won. The delayed job showed as delayed for its 1.5 seconds and ran afterwards. Jobs made by a scheduler get generated ids, so tell them apart by the job `name`, which is why `mailWorker.ts` checks `job.name` for the digest.
+
+## Shutting down without losing work
+
+When you deploy, your platform sends the worker `SIGTERM`. If the process just dies, the job it was running stalls and has to wait for the lock to expire (by default about 30 seconds) before another worker takes it. The handler at the end of `worker.ts` does better: `worker.close()` stops taking new jobs and waits for the running ones to finish. I tried it with a job that takes 3 seconds and sent `SIGTERM` after about one second:
+
+```text
+02.027 start job-1 attempt 1
+03.239 SIGTERM: closing
+05.029 finished job-1
+05.036 closed
+```
+
+The job finished and only then did the worker exit. `close()` has no timeout of its own, so a job that never ends keeps the worker alive, and your platform will `SIGKILL` it after its own grace period. Keep jobs short, or split long work into several jobs.
+
+## Before you ship it
+
+- Redis: `noeviction`, persistence on (AOF with `everysec`), a password and a private network. A queue on a cache instance loses jobs when memory runs out.
+- Set `removeOnComplete` and `removeOnFail`, or Redis fills up.
+- Add `error` listeners to every `Queue` and `Worker`, and handle `uncaughtException` and `unhandledRejection` in the worker process, as the BullMQ production guide says.
+- Job data is stored in Redis as plain text. Put an id in it, not a password or a card number, and load the rest in the handler.
+- Watch the queue: waiting count, failed count, oldest waiting job. BullMQ has metrics and there are dashboards; I did not try any of them.
+
+## Tests
+
+A queue test needs a real Redis and a worker in the same process. Extend `test/helpers.ts` with `createQueueEvents` (a `QueueEvents` watches a queue, and `job.waitUntilFinished(events)` waits for one job, so a test never needs `sleep`), and write `test/subscribers.test.ts` and `test/queue.test.ts`. What they must check:
+
+- **Subscribers route:** 202 and one `welcome` job with the lowercased address; the same person twice makes one job; a bad address is a 400 and queues nothing; the sixth request in a minute is a 429.
+- **Queue defaults:** a job gets 4 attempts, an exponential backoff, and both `removeOn...` settings.
+- **Worker:** it sends the welcome mail; the digest job gets its own subject; a flaky job is retried until it works (override the backoff with `{ type: "fixed", delay: 20 }` in the test so it takes milliseconds); an `UnrecoverableError` fails after one attempt; and a job that always fails ends as `failed` after its last attempt with the `failedReason` kept.
+
+Close the worker after every test and empty the queue with `queue.obliterate({ force: true })`, or one test's job leaks into the next.
+
+<Solution>
+
+```ts
+// test/helpers.ts
+import { QueueEvents } from "bullmq";
+import type { Redis } from "ioredis";
+import { createApp } from "../src/app.ts";
+import { Cache } from "../src/cache.ts";
+import { createMailQueue, MAIL_QUEUE } from "../src/queue.ts";
+import { createRedis } from "../src/redis.ts";
+
+export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// the app, and a function that closes what it opened
+export function buildApp() {
+  const redis = createRedis();
+  const mailQueue = createMailQueue(redis);
+  const app = createApp({ redis, cache: new Cache(redis), mailQueue });
+  return {
+    app,
+    redis,
+    mailQueue,
+    close: async () => {
+      await mailQueue.close();
+      await redis.quit();
+    },
+  };
+}
+
+export function createQueueEvents(connection: Redis) {
+  return new QueueEvents(MAIL_QUEUE, { connection });
+}
+```
+
+```ts
+// test/queue.test.ts
+import { QueueEvents, type Worker } from "bullmq";
+import { afterEach, describe, expect, it } from "vitest";
+import { sent, fakeMailer } from "../src/mailer.ts";
+import { createMailWorker } from "../src/mailWorker.ts";
+import { createMailQueue, enqueueWelcomeEmail, MAIL_QUEUE } from "../src/queue.ts";
+import { createRedis } from "../src/redis.ts";
+
+const queue = createMailQueue(createRedis());
+const events = new QueueEvents(MAIL_QUEUE, {
+  connection: createRedis({ forWorker: true }),
+});
+let worker: Worker | undefined;
+
+afterEach(async () => {
+  await worker?.close(); // never leave a worker running into the next test
+  worker = undefined;
+  await queue.obliterate({ force: true });
+});
+
+describe("the queue defaults", () => {
+  it("retries four times with a growing delay, and cleans up old jobs", async () => {
+    const job = await enqueueWelcomeEmail(queue, "ada@example.com");
+
+    expect(job.opts.attempts).toBe(4);
+    expect(job.opts.backoff).toMatchObject({ type: "exponential", delay: 1000 });
+    expect(job.opts.removeOnComplete).toBeDefined();
+    expect(job.opts.removeOnFail).toBeDefined(); // without these, Redis fills up forever
+  });
+});
+
+describe("the mail worker", () => {
+  it("sends the welcome mail for a job", async () => {
+    worker = createMailWorker(createRedis({ forWorker: true }), fakeMailer);
+
+    const job = await enqueueWelcomeEmail(queue, "ada@example.com");
+    await job.waitUntilFinished(events, 5000);
+
+    expect(sent).toContain("ada@example.com: Welcome!");
+  });
+
+  it("uses another subject for the daily digest job", async () => {
+    const subjects: string[] = [];
+    worker = createMailWorker(createRedis({ forWorker: true }), async (_to, subject) => {
+      subjects.push(subject);
+    });
+
+    const job = await queue.add("digest", { to: "team@example.com" });
+    await job.waitUntilFinished(events, 5000);
+
+    expect(subjects).toEqual(["Your daily digest"]);
+  });
+
+  it("retries a failing job until it works", async () => {
+    worker = createMailWorker(createRedis({ forWorker: true }), fakeMailer);
+
+    // a job's own options beat the queue defaults: a 20 ms backoff keeps the test fast
+    const job = await queue.add(
+      "welcome",
+      { to: "flaky@example.com" },
+      {
+        attempts: 4,
+        backoff: { type: "fixed", delay: 20 },
+      },
+    );
+    await job.waitUntilFinished(events, 5000);
+
+    const done = await queue.getJob(job.id!);
+    expect(done?.attemptsMade).toBe(3); // failed twice, worked the third time
+    expect(await done?.getState()).toBe("completed");
+  });
+
+  it("does not retry an UnrecoverableError", async () => {
+    worker = createMailWorker(createRedis({ forWorker: true }), fakeMailer);
+
+    const job = await queue.add(
+      "welcome",
+      { to: "bounce@example.com" },
+      {
+        attempts: 4,
+        backoff: { type: "fixed", delay: 20 },
+      },
+    );
+    await expect(job.waitUntilFinished(events, 5000)).rejects.toThrow("does not exist");
+
+    const failed = await queue.getJob(job.id!);
+    expect(failed?.attemptsMade).toBe(1);
+    expect(await failed?.getState()).toBe("failed");
+  });
+
+  it("gives up after the last attempt and keeps the job as failed", async () => {
+    worker = createMailWorker(createRedis({ forWorker: true }), async () => {
+      throw new Error("provider is down");
+    });
+
+    const job = await queue.add(
+      "welcome",
+      { to: "ada@example.com" },
+      {
+        attempts: 2,
+        backoff: { type: "fixed", delay: 20 },
+      },
+    );
+    await expect(job.waitUntilFinished(events, 5000)).rejects.toThrow("provider is down");
+
+    const failed = await queue.getJob(job.id!);
+    expect(failed?.attemptsMade).toBe(2);
+    expect(failed?.failedReason).toBe("provider is down");
+  });
+});
+```
+
+The subscribers tests are in the sandbox project (`test/subscribers.test.ts`), written like the route tests of the earlier lessons with the `mailQueue` from `buildApp()`. Run everything with `TEST_REDIS_URL=redis://localhost:6379 npx vitest run`:
+
+```text
+ Test Files  6 passed (6)
+      Tests  34 passed (34)
+```
+
+Notes on the tests:
+
+- `waitUntilFinished` rejects when the job ends as failed, so the failing-job tests use `await expect(...).rejects.toThrow(...)`.
+- The retry test checks `attemptsMade` is 3: failed twice, worked the third time.
+- The tests share one worker per test, never a global one, so a failing test cannot leave a worker running.
+
+</Solution>
+
+### Break it on purpose
+
+| Break this | Result |
+| ---------- | ------ |
+| `queue.ts`: remove the `jobId` | The "same person twice" test fails |
+| `queue.ts`: `attempts: 1` | The "queue defaults" test fails |
+| `queue.ts`: remove `removeOnFail` | The "queue defaults" test fails |
+| `mailer.ts`: `Error` instead of `UnrecoverableError` | The "does not retry" test fails |
+| `app.ts`: do not add the job | Two tests fail (the route test and the duplicate test) |
+| `mailWorker.ts`: same subject for every job | The digest subject test fails, but only after I added it |
+
+Like the jitter row of the caching lesson, the last one survived my first suite: no test looked at the digest. Every branch of a worker needs a job that reaches it.
+
+## Exercises
+
+<Exercise title="Predict the log of a failing job">
+A job is added with `{ attempts: 3, backoff: { type: "fixed", delay: 1000 } }`. The worker's function always throws `new Error("nope")` and logs `try N` at the start. What does the log show, with the time of each line, and in which state does the job end?
+
+<Solution>
+
+```ts
+// ex/exercises/predict-retries.ts
+import { Queue, QueueEvents, Worker } from "bullmq";
+import { Redis } from "ioredis";
+
+const prefix = "ex-predict";
+const url = "redis://localhost:6390";
+const start = Date.now();
+const at = () => `${((Date.now() - start) / 1000).toFixed(1)}s`;
+
+const queue = new Queue("jobs", { connection: new Redis(url), prefix });
+const events = new QueueEvents("jobs", {
+  connection: new Redis(url, { maxRetriesPerRequest: null }),
+  prefix,
+});
+const worker = new Worker(
+  "jobs",
+  async (job) => {
+    console.log(at(), "try", job.attemptsMade + 1);
+    throw new Error("nope");
+  },
+  { connection: new Redis(url, { maxRetriesPerRequest: null }), prefix },
+);
+worker.on("failed", (job, err) =>
+  console.log(at(), "failed:", job?.attemptsMade, err.message),
+);
+
+const job = await queue.add(
+  "x",
+  {},
+  { attempts: 3, backoff: { type: "fixed", delay: 1000 } },
+);
+await job.waitUntilFinished(events).catch(() => {}); // it rejects when the job ends as failed
+console.log(at(), "state:", await job.getState());
+
+await worker.close();
+await events.close();
+await queue.obliterate({ force: true });
+await queue.close();
+process.exit(0);
+```
+
+```text
+0.0s try 1
+0.0s failed: 1 nope
+1.1s try 2
+1.1s failed: 2 nope
+2.1s try 3
+2.1s failed: 3 nope
+2.1s state: failed
+```
+
+Three tries, one second apart (a little over, since the retry has to go through Redis), and then the job stays in `failed`. A fourth line `try 4` would be a bug in your reading: `attempts: 3` is the total number of runs, not the number of retries.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the job id">
+A teammate wants each subscriber to get only one welcome mail, and writes this. Every request now answers 500. Why, and what is the fix?
+
+```ts
+await queue.add("welcome", { to }, { jobId: `welcome:${to}` });
+```
+
+<Solution>
+
+```ts
+// ex/exercises/bad-job-id.ts
+import { Queue } from "bullmq";
+import { Redis } from "ioredis";
+
+const queue = new Queue("ids", {
+  connection: new Redis("redis://localhost:6390"),
+  prefix: "ex-ids",
+});
+try {
+  await queue.add(
+    "welcome",
+    { to: "ada@example.com" },
+    { jobId: "welcome:ada@example.com" },
+  );
+} catch (err) {
+  console.log((err as Error).message);
+}
+await queue.add(
+  "welcome",
+  { to: "ada@example.com" },
+  { jobId: "welcome-ada@example.com" },
+);
+console.log("with a dash it works");
+await queue.obliterate({ force: true });
+await queue.close();
+process.exit(0);
+```
+
+```text
+Custom Id cannot contain :
+with a dash it works
+```
+
+BullMQ builds the Redis keys of a job from the queue name and the id, with `:` as the separator, so the id may not contain one. Use a dash or an underscore: `welcome-${to}`. Because the add fails in the request handler, it also shows why the queue belongs under a test: this was found by running the route, not by reading the code.
+</Solution>
+</Exercise>
+
+<Exercise title="Make the handler safe to run twice">
+After the stalled-job experiment you know the welcome mail can be sent twice. Write `sendOnce(redis, send)`, a job function that sends the mail for a job only if this job id was not already handled, and show that running it twice sends one mail.
+
+<Solution>
+
+```ts
+// ex/exercises/idempotent.ts
+import type { Redis } from "ioredis";
+import type { Mailer } from "../../src/mailer.ts";
+import { createRedis } from "../../src/redis.ts";
+
+// returns a processor that never sends the same job's mail twice, even if the job runs twice
+export function sendOnce(redis: Redis, send: Mailer) {
+  return async (job: { id?: string; data: { to: string } }) => {
+    const key = `sent:${job.id}`;
+    if ((await redis.exists(key)) === 1) return; // a second run of the same job: nothing to do
+    await send(job.data.to, "Welcome!");
+    await redis.set(key, "1", "EX", 7 * 24 * 3600); // remember it for a week
+  };
+}
+
+if (import.meta.filename === process.argv[1]) {
+  const redis = createRedis();
+  const outbox: string[] = [];
+  const process1 = sendOnce(redis, async (to) => void outbox.push(to));
+  const job = { id: "welcome-ada@example.com", data: { to: "ada@example.com" } };
+
+  await process1(job);
+  await process1(job); // pretend a stalled job was handed to a second worker
+  console.log(outbox); // [ 'ada@example.com' ]
+
+  await redis.flushdb();
+  await redis.quit();
+}
+```
+
+```text
+[ 'ada@example.com' ]
+```
+
+The function checks a marker key first, sends, and only then writes the marker with a week to live. There is still a gap: if the worker dies **between** the send and the marker, the retry sends again. That is the trade-off of "at least once": you can choose to risk a duplicate (this version) or, if you write the marker **before** sending, to risk a lost mail. For email a duplicate is usually the better risk. For a payment, neither is acceptable, and you pass the provider an idempotency key so that the provider rejects the second charge.
+</Solution>
+</Exercise>

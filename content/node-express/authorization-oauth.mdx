@@ -1,0 +1,387 @@
+---
+title: Authorization — Roles and Ownership
+summary: Decide who may do what, with roles for whole features, ownership checks for single records, and the rules that keep both from leaking.
+order: 18
+takeaways:
+  - "Authentication asks who you are; authorization asks what you may do, and the server must answer it again on every request."
+  - "`401` means the server does not know who you are, `403` means it knows and the answer is no."
+  - "A role (`user`, `admin`) guards whole features, so a small `requireRole` middleware does the job; the role is stored on the server and never accepted from the client."
+  - "Ownership guards single records: check on every route that takes an id, or anybody can read anybody's data by changing a number in the URL (broken object level authorization, number one on the OWASP API list)."
+  - "Put each rule in one function, deny by default, and answer `404` for a record the caller may not even see."
+videos:
+  - title: "Role-Based Access Control (RBAC) explained with a Real Node.js Example"
+    channel: "Akilesh Rao"
+    duration: "10:32"
+    url: https://www.youtube.com/watch?v=UwjScniVGlw
+docs:
+  - title: "OWASP — Authorization Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html
+  - title: "OWASP API Security — Broken Object Level Authorization"
+    url: https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/
+  - title: "MDN — 403 Forbidden"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/403
+  - title: "MDN — 401 Unauthorized"
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/401
+---
+
+After `sessions-and-jwt` the API knows **who** is calling. Now it has to decide what they may do, and this is where real systems leak. Most data breaches through an API are not clever hacks: somebody changed `/todos/7` to `/todos/8` and the server handed over a stranger's data, because it checked that the caller was logged in but not that the todo was theirs. This lesson adds the two kinds of rule that stop that, roles and ownership, to the todo API. The next lesson, `oauth-github`, adds "Sign in with GitHub". Written for Express 5.3 and Zod 4.6; it continues the code of `sessions-and-jwt`.
+
+## Three questions, three places
+
+Every request goes through three questions, and each has its own home in the code:
+
+| Question | Example | Where it lives | Failure |
+| --- | --- | --- | --- |
+| Do I know who you are? | has a valid session | `requireAuth` | `401` |
+| May people of your kind use this feature? | only admins list users | `requireRole("admin")` | `403` |
+| May **you** use **this record**? | only the owner edits this todo | the handler, with a policy function | `404` or `403` |
+
+The first two can be decided from the request alone, so a middleware does them. The third needs the record, which only the handler has loaded, so it happens there.
+
+One fact makes this simple: `requireAuth` loads the user from the store **on every request**, so `req.user` always carries the current role. When an admin demotes somebody, it counts from the next request. A JWT that carries `"role": "admin"` inside it would keep working until it expires; this is one more place where a server-side session is easier to reason about.
+
+## Roles
+
+A **role** is a label on a user that stands for a set of permissions. The type is a tiny schema in a file that imports only `zod`, so a frontend can share it:
+
+```ts
+// src/schemas/user.ts
+import { z } from "zod";
+
+export const roleSchema = z.enum(["user", "admin"]);
+export type Role = z.infer<typeof roleSchema>;
+
+// PATCH /users/:id
+export const changeRoleSchema = z.object({
+  role: roleSchema,
+});
+```
+
+```ts
+// src/users.ts (changed)
+export type User = {
+  id: number;
+  email: string;
+  role: Role;
+  passwordHash: string; // never leaves the server
+  createdAt: string;
+};
+
+// what the API may show: everything except the hash
+export type PublicUser = Omit<User, "passwordHash">;
+```
+
+`createUser` takes the role as a third argument that defaults to `"user"`, and `listUsers` and `setRole` are two small functions over the `Map`.
+
+**The role never comes from the client.** The sign-up schema lists only `email` and `password`, and Zod drops every other key (the mass-assignment trap from `validation`). A request that adds `"role": "admin"` still creates an ordinary user:
+
+```bash
+curl -s -X POST localhost:4200/v1/auth/signup -H "Content-Type: application/json" \
+  -d '{"email":"eve@example.com","password":"eve password 1","role":"admin"}'
+# {"data":{"id":4,"email":"eve@example.com","role":"user","createdAt":"2026-10-22T17:17:09.810Z"}}   201
+```
+
+So who is the first admin? Not a public endpoint. In development a **seed** script creates the accounts, and in production you would run a one-off script or edit the database by hand. Here the seed makes an admin (id 1) and two users, Ada (id 2) and Bob (id 3), and gives each of them twelve todos:
+
+```ts
+// src/seed.ts
+import { createTodo } from "./todos.ts";
+import { createUser } from "./users.ts";
+
+// development data: three accounts (ids 1, 2 and 3) and 24 todos shared by Ada and Bob
+export async function seed() {
+  await createUser("admin@example.com", "admin password 1", "admin");
+  const ada = await createUser("ada@example.com", "ada password 1");
+  const bob = await createUser("bob@example.com", "bob password 1");
+
+  for (let i = 1; i <= 24; i++) {
+    const owner = i % 2 === 1 ? ada : bob;
+    createTodo(
+      { title: `Task ${String(i).padStart(2, "0")}`, done: i % 3 === 0 },
+      owner.id,
+      new Date(Date.UTC(2026, 9, i, 9)).toISOString(),
+    );
+  }
+}
+```
+
+`server.ts` calls `await seed()` unless `NODE_ENV` is `production`. (The passwords are throwaway development values; real ones never go into a seed file.)
+
+### The `requireRole` middleware
+
+```ts
+// src/middleware/requireRole.ts
+import type { NextFunction, Request, Response } from "express";
+import { forbidden, unauthorized } from "../errors.ts";
+import type { Role } from "../schemas/user.ts";
+
+// use after requireAuth: 401 means "who are you?", 403 means "you may not"
+export function requireRole(...allowed: Role[]) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      next(unauthorized());
+    } else if (!allowed.includes(req.user.role)) {
+      next(forbidden());
+    } else {
+      next();
+    }
+  };
+}
+```
+
+`requireRole("admin")` **returns** a middleware, so the allowed roles are fixed when the route is declared: a function that builds a function, which is a closure from `javascript-core`. It must run after `requireAuth`, and if it ever runs without a user it answers `401`, not `403`.
+
+An admin-only router then needs one line at its top:
+
+```ts
+// src/routes/users.ts
+import { Router } from "express";
+import { forbidden, notFound } from "../errors.ts";
+import { currentUser, requireAuth } from "../middleware/requireAuth.ts";
+import { requireJson } from "../middleware/requireJson.ts";
+import { requireRole } from "../middleware/requireRole.ts";
+import { idParamsSchema } from "../schemas/params.ts";
+import { changeRoleSchema } from "../schemas/user.ts";
+import { listUsers, setRole, toPublic } from "../users.ts";
+import { parse } from "../validate.ts";
+
+export const usersRouter = Router();
+
+// every route in this file is for admins only
+usersRouter.use(requireAuth, requireRole("admin"));
+
+// GET /v1/users
+usersRouter.get("/", (req, res) => {
+  res.json({ data: listUsers().map(toPublic) });
+});
+
+// PATCH /v1/users/3  { "role": "admin" }
+usersRouter.patch("/:id", requireJson, (req, res) => {
+  const { id } = parse(idParamsSchema, req.params, "params");
+  const { role } = parse(changeRoleSchema, req.body, "body");
+
+  // otherwise the last admin could demote themselves and nobody could undo it
+  if (id === currentUser(req).id) throw forbidden("You cannot change your own role");
+
+  const user = setRole(id, role);
+  if (!user) throw notFound(`No user with id ${id}`);
+  res.json({ data: toPublic(user) });
+});
+```
+
+`router.use(requireAuth, requireRole("admin"))` guards every route below it, including ones added next year: new routes are **denied by default**. The handler refuses one more thing: an admin cannot change their own role, otherwise the last admin could demote themselves and nobody could undo it. Mount it with `v1Router.use("/users", usersRouter)`.
+
+```bash
+curl -s -w " %{http_code}\n" localhost:4200/v1/users                      # no cookie
+# {"error":{"code":"UNAUTHORIZED","message":"You must be logged in"}} 401
+curl -s -w " %{http_code}\n" -b ada.jar localhost:4200/v1/users           # logged in as Ada, a user
+# {"error":{"code":"FORBIDDEN","message":"You are not allowed to do that"}} 403
+curl -s -w " %{http_code}\n" -b admin.jar localhost:4200/v1/users         # the admin
+# {"data":[{"id":1,"email":"admin@example.com","role":"admin", ...}, ...]} 200
+curl -s -X PATCH -b admin.jar localhost:4200/v1/users/1 -H "Content-Type: application/json" -d '{"role":"user"}'
+# {"error":{"code":"FORBIDDEN","message":"You cannot change your own role"}}
+```
+
+(`-b ada.jar` is the cookie jar from `sessions-and-jwt`, filled by logging in as that user.)
+
+## Ownership
+
+Roles say what **kind** of user you are. They cannot say that todo 7 is Ada's and todo 8 is Bob's. For that every todo gets an `ownerId`, set **by the server from `req.user`** when the todo is created, never from the body:
+
+```bash
+curl -s -b bob.jar -X POST localhost:4200/v1/todos -H "Content-Type: application/json" \
+  -d '{"title":"Mine","ownerId":2}'
+# {"data":{"id":25,"title":"Mine","done":false,"ownerId":3, ...}}   201: ownerId is Bob's, not 2
+```
+
+The rule itself gets one home, a function every route calls:
+
+```ts
+// src/policy.ts
+import type { Todo } from "./schemas/todo.ts";
+import type { PublicUser } from "./users.ts";
+
+// the one place that says who may touch a todo
+export function canManageTodo(user: PublicUser, todo: Todo): boolean {
+  return user.role === "admin" || todo.ownerId === user.id;
+}
+```
+
+The handler's lookup function now takes the user. Every route that has an `:id` goes through it, and the list route filters by owner:
+
+```ts
+// src/routes/todos.ts
+// a todo you may not touch looks exactly like one that does not exist
+function getTodo(params: unknown, user: PublicUser): Todo {
+  const { id } = parse(idParamsSchema, params, "params");
+  const todo = findTodo(id);
+  if (!todo || !canManageTodo(user, todo)) throw notFound(`No todo with id ${id}`);
+  return todo;
+}
+
+// in the list route: admins see all todos, everyone else only their own
+  const user = currentUser(req);
+  const { items, total } = listTodos(query, user.role === "admin" ? undefined : user.id);
+```
+
+```ts
+// src/todos.ts (changed): `ownerId` limits the list to one user's todos
+// `ownerId` limits the list to one user's todos; leave it out to list everybody's
+export function listTodos(
+  query: ListQuery,
+  ownerId?: number,
+): { items: Todo[]; total: number } {
+  const { done, q, sort, page, limit } = query;
+
+  const matching = todos.filter(
+    (todo) =>
+      (ownerId === undefined || todo.ownerId === ownerId) &&
+      (done === undefined || todo.done === done) &&
+      (q === undefined || todo.title.toLowerCase().includes(q.toLowerCase())),
+  );
+```
+
+Two choices to notice. **First**, `getTodo` throws `404` both for a todo that does not exist and for one that belongs to somebody else. With `403` for the second case, Bob could learn that todo 1 exists, just that it is not his; with `404` the two cases look identical, so there is nothing to learn. Bob tries to read, delete and edit Ada's todo:
+
+```bash
+curl -s -w " %{http_code}\n" -b bob.jar localhost:4200/v1/todos/1                  # Ada's todo
+# {"error":{"code":"NOT_FOUND","message":"No todo with id 1"}} 404
+curl -s -w " %{http_code}\n" -b bob.jar localhost:4200/v1/todos/999                # does not exist
+# {"error":{"code":"NOT_FOUND","message":"No todo with id 999"}} 404
+curl -s -w " %{http_code}\n" -b bob.jar -X DELETE localhost:4200/v1/todos/1
+# {"error":{"code":"NOT_FOUND","message":"No todo with id 1"}} 404
+curl -s -w " %{http_code}\n" -b admin.jar localhost:4200/v1/todos/1                # the admin may
+# {"data":{"id":1,"title":"Task 01","done":false,"ownerId":2, ...}} 200
+```
+
+**Second**, `titleTaken` now takes the owner. When titles had to be unique across all todos, a `409 already exists` told Bob which titles other people use. Now each user has their own namespace:
+
+```ts
+// src/todos.ts (changed)
+// titles are unique per owner: checking all todos would reveal other people's titles
+export function titleTaken(ownerId: number, title: string, exceptId?: number): boolean {
+  const wanted = title.toLowerCase();
+  return todos.some(
+    (todo) =>
+      todo.ownerId === ownerId &&
+      todo.id !== exceptId &&
+      todo.title.toLowerCase() === wanted,
+  );
+}
+```
+
+<Callout type="warning" title="The bug behind many real breaches">
+OWASP calls it **broken object level authorization** (BOLA), and it has been number one on its API list for years. It is also known as IDOR, an insecure direct object reference. The recipe is always the same: a route takes an id, finds the record, and never asks whether this caller may see it. Authentication does not help, because the attacker has a perfectly valid login. Check ownership on **every** route that touches a record: read, update, delete, and also the ones people forget, such as export, search and bulk actions.
+</Callout>
+
+## Rules that keep authorization sound
+
+- **Check on the server, always.** Hiding the "Delete" button in React is design, not security: anyone can send the request with curl. The frontend may use `role` to decide what to show, and the API decides what to allow.
+- **Deny by default.** Guard at the router (`router.use(requireAuth, ...)`) so a forgotten check fails closed, and write policies as "allow if ..." with a final `false`.
+- **One policy function.** `canManageTodo` is the only place that says who owns what. When the rule changes ("team members can edit too"), you change one file, and the tests for it are short.
+- **Never trust the client for facts about the user.** Role, owner and user id come from `req.user`, never from the body, a header or a query string. `X-Role: admin` is not a thing.
+- **Filter in the query, not after it.** `listTodos(query, ownerId)` never loads other people's rows. In the `databases` module this becomes `WHERE owner_id = $1`, which also keeps pagination counts honest.
+
+### Roles, permissions and attributes
+
+Fixed roles (**RBAC**, role-based access control) are enough for most apps. As apps grow, teams give roles a list of named **permissions** (`todo:delete`, `user:ban`) and check the permission instead of the role name, so adding a "moderator" does not mean touching every route. The ownership rule above is an **attribute** check (**ABAC**): it compares an attribute of the user with an attribute of the record. Libraries such as CASL organise these rules for you; the idea is what you have just written, one function that answers "may this user do this action on this thing?".
+
+## Common mistakes
+
+- Checking the login but not the owner, so changing the id in the URL shows another user's data.
+- Taking `role`, `isAdmin` or `ownerId` from the request body (or a header or cookie the client controls).
+- Authorizing in the frontend only.
+- Protecting `GET /todos/:id` and forgetting `PUT`, `DELETE` or an export route.
+- Answering `403` for records the caller should not even know about.
+- Putting `requireRole` before `requireAuth`, so every anonymous request looks like a `403` instead of `401`.
+
+<Exercise title="Predict the statuses">
+Using the seed (admin is user 1, Ada user 2 with the odd-numbered todos, Bob user 3 with the even ones), what does each request answer?
+
+1. Bob: `GET /v1/todos/1`
+2. No cookie: `GET /v1/todos/1`
+3. Ada: `PATCH /v1/users/3` with `{"role":"admin"}`
+4. The admin: `PATCH /v1/users/3` with `{"role":"admin"}`, then Bob: `GET /v1/users`
+5. The admin: `PATCH /v1/users/1` with `{"role":"user"}`
+
+<Solution>
+1. `404`: todo 1 is Ada's, and Bob must not learn whether it exists.
+2. `401`: `requireAuth` on the todos router stops the request before anything else.
+3. `403`: she is logged in, but `/users` is admin only.
+4. `200` for the change, then `200` for Bob's `GET /v1/users`: his old session cookie still works, and since `requireAuth` reads the role from the store on every request, he is an admin from his next request on, with no new login.
+5. `403`, "You cannot change your own role".
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+This "quick version" of the todo routes works in a demo. How many ways can a logged-in user get at data they should not?
+
+```ts
+todosRouter.get("/", (req, res) => {
+  const ownerId = Number(req.query.ownerId);
+  res.json({ data: todos.filter((todo) => todo.ownerId === ownerId) });
+});
+
+todosRouter.delete("/:id", (req, res) => {
+  deleteTodo(Number(req.params.id));
+  res.status(204).end();
+});
+
+todosRouter.post("/", (req, res) => {
+  const user = req.user!;
+  const todo = createTodo(req.body, req.body.isAdmin ? 0 : user.id);
+  res.status(201).json({ data: todo });
+});
+```
+
+<Solution>
+1. The list takes `ownerId` from the query string, so `?ownerId=2` lists Ada's todos. The owner must come from `req.user`: `listTodos(query, user.id)`.
+2. `DELETE` never looks at the todo, so anyone can delete anyone's by guessing ids. Load it with `getTodo(req.params, user)`, which answers `404` for other people's todos.
+3. `req.body.isAdmin` is client-controlled, so anyone can claim to be an admin (and `0` as an owner id is a todo that belongs to nobody). Take the owner from `req.user.id` and ignore the body.
+4. `createTodo(req.body, ...)` passes the unvalidated body on; use `parse(newTodoSchema, req.body, "body")`.
+5. `req.user!` hides the case where `requireAuth` was not mounted: use `currentUser(req)`, which throws `401`.
+</Solution>
+</Exercise>
+
+<Exercise title="Add a moderator">
+Add a third role, `moderator`. A moderator sees every todo and may **read** and **delete** any of them, but may not edit other people's todos. A user who may read a todo but not change it should get `403`; a user who may not even read it still gets `404`.
+
+<Solution>
+```ts
+// src/schemas/user.ts (changed)
+export const roleSchema = z.enum(["user", "moderator", "admin"]);
+```
+
+```ts
+// src/policy.ts
+import type { Todo } from "./schemas/todo.ts";
+import type { PublicUser } from "./users.ts";
+
+export type TodoAction = "read" | "update" | "delete";
+
+export function canTodo(user: PublicUser, todo: Todo, action: TodoAction): boolean {
+  if (user.role === "admin" || todo.ownerId === user.id) return true;
+  if (user.role === "moderator") return action === "read" || action === "delete";
+  return false;
+}
+
+// who sees every user's todos in a list
+export const seesAllTodos = (user: PublicUser) => user.role !== "user";
+```
+
+```ts
+// src/routes/todos.ts: getTodo now takes the action
+function getTodo(params: unknown, user: PublicUser, action: TodoAction): Todo {
+  const { id } = parse(idParamsSchema, params, "params");
+  const todo = findTodo(id);
+  // no right to even read it: pretend it does not exist
+  if (!todo || !canTodo(user, todo, "read")) throw notFound(`No todo with id ${id}`);
+  // it may be seen but not changed this way: now 403 is honest
+  if (!canTodo(user, todo, action)) throw forbidden();
+  return todo;
+}
+```
+
+The routes pass `"read"`, `"update"` (for `PUT` and `PATCH`) or `"delete"`, and the list route uses `seesAllTodos(user)` in place of the admin check. Tried with a moderator account: the list shows all 24 todos, reading Ada's todo gives `200`, patching it gives `403`, deleting it gives `204`, and Ada reading Bob's todo still gives `404`. Because every rule lives in `policy.ts`, only that file and `getTodo` changed.
+</Solution>
+</Exercise>
