@@ -1,417 +1,404 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { HeroCode } from "@/components/home/HeroCode";
 import { LessonChecklist } from "@/components/home/LessonChecklist";
+import { LoopTrap } from "@/components/home/LoopTrap";
+import { Moments, type Moment } from "@/components/home/Moments";
+import { NextLesson } from "@/components/home/NextLesson";
+import { PhaseNode } from "@/components/home/PhaseNode";
 import { ProgressRing } from "@/components/home/ProgressRing";
-import { SpotlightCard } from "@/components/home/SpotlightCard";
 import { StartButton } from "@/components/home/StartButton";
+import { WelcomeBack } from "@/components/home/WelcomeBack";
+import { Morph, PageTransition } from "@/components/PageTransition";
+import { ChevronDownIcon, SoonIcon } from "@/components/course/icons";
 import { getAllLessons, getModules } from "@/lib/content";
-import { roadmap } from "@/lib/roadmap";
+import { getLoopTrap, LOOP_TRAP_LESSON } from "@/lib/loop-trap";
+import { lessonKind } from "@/lib/nav";
+import { roadmap, type TrackId } from "@/lib/roadmap";
 
 export const metadata: Metadata = { alternates: { canonical: "/" } };
 
-const TECH = [
-  "JavaScript",
-  "TypeScript",
-  "React",
-  "Node.js",
-  "Express",
-  "Next.js",
-  "REST APIs",
-  "Authentication",
-  "WebSockets",
-  "Testing",
-  "PostgreSQL",
-  "Prisma",
-  "Git",
-  "Docker",
+const TECH: { name: string; track: TrackId }[] = [
+  { name: "JavaScript", track: "js" },
+  { name: "TypeScript", track: "ts" },
+  { name: "React", track: "react" },
+  { name: "Node.js", track: "node" },
+  { name: "Express", track: "node" },
+  { name: "Next.js", track: "next" },
+  { name: "REST APIs", track: "node" },
+  { name: "Authentication", track: "node" },
+  { name: "WebSockets", track: "node" },
+  { name: "Testing", track: "react" },
+  { name: "PostgreSQL", track: "db" },
+  { name: "Prisma", track: "db" },
+  { name: "Git", track: "foundations" },
+  { name: "Docker", track: "prod" },
 ];
 
-const FEATURES = [
+/** The parts of every lesson, each shown on the real page (public/home/*.png). */
+const MOMENTS: Moment[] = [
   {
+    id: "read",
+    label: "Read",
     title: "Explained from scratch",
     text: "Every concept follows the same rhythm: a plain-English explanation, a small example you can run, and the mistake most people make.",
-    className: "lg:col-span-2",
-    icon: (
-      <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5zM4 21.5V5.5M8 7h8M8 11h6" />
-    ),
+    light: "/home/read-light.png",
+    dark: "/home/read-dark.png",
+    width: 1440,
+    height: 900,
+    alt: "The Closures section of the Scope, Hoisting & Closures lesson, with its code example",
   },
   {
+    id: "watch",
+    label: "Watch",
     title: "Curated videos",
-    text: "Hand-picked, link-checked videos on every lesson, so you never hunt for a good tutorial.",
-    icon: (
-      <>
-        <rect x="3" y="5" width="18" height="14" rx="3" />
-        <path d="m10 9.5 5 2.5-5 2.5z" />
-      </>
-    ),
+    text: "Hand-picked, link-checked videos on most lessons, so you never hunt for a good tutorial. Pop one out and it stays with you as you read.",
+    light: "/home/watch-light.png",
+    dark: "/home/watch-dark.png",
+    width: 1440,
+    height: 900,
+    alt: "A lesson video playing in the floating player while the lesson scrolls beneath it",
   },
   {
+    id: "practise",
+    label: "Practise",
     title: "Practice that sticks",
-    text: "Exercises with full solutions and a quiz at the end of each module.",
-    icon: <path d="m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14" />,
+    text: "Exercises close each lesson, from easy to hard, each with a full solution to open once you have tried it yourself.",
+    light: "/home/practise-light.png",
+    dark: "/home/practise-dark.png",
+    width: 1440,
+    height: 900,
+    alt: "The Predict the output exercise with its solution open",
   },
   {
-    title: "Progress you can see",
-    text: "Tick lessons off and watch the rings fill. It is all saved in your browser, with no account needed.",
-    className: "lg:col-span-2",
-    icon: (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="m8 12.5 2.8 2.8L16.5 9" />
-      </>
-    ),
+    id: "check",
+    label: "Check",
+    title: "A quiz to close the module",
+    text: "Multiple-choice questions on what the module taught, with the reasoning behind every answer.",
+    light: "/home/check-light.png",
+    dark: "/home/check-dark.png",
+    width: 1440,
+    height: 900,
+    alt: "The JavaScript Core quiz with one question answered and its explanation shown",
   },
+];
+
+/** Hairlines between the four figures: two by two on a phone, one row from sm up. */
+const SPEC_CELL = [
+  "",
+  "border-l pl-6",
+  "border-t sm:border-t-0 sm:border-l sm:pl-6",
+  "border-t border-l pl-6 sm:border-t-0",
 ];
 
 function formatTime(minutes: number) {
   return minutes >= 90 ? `${Math.round(minutes / 60)} h` : `${minutes} min`;
 }
 
-export default function Home() {
+export default async function Home() {
   const modules = getModules();
   const all = getAllLessons();
+  const samples = await getLoopTrap();
   const links = all.map((l) => ({
     module: l.module,
     slug: l.slug,
     href: l.href,
     title: l.title,
   }));
+  const welcomeLessons = all.map((l) => {
+    const mod = modules.find((m) => m.slug === l.module);
+    return {
+      ...links.find((x) => x.href === l.href)!,
+      moduleTitle: mod?.title ?? l.module,
+      track: mod?.track ?? "foundations",
+      label: l.quiz.length > 0 ? "Quiz" : `Lesson ${l.order}`,
+      minutes: l.minutes,
+    };
+  });
 
-  const stats = [
-    { value: all.length, label: "Lessons" },
-    { value: modules.filter((m) => m.lessons.length > 0).length, label: "Modules live" },
-    { value: all.reduce((n, l) => n + l.videos.length, 0), label: "Curated videos" },
+  const liveModules = modules.filter((m) => m.lessons.length > 0);
+  const firstModule = liveModules[0];
+  const trapModule = modules.find((m) => m.slug === LOOP_TRAP_LESSON.module);
+  const trapLesson = trapModule?.lessons.find((l) => l.slug === LOOP_TRAP_LESSON.slug);
+
+  const spec = [
+    { label: "Lessons", value: String(all.length) },
     {
-      value: Math.round(all.reduce((n, l) => n + l.minutes, 0) / 60),
+      label: "Modules live",
+      value: String(liveModules.length),
+      note: `of ${modules.length} on the roadmap`,
+    },
+    {
+      label: "Curated videos",
+      value: String(all.reduce((n, l) => n + l.videos.length, 0)),
+    },
+    {
       label: "Hours of reading",
+      value: String(Math.round(all.reduce((n, l) => n + l.minutes, 0) / 60)),
     },
   ];
 
   return (
-    <div className="mx-auto max-w-6xl">
-      {/* ---------- Hero ---------- */}
-      <section className="relative isolate overflow-x-clip pt-6 pb-16 sm:pt-12">
-        <div className="hero-aurora" aria-hidden>
-          <i />
-          <i />
-          <i />
-        </div>
-
-        <div className="grid items-center gap-12 lg:grid-cols-[1.05fr_1fr]">
-          <div className="min-w-0">
-            <p
-              className="rise border-border bg-surface/80 text-muted inline-flex items-center gap-2 rounded-full border py-1 pr-3.5 pl-2.5 text-xs font-medium backdrop-blur"
-              style={{ "--d": "0ms" } as React.CSSProperties}
+    <PageTransition>
+      {/* ---------- Hero: start or resume, beside the lesson's own code ---------- */}
+      <section
+        aria-label="Start here"
+        className="grid content-center items-center gap-x-20 gap-y-12 lg:min-h-[calc(100svh-var(--header-h)-11rem)] lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]"
+      >
+        <div className="for-new min-w-0">
+          <h1 className="max-w-[13ch] text-(length:--text-display) leading-[1.02]">
+            The full stack, after HTML and CSS.
+          </h1>
+          <p className="lead text-ink-2 mt-6">
+            A free, self-paced path from JavaScript to React, Node.js and Next.js.
+          </p>
+          <div className="mt-10 flex flex-wrap items-center gap-x-6 gap-y-4">
+            <StartButton
+              lessons={links}
+              startLabel={`Start with ${firstModule?.title ?? "lesson one"}`}
+            />
+            <a
+              href="#roadmap"
+              className="decoration-accent min-h-11 content-center underline underline-offset-[0.25em] hover:decoration-2"
             >
-              <span
-                className="ping-dot bg-success relative h-2 w-2 rounded-full"
-                aria-hidden
-              />
-              Free · self-paced · React, Node.js &amp; Next.js
-            </p>
-            <h1
-              className="rise mt-5 text-4xl leading-[1.08] font-bold tracking-tight text-balance sm:text-5xl lg:text-[3.5rem]"
-              style={{ "--d": "80ms" } as React.CSSProperties}
-            >
-              From fundamentals to <span className="text-gradient">job-ready</span>, full
-              stack.
-            </h1>
-            <p
-              className="rise text-muted mt-5 max-w-xl text-lg text-pretty"
-              style={{ "--d": "160ms" } as React.CSSProperties}
-            >
-              A structured path with detailed lessons, curated videos, exercises and
-              interview prep. Pick up exactly where you left off.
-            </p>
-            <div
-              className="rise mt-8 flex flex-wrap items-start gap-3"
-              style={{ "--d": "240ms" } as React.CSSProperties}
-            >
-              <StartButton lessons={links} />
-              <a
-                href="#roadmap"
-                className="group border-border bg-surface/70 hover:border-accent/60 hover:bg-surface-hover focus-visible:outline-accent inline-flex items-center gap-2 rounded-xl border px-6 py-3 font-semibold backdrop-blur transition duration-200 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 active:scale-[0.98]"
-              >
-                See the roadmap
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden
-                  className="transition-transform duration-200 group-hover:translate-y-0.5"
-                >
-                  <path d="M12 5v14M6 13l6 6 6-6" />
-                </svg>
-              </a>
-            </div>
-          </div>
-
-          <div className="rise min-w-0" style={{ "--d": "200ms" } as React.CSSProperties}>
-            <div className="float">
-              <HeroCode />
-            </div>
+              See the roadmap
+            </a>
           </div>
         </div>
-
-        <dl
-          className="rise border-border bg-surface/70 mt-14 grid grid-cols-2 gap-px overflow-hidden rounded-2xl border backdrop-blur sm:grid-cols-4"
-          style={{ "--d": "320ms" } as React.CSSProperties}
-        >
-          {stats.map((s) => (
-            <div key={s.label} className="bg-background/60 px-5 py-4">
-              <dt className="text-muted text-xs font-medium tracking-wide uppercase">
-                {s.label}
-              </dt>
-              <dd
-                className="mt-1 text-3xl font-bold tracking-tight tabular-nums"
-                aria-label={String(s.value)}
-              >
-                <span
-                  className="count"
-                  aria-hidden
-                  style={{ "--to": s.value } as React.CSSProperties}
-                />
-              </dd>
-            </div>
-          ))}
-        </dl>
+        <div className="for-returning min-w-0">
+          <WelcomeBack lessons={welcomeLessons} />
+        </div>
+        {trapLesson && trapModule && (
+          <LoopTrap
+            samples={samples}
+            lesson={{
+              href: trapLesson.href,
+              title: trapLesson.title,
+              moduleTitle: trapModule.title,
+              order: trapLesson.order,
+            }}
+          />
+        )}
       </section>
 
-      {/* ---------- Tech marquee ---------- */}
-      <section aria-label="Topics covered" className="reveal pb-16">
-        <div className="marquee">
-          <div className="marquee-track">
-            {[0, 1].map((copy) => (
-              <ul
-                key={copy}
-                aria-hidden={copy === 1}
-                className="flex shrink-0 gap-3 pr-3"
+      {/* ---------- The parts of a lesson, on the real page ---------- */}
+      <section
+        aria-labelledby="lesson-parts"
+        className="border-foreground mt-10 border-t pt-10 lg:mt-0"
+      >
+        <div className="flex flex-wrap items-end justify-between gap-x-12 gap-y-6">
+          <div>
+            <h2 id="lesson-parts" className="section-head">
+              How a lesson works
+            </h2>
+            <p className="lead text-ink-2 mt-4">
+              Read the idea, watch it explained, write the code, then check yourself.
+            </p>
+          </div>
+        </div>
+        <div className="mt-10">
+          <Moments moments={MOMENTS} />
+        </div>
+      </section>
+
+      {/* ---------- What's inside: the course in figures it ships with ---------- */}
+      <section
+        aria-labelledby="inside"
+        className="mt-(--section-gap) grid gap-x-8 gap-y-10 lg:grid-cols-12"
+      >
+        <div className="lg:col-span-4">
+          <h2 id="inside" className="section-head">
+            What&apos;s inside
+          </h2>
+          <p className="lead text-ink-2 mt-4">
+            Free and self-paced. No sign-up: your progress stays in this browser.
+          </p>
+        </div>
+        <dl className="border-foreground border-t lg:col-span-8">
+          <div className="grid grid-cols-2 sm:grid-cols-4">
+            {spec.map((s, i) => (
+              <div
+                key={s.label}
+                className={`border-border py-6 sm:py-8 ${SPEC_CELL[i] ?? ""}`}
               >
+                <dt className="text-muted text-sm">{s.label}</dt>
+                <dd className="ledger-num mt-3 text-[3.25rem] tabular-nums sm:text-[3.75rem]">
+                  {s.value}
+                </dd>
+                {s.note && <dd className="text-muted mt-2 text-sm">{s.note}</dd>}
+              </div>
+            ))}
+          </div>
+          <div className="border-border grid gap-2 border-t py-6 sm:grid-cols-[10rem_minmax(0,1fr)] sm:gap-6">
+            <dt className="text-muted text-sm sm:pt-1">Covers</dt>
+            <dd className="text-[1.0625rem] leading-relaxed text-pretty">
+              <ul className="inline-list">
                 {TECH.map((t) => (
-                  <li
-                    key={t}
-                    className="border-border bg-surface text-muted hover:border-accent/60 hover:text-foreground rounded-full border px-4 py-1.5 text-sm font-medium whitespace-nowrap transition-colors"
-                  >
-                    {t}
+                  <li key={t.name} data-track={t.track}>
+                    {t.name}
                   </li>
                 ))}
               </ul>
-            ))}
+            </dd>
           </div>
-        </div>
+          <div className="border-border grid gap-2 border-t border-b py-6 sm:grid-cols-[10rem_minmax(0,1fr)] sm:gap-6">
+            <dt className="text-muted text-sm sm:pt-1">Along the way</dt>
+            <dd className="text-[1.0625rem] leading-relaxed text-pretty">
+              Takeaways and links to the official docs on every lesson. Six projects built
+              in stages, and a quiz at the end of most modules.
+            </dd>
+          </div>
+        </dl>
       </section>
 
-      {/* ---------- Features ---------- */}
-      <section aria-labelledby="why" className="pb-20">
-        <div className="reveal max-w-2xl">
-          <p className="text-accent text-sm font-semibold">Why it works</p>
-          <h2 id="why" className="mt-2 text-3xl font-bold tracking-tight text-balance">
-            Built for people who learn by doing
-          </h2>
-        </div>
-        <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {FEATURES.map((f) => (
-            <SpotlightCard
-              key={f.title}
-              className={`reveal border-border bg-surface rounded-2xl border p-6 ${f.className ?? ""}`}
-            >
-              <span className="bg-accent/10 text-accent grid h-10 w-10 place-items-center rounded-xl">
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden
-                >
-                  {f.icon}
-                </svg>
-              </span>
-              <h3 className="mt-4 text-lg font-semibold">{f.title}</h3>
-              <p className="text-muted mt-1.5 text-pretty">{f.text}</p>
-            </SpotlightCard>
-          ))}
-        </div>
-      </section>
-
-      {/* ---------- Roadmap ---------- */}
-      <section aria-labelledby="roadmap" className="scroll-mt-20 pb-20">
-        <div className="reveal max-w-2xl">
-          <p className="text-accent text-sm font-semibold">The path</p>
-          <h2
-            id="roadmap"
-            className="mt-2 text-3xl font-bold tracking-tight text-balance"
-          >
+      {/* ---------- The roadmap: a ledger of phases and modules ---------- */}
+      <section aria-labelledby="roadmap" className="mt-(--section-gap) scroll-mt-20">
+        <div className="grid gap-x-8 gap-y-4 lg:grid-cols-12">
+          <h2 id="roadmap" className="section-head lg:col-span-5">
             The roadmap
           </h2>
-          <p className="text-muted mt-2">
-            Work through the phases in order. Each module builds on the one before it.
-          </p>
+          <div className="lg:col-span-6 lg:col-start-7 lg:pt-3">
+            <p className="lead text-ink-2">
+              Work through the phases in order. Each module builds on the one before it.
+            </p>
+            <p className="text-muted mt-3 text-pretty">
+              Tick lessons off and watch the rings fill. It is all saved in your browser,
+              with no account needed.
+            </p>
+          </div>
         </div>
 
-        <div className="mt-10 space-y-14">
-          {roadmap.map((phase) => (
-            <div key={phase.id} className="relative pl-12 sm:pl-16">
-              <span
-                aria-hidden
-                className="from-accent/60 absolute top-12 bottom-[-3.5rem] left-[1.15rem] w-px bg-gradient-to-b to-transparent sm:left-[1.4rem]"
-              />
-              <span
-                aria-hidden
-                className="bg-accent absolute top-0 left-0 grid h-10 w-10 place-items-center rounded-xl text-sm font-bold text-white shadow-lg shadow-indigo-500/30 sm:h-12 sm:w-12 sm:text-base dark:text-zinc-950"
+        <div className="mt-12">
+          {roadmap.map((phase) => {
+            const live = phase.modules.filter((m) => {
+              const mod = modules.find((x) => x.slug === m.slug);
+              return m.status === "available" && (mod?.lessons.length ?? 0) > 0;
+            });
+            const soon = phase.modules.filter((m) => !live.includes(m));
+            const phaseLessons = modules
+              .filter((m) => live.some((l) => l.slug === m.slug))
+              .flatMap((m) => m.lessons)
+              .map((l) => ({
+                module: l.module,
+                slug: l.slug,
+                href: l.href,
+                title: l.title,
+              }));
+            return (
+              <div
+                key={phase.id}
+                className="ledger-phase grid gap-x-8 gap-y-6 pt-8 pb-14 lg:grid-cols-12"
               >
-                {phase.id}
-              </span>
-              <div className="reveal">
-                <h3 className="text-xl font-semibold tracking-tight">
-                  Phase {phase.id} · {phase.title}
-                </h3>
-                <p className="text-muted mt-1 mb-5 text-sm">{phase.goal}</p>
-              </div>
-              <ol className="grid gap-4 md:grid-cols-2">
-                {phase.modules.map((m) => {
-                  const mod = modules.find((x) => x.slug === m.slug)!;
-                  const available = m.status === "available" && mod.lessons.length > 0;
-                  const minutes = mod.lessons.reduce((n, l) => n + l.minutes, 0);
-                  return (
-                    <li key={m.slug} className="reveal">
-                      <SpotlightCard
-                        className={`group border-border h-full rounded-2xl border p-5 ${available ? "bg-surface" : "bg-surface/50"}`}
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            {!available && (
-                              <span className="border-border text-muted mb-2 inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase">
-                                Coming soon
-                              </span>
-                            )}
-                            <h4
-                              className={`font-semibold ${available ? "" : "text-foreground/70"}`}
-                            >
-                              {available ? (
+                <div className="lg:col-span-4">
+                  <PhaseNode id={phase.id} lessons={phaseLessons} allLessons={links} />
+                  <h3 className="display-sm mt-4 text-(length:--text-title) leading-tight">
+                    {phase.title}
+                  </h3>
+                  <p className="text-muted mt-2 max-w-[36ch] text-pretty">{phase.goal}</p>
+                </div>
+                <div className="lg:col-span-8">
+                  <ol>
+                    {live.map((m) => {
+                      const mod = modules.find((x) => x.slug === m.slug)!;
+                      const minutes = mod.lessons.reduce((n, l) => n + l.minutes, 0);
+                      return (
+                        <li
+                          key={m.slug}
+                          data-track={m.track}
+                          className="ledger-row group hover:bg-surface-hover relative px-0 py-5 transition-colors duration-150 first:border-t-0 sm:px-4"
+                        >
+                          <div className="flex items-start justify-between gap-6">
+                            <div className="min-w-0">
+                              <h4 className="text-lg font-bold">
                                 <Link
                                   href={`/learn/${m.slug}`}
-                                  className="focus-visible:outline-accent after:absolute after:inset-0 after:rounded-2xl focus-visible:outline-2 focus-visible:outline-offset-2"
+                                  transitionTypes={["nav-forward"]}
+                                  className="decoration-accent group-hover:underline after:absolute after:inset-0"
                                 >
-                                  {m.title}
+                                  <Morph name={`module-${m.slug}`}>
+                                    <span>{m.title}</span>
+                                  </Morph>
                                 </Link>
-                              ) : (
-                                m.title
-                              )}
-                            </h4>
-                            <p className="text-muted mt-1 text-sm text-pretty">
-                              {m.description}
-                            </p>
-                          </div>
-                          {available ? (
+                              </h4>
+                              <p className="text-ink-2 mt-1 max-w-[56ch] text-pretty">
+                                {m.description}
+                              </p>
+                              <p className="text-muted mt-2 text-sm tabular-nums">
+                                {mod.lessons.length} lessons, about {formatTime(minutes)}
+                              </p>
+                            </div>
                             <ProgressRing
                               lessons={mod.lessons}
                               label={`${m.title} progress`}
                             />
-                          ) : null}
-                        </div>
-
-                        {available && (
-                          <>
-                            <div className="text-muted mt-4 flex items-center gap-3 text-xs">
-                              <span>{mod.lessons.length} lessons</span>
-                              <span aria-hidden>·</span>
-                              <span>~{formatTime(minutes)}</span>
-                              <span className="text-accent ml-auto inline-flex items-center gap-1 font-semibold">
-                                Open
-                                <svg
-                                  width="14"
-                                  height="14"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2.4"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  aria-hidden
-                                  className="transition-transform duration-200 group-hover:translate-x-1"
-                                >
-                                  <path d="M5 12h14M13 6l6 6-6 6" />
-                                </svg>
-                              </span>
+                          </div>
+                          <details className="disclose relative z-10 mt-3">
+                            <summary className="text-muted hover:text-foreground inline-flex min-h-9 cursor-pointer items-center gap-1.5 text-sm transition-colors select-none">
+                              Show lessons
+                              <ChevronDownIcon className="chev size-3.5 transition-transform duration-200" />
+                            </summary>
+                            <div className="mt-1 max-w-xl">
+                              <LessonChecklist
+                                lessons={mod.lessons.map((l) => ({
+                                  module: l.module,
+                                  slug: l.slug,
+                                  href: l.href,
+                                  title: l.title,
+                                  label:
+                                    lessonKind(l) === "quiz"
+                                      ? l.title
+                                      : `${l.order}. ${l.title}`,
+                                }))}
+                              />
                             </div>
-                            <details className="border-border relative z-10 mt-4 border-t pt-3">
-                              <summary className="text-muted hover:text-foreground focus-visible:outline-accent flex cursor-pointer items-center justify-between rounded-md text-xs font-medium transition-colors select-none focus-visible:outline-2 focus-visible:outline-offset-2">
-                                Show lessons
-                                <svg
-                                  width="14"
-                                  height="14"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2.4"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  aria-hidden
-                                  className="chev transition-transform duration-200"
-                                >
-                                  <path d="m6 9 6 6 6-6" />
-                                </svg>
-                              </summary>
-                              <div className="mt-2">
-                                <LessonChecklist
-                                  lessons={mod.lessons.map((l) => ({
-                                    module: l.module,
-                                    slug: l.slug,
-                                    href: l.href,
-                                    title: l.title,
-                                    label:
-                                      l.quiz.length > 0
-                                        ? l.title
-                                        : `${l.order}. ${l.title}`,
-                                  }))}
-                                />
-                              </div>
-                            </details>
-                          </>
-                        )}
-                      </SpotlightCard>
-                    </li>
-                  );
-                })}
-              </ol>
-            </div>
-          ))}
+                          </details>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  {soon.length > 0 && (
+                    <p
+                      className={`text-muted flex items-start gap-2 py-5 text-sm sm:px-4 ${live.length > 0 ? "ledger-row" : ""}`}
+                    >
+                      <SoonIcon className="mt-0.5 size-4 shrink-0" />
+                      <span>
+                        {live.length > 0 ? "+" : ""}
+                        {soon.length} {soon.length === 1 ? "module" : "modules"} coming
+                        soon: {soon.map((m) => m.title).join(", ")}
+                      </span>
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </section>
 
-      {/* ---------- Final call to action ---------- */}
+      {/* ---------- Close: the next lesson, on the ink band ---------- */}
       <section
         aria-labelledby="cta"
-        className="reveal relative isolate mb-6 overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-violet-600 to-sky-600 px-6 py-14 text-center text-white sm:px-12"
+        className="bg-foreground text-background mt-(--section-gap-s) mb-6 grid gap-x-8 gap-y-10 px-6 py-12 sm:px-12 sm:py-16 lg:grid-cols-12"
       >
-        <div
-          aria-hidden
-          className="absolute inset-0 -z-10 [background-image:radial-gradient(rgb(255_255_255/0.7)_1px,transparent_1.2px)] [mask-image:radial-gradient(ellipse_at_center,#000,transparent_75%)] [background-size:22px_22px] opacity-30"
-        />
-        <h2
-          id="cta"
-          className="text-3xl font-bold tracking-tight text-balance sm:text-4xl"
-        >
-          Ready to build real things?
-        </h2>
-        <p className="mx-auto mt-3 max-w-xl text-pretty text-white/85">
-          Start at the beginning or jump straight to the module you need. Your progress is
-          saved as you go.
-        </p>
-        <div className="mt-8 flex justify-center">
-          <StartButton lessons={links} variant="light" />
+        <div className="lg:col-span-7">
+          <h2 id="cta" className="section-head">
+            Ready to build real things?
+          </h2>
+          <p className="mt-4 max-w-[46ch] text-[1.0625rem] leading-relaxed text-pretty">
+            Start at the beginning or jump straight to the module you need. Your progress
+            is saved as you go.
+          </p>
+        </div>
+        <div className="border-background/30 grid content-end gap-6 lg:col-span-5 lg:border-l lg:pl-8">
+          <NextLesson lessons={welcomeLessons} />
+          <div>
+            <StartButton
+              lessons={links}
+              startLabel={`Start with ${firstModule?.title ?? "lesson one"}`}
+              variant="light"
+            />
+          </div>
         </div>
       </section>
-    </div>
+    </PageTransition>
   );
 }

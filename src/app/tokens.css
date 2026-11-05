@@ -1,0 +1,260 @@
+/* Design tokens: the only file with colour and font values (DESIGN.md, UI-UX.md §3).
+   Theme: Specimen. Warm oat paper, warm near-black ink, one ink-blue signal.
+   Token names are the project's own; Hallmark roles map onto them:
+   paper = --background, paper-2 = --surface, paper-3 = --surface-2, ink = --foreground,
+   rule = --border, rule-2 = --border-strong, signal = --accent. */
+
+:root {
+  /* Paper and ink */
+  --background: oklch(96.5% 0.016 82);
+  --surface: oklch(94% 0.019 80);
+  --surface-2: oklch(91% 0.022 79);
+  --surface-hover: oklch(93.2% 0.02 80);
+  --raised: oklch(98.2% 0.01 82);
+  --border: oklch(83% 0.018 76);
+  --border-strong: oklch(66% 0.02 72);
+
+  --foreground: oklch(19% 0.012 60);
+  --ink-2: oklch(30% 0.014 60);
+  --muted: oklch(45% 0.014 65);
+  --subtle: oklch(51% 0.014 68);
+
+  /* The one signal: ink blue. Links, focus, the current place, progress. */
+  --accent: oklch(45% 0.18 262);
+  --accent-hover: oklch(39% 0.17 262);
+  --accent-fg: oklch(97% 0.012 82);
+  --accent-soft: color-mix(in oklab, var(--accent) 9%, transparent);
+  --accent-ink: oklch(45% 0.18 262);
+  --ring: oklch(50% 0.18 262);
+  --guide: oklch(55% 0.16 262 / 0.45);
+
+  /* Status */
+  --success: oklch(47% 0.11 150);
+  --warning: oklch(50% 0.11 65);
+  --danger: oklch(50% 0.17 28);
+  --info: oklch(48% 0.1 230);
+
+  /* Tracks: quiet subject inks for wayfinding (rules and small marks only) */
+  --track-foundations: oklch(46% 0.02 70);
+  --track-js: oklch(52% 0.11 82);
+  --track-ts: oklch(48% 0.1 250);
+  --track-react: oklch(48% 0.08 210);
+  --track-node: oklch(48% 0.1 145);
+  --track-db: oklch(50% 0.12 45);
+  --track-next: oklch(28% 0.01 60);
+  --track-prod: oklch(46% 0.1 330);
+  --track-capstone: oklch(45% 0.18 262);
+  --track-interview: oklch(46% 0.12 10);
+  --track: var(--accent);
+
+  /* No gradients: the old brand ramp is now one solid ink. */
+  --brand-gradient: linear-gradient(var(--accent), var(--accent));
+
+  /* Depth is a hairline, not a shadow. Only floating layers (menus, the floating
+     video, the search palette) take a short cast. */
+  --elev-xs: 0 0 0 0 transparent;
+  --elev-sm: 0 0 0 0 transparent;
+  --elev-md: 0 0 0 0 transparent;
+  --elev-lg: 0 0 0 1px oklch(66% 0.02 72), 0 16px 32px -16px oklch(19% 0.012 60 / 0.28);
+  --elev-inset: 0 0 0 0 transparent;
+  --scrim: oklch(19% 0.012 60 / 0.45);
+
+  /* Code: a printed book's few inks on a paper well */
+  --code-bg: oklch(94% 0.019 80);
+  --code-bar: oklch(94% 0.019 80);
+  --shiki-foreground: oklch(22% 0.012 60);
+  --shiki-background: transparent;
+  --shiki-token-constant: oklch(48% 0.13 40);
+  --shiki-token-string: oklch(43% 0.09 150);
+  --shiki-token-comment: oklch(50% 0.014 70);
+  --shiki-token-keyword: oklch(45% 0.17 262);
+  --shiki-token-parameter: oklch(47% 0.1 70);
+  --shiki-token-function: oklch(40% 0.08 220);
+  --shiki-token-string-expression: oklch(43% 0.09 150);
+  --shiki-token-punctuation: oklch(40% 0.014 65);
+  --shiki-token-link: oklch(45% 0.17 262);
+
+  /* Confetti on lesson completion: the track inks */
+  --confetti-1: var(--accent);
+  --confetti-2: var(--track-js);
+  --confetti-3: var(--track-node);
+  --confetti-4: var(--track-db);
+}
+
+.dark {
+  --background: oklch(17.5% 0.01 65);
+  --surface: oklch(21% 0.011 65);
+  --surface-2: oklch(24.5% 0.012 66);
+  --surface-hover: oklch(22.5% 0.012 66);
+  --raised: oklch(20% 0.011 65);
+  --border: oklch(31% 0.012 68);
+  --border-strong: oklch(44% 0.014 70);
+
+  --foreground: oklch(93.5% 0.016 82);
+  --ink-2: oklch(84% 0.016 80);
+  --muted: oklch(74% 0.016 78);
+  --subtle: oklch(65% 0.014 75);
+
+  --accent: oklch(74% 0.12 262);
+  --accent-hover: oklch(80% 0.1 262);
+  --accent-fg: oklch(17.5% 0.01 65);
+  --accent-ink: oklch(45% 0.18 262);
+  --ring: oklch(74% 0.12 262);
+  --guide: oklch(74% 0.12 262 / 0.4);
+
+  --success: oklch(76% 0.12 150);
+  --warning: oklch(80% 0.11 80);
+  --danger: oklch(72% 0.15 28);
+  --info: oklch(76% 0.09 230);
+
+  --track-foundations: oklch(72% 0.02 75);
+  --track-js: oklch(80% 0.11 85);
+  --track-ts: oklch(74% 0.09 250);
+  --track-react: oklch(76% 0.08 210);
+  --track-node: oklch(76% 0.1 145);
+  --track-db: oklch(74% 0.11 50);
+  --track-next: oklch(88% 0.012 80);
+  --track-prod: oklch(74% 0.1 330);
+  --track-capstone: oklch(74% 0.12 262);
+  --track-interview: oklch(74% 0.11 10);
+
+  --elev-lg: 0 0 0 1px oklch(44% 0.014 70);
+  --scrim: oklch(10% 0.008 65 / 0.6);
+
+  --code-bg: oklch(20.5% 0.011 65);
+  --code-bar: oklch(20.5% 0.011 65);
+  --shiki-foreground: oklch(90% 0.014 82);
+  --shiki-token-constant: oklch(80% 0.1 50);
+  --shiki-token-string: oklch(80% 0.1 150);
+  --shiki-token-comment: oklch(64% 0.014 75);
+  --shiki-token-keyword: oklch(78% 0.1 262);
+  --shiki-token-parameter: oklch(84% 0.1 82);
+  --shiki-token-function: oklch(82% 0.07 210);
+  --shiki-token-string-expression: oklch(80% 0.1 150);
+  --shiki-token-punctuation: oklch(74% 0.014 75);
+  --shiki-token-link: oklch(78% 0.1 262);
+}
+
+:root {
+  /* Faces: Bodoni Moda for titles, Atkinson Hyperlegible for reading and code
+     (next/font variables set in layout.tsx) */
+  --face-display: var(--font-bodoni), "Bodoni Moda", Georgia, serif;
+  --face-body:
+    var(--font-atkinson), "Atkinson Hyperlegible Next", ui-sans-serif, system-ui,
+    sans-serif;
+  --face-code:
+    var(--font-atkinson-mono), "Atkinson Hyperlegible Mono", ui-monospace, monospace;
+  --tracking-display: -0.02em;
+  --display-weight: 400;
+  --display-optical: 96;
+
+  /* Type scale (1.25 from 16px) */
+  --text-display: clamp(2.75rem, 4.6vw + 1rem, 5.5rem);
+  --text-display-s: clamp(2.25rem, 3vw + 0.75rem, 3.5rem);
+  --text-section: clamp(2.125rem, 2.2vw + 1rem, 3.25rem);
+  --text-title: clamp(1.25rem, 0.75vw + 0.875rem, 1.625rem);
+  --text-lead: clamp(1.125rem, 0.35vw + 1rem, 1.3125rem);
+
+  /* Space */
+  --space-3xs: 2px;
+  --space-2xs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 40px;
+  --space-2xl: 64px;
+  --space-3xl: 96px;
+  --space-4xl: 144px;
+  --section-gap-s: 96px;
+  --section-gap: 128px;
+  --section-gap-l: 160px;
+
+  /* Shape: square edges, 1px rules */
+  --r-xs: 0;
+  --r-sm: 0;
+  --r-md: 0;
+  --r-lg: 0;
+  --r-xl: 0;
+  --rule-hair: 1px;
+
+  /* Motion: state only */
+  --dur-instant: 80ms;
+  --dur-fast: 120ms;
+  --dur-base: 220ms;
+  --dur-slow: 320ms;
+  --dur-slower: 420ms;
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long: 420ms;
+
+  /* Layers */
+  --z-sticky-nav: 40;
+  --z-float: 45;
+  --z-modal: 60;
+  --z-toast: 70;
+
+  /* Reading */
+  --prose-measure: 38rem; /* about 68 characters of Atkinson Hyperlegible at 17px */
+  --breakout: 52rem;
+  --header-h: 3.75rem;
+}
+@media (max-width: 60rem) {
+  :root {
+    --section-gap-s: 72px;
+    --section-gap: 96px;
+    --section-gap-l: 120px;
+  }
+}
+@media (max-width: 40rem) {
+  :root {
+    --section-gap-s: 56px;
+    --section-gap: 72px;
+    --section-gap-l: 96px;
+  }
+}
+
+/* Easing tokens double as Tailwind's ease-* utilities. No overshoot anywhere:
+   --ease-spring keeps its name for existing components but settles like ease-out. */
+@theme {
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Square corners everywhere; rounded-full stays for circles (rings, dots). */
+  --radius-xs: 0;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+  --radius-4xl: 0;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-hover: var(--surface-hover);
+  --color-raised: var(--raised);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --color-track: var(--track);
+  --color-scrim: var(--scrim);
+  --font-sans: var(--face-body);
+  --font-mono: var(--face-code);
+  --font-display: var(--face-display);
+}
