@@ -1,13 +1,17 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { CheckIcon, CopyIcon } from "./course/icons";
+import { CheckIcon, CodeIcon, CopyIcon, TerminalIcon } from "./course/icons";
 
-/** `<pre>` replacement for MDX code blocks: window bar with language label and copy button. */
+/** `<pre>` replacement for MDX code blocks: file name, language label and copy button. */
 export function CodePre(props: React.ComponentProps<"pre">) {
   const ref = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
-  const language = (props as Record<string, unknown>)["data-language"];
+  const data = props as Record<string, unknown>;
+  const language = typeof data["data-language"] === "string" ? data["data-language"] : "";
+  const filename = typeof data["data-filename"] === "string" ? data["data-filename"] : "";
+  const kind = typeof data["data-kind"] === "string" ? data["data-kind"] : "code";
+  const isOutput = kind === "output";
 
   async function copy() {
     const text = ref.current?.textContent ?? "";
@@ -20,30 +24,34 @@ export function CodePre(props: React.ComponentProps<"pre">) {
     }
   }
 
+  const label = filename || (isOutput ? "Output" : kind === "shell" ? "Terminal" : "");
+  const Icon = isOutput || kind === "shell" ? TerminalIcon : CodeIcon;
+
   return (
-    <div className="codeblock">
+    <div className="codeblock" data-kind={kind}>
       <div className="codeblock-bar">
-        <span className="codeblock-dots" aria-hidden>
-          <i />
-          <i />
-          <i />
-        </span>
-        {typeof language === "string" && language && (
+        {label && (
+          <span className="codeblock-file">
+            <Icon className="text-subtle size-3.5 shrink-0" />
+            <span>{label}</span>
+          </span>
+        )}
+        {language && !["text", "txt", "plaintext"].includes(language) && (
           <span className="codeblock-lang">{language}</span>
         )}
         <button
           type="button"
           onClick={copy}
-          aria-label="Copy code"
+          aria-label={copied ? "Copied" : "Copy code"}
           data-copied={copied}
-          className="codeblock-copy focus-visible:outline-accent focus-visible:outline-2"
+          className={`codeblock-copy ${language && !["text", "txt", "plaintext"].includes(language) ? "" : "ml-auto"}`}
         >
           {copied ? (
             <CheckIcon className="size-3.5" />
           ) : (
             <CopyIcon className="size-3.5" />
           )}
-          <span aria-live="polite">{copied ? "Copied!" : "Copy"}</span>
+          <span aria-live="polite">{copied ? "Copied" : "Copy"}</span>
         </button>
       </div>
       <pre ref={ref} {...props} />

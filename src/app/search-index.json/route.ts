@@ -17,6 +17,7 @@ export function GET() {
     title: l.title,
     summary: l.summary,
     module: getModule(l.module)?.title ?? l.module,
+    track: getModule(l.module)?.track ?? "foundations",
     href: l.href,
     headings: l.headings.map((h) => h.text),
     text: plainText(l.body),

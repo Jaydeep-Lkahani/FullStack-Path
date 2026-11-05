@@ -29,7 +29,7 @@ export function ReadingProgress() {
   }, []);
 
   return (
-    <div aria-hidden className="pointer-events-none fixed inset-x-0 top-14 z-40 h-[3px]">
+    <div aria-hidden className="pointer-events-none fixed inset-x-0 top-14 z-40 h-[2px]">
       <div ref={bar} className="read-progress h-full origin-left" />
     </div>
   );

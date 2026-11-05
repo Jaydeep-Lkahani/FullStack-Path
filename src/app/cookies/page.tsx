@@ -19,9 +19,9 @@ export default function CookiesPage() {
         <ul className="list-disc space-y-1 pl-5">
           <li>{SITE_NAME} does not set any cookies of its own.</li>
           <li>
-            It saves your progress, quiz scores, theme and policy acceptance in your
-            browser’s local storage so the Site works as you expect. Nothing in it is sent
-            to us.
+            It saves your progress, quiz scores, recent lessons, theme and policy
+            acceptance in your browser’s local storage so the Site works as you expect.
+            Nothing in it is sent to us.
           </li>
           <li>
             YouTube may set cookies only after you choose to play a video. There are no
@@ -68,6 +68,30 @@ export default function CookiesPage() {
             </td>
             <td>Local storage</td>
             <td>Remembers your quiz scores</td>
+            <td>Until you clear it</td>
+          </tr>
+          <tr>
+            <td>
+              <code>fs-learn-last-v1</code>
+            </td>
+            <td>Local storage</td>
+            <td>Remembers the last few lessons you opened, for “Resume”</td>
+            <td>Until you clear it</td>
+          </tr>
+          <tr>
+            <td>
+              <code>fs-learn-checklist-v1</code>
+            </td>
+            <td>Local storage</td>
+            <td>Remembers the “Ready to move on?” items you ticked</td>
+            <td>Until you clear it</td>
+          </tr>
+          <tr>
+            <td>
+              <code>fs-learn-sidebar-v1</code>
+            </td>
+            <td>Local storage</td>
+            <td>Remembers which sidebar sections you collapsed</td>
             <td>Until you clear it</td>
           </tr>
           <tr>
@@ -127,14 +151,14 @@ export default function CookiesPage() {
         </tbody>
       </table>
 
-      <h2>4. The acceptance popup</h2>
+      <h2>4. The policy notice</h2>
       <p>
-        Before you open a lesson, the Site asks you to accept the Terms and Conditions,
-        the Privacy Policy and this Cookie Policy. Lessons stay hidden until you do. This
-        popup is not an advertising or analytics consent banner, because the Site uses no
-        non-essential cookies. Third-party cookies appear only after you act by clicking
-        play on a video. If you clear your browser’s data, or if these policies change,
-        you will be asked again.
+        On your first visit, a small notice at the bottom of the page links to the Terms
+        and Conditions, the Privacy Policy and this Cookie Policy. Clicking “OK” hides it
+        and records which version you saw. This notice is not an advertising or analytics
+        consent banner, because the Site uses no non-essential cookies. Third-party
+        cookies appear only after you act by clicking play on a video. If you clear your
+        browser’s data, or if these policies change, you will be asked again.
       </p>
 
       <h2>5. How to control or delete stored data</h2>

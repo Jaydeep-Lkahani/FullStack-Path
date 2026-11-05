@@ -1,8 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronDownIcon, ListIcon } from "@/components/course/icons";
-import type { Heading } from "@/lib/content";
+import {
+  ArrowUpIcon,
+  ChevronDownIcon,
+  CloseIcon,
+  ExternalLinkIcon,
+  ListIcon,
+} from "@/components/course/icons";
+import type { DocLink, Heading } from "@/lib/content";
 
 /** Id of the section being read: the last heading that has scrolled past the header. */
 function useActiveHeading(headings: Heading[]) {
@@ -56,7 +62,7 @@ function TocList({
               href={`#${h.id}`}
               onClick={onNavigate}
               aria-current={on ? "location" : undefined}
-              className={`toc-link block rounded-md py-1 pr-2 leading-snug transition-colors duration-200 ${
+              className={`toc-link block rounded-md py-1 pr-2 leading-snug transition-colors duration-200 pointer-coarse:py-2.5 ${
                 h.depth === 3 ? "pl-7 text-[0.8rem]" : "pl-4"
               } ${on ? "toc-on text-accent font-medium" : "text-muted hover:text-foreground"}`}
             >
@@ -70,17 +76,65 @@ function TocList({
 }
 
 /** Desktop: sticky "On this page" column that highlights the section being read. */
-export function LessonToc({ headings }: { headings: Heading[] }) {
+export function LessonToc({
+  headings,
+  docs = [],
+}: {
+  headings: Heading[];
+  docs?: DocLink[];
+}) {
   const active = useActiveHeading(headings);
+  const index = headings.findIndex((h) => h.id === active);
+  const progress = headings.length > 1 ? Math.max(0, index) / (headings.length - 1) : 1;
   return (
-    <aside className="sticky top-24 hidden h-fit w-56 shrink-0 xl:block 2xl:w-64">
-      <p className="text-muted mb-3 flex items-center gap-2 text-xs font-semibold tracking-wider uppercase">
+    <aside
+      data-shortcut="toc"
+      className="sticky top-24 hidden max-h-[calc(100vh-7rem)] w-56 shrink-0 overflow-y-auto pb-6 xl:block 2xl:w-64"
+    >
+      <p className="text-muted kicker mb-3 flex items-center gap-2">
         <ListIcon className="size-3.5" />
         On this page
       </p>
-      <div className="border-border border-l">
+      <div className="border-border relative border-l">
+        <span
+          aria-hidden
+          className="toc-track transition-transform duration-300 ease-out"
+          style={{ "--p": index < 0 ? 0 : progress } as React.CSSProperties}
+        />
         <TocList headings={headings} active={active} />
       </div>
+      <a
+        href="#main"
+        onClick={(e) => {
+          e.preventDefault();
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }}
+        className="text-muted hover:text-foreground mt-4 inline-flex items-center gap-1.5 rounded-md px-1 text-xs font-medium transition-colors"
+      >
+        <ArrowUpIcon className="size-3.5" />
+        Back to top
+      </a>
+      {docs.length > 0 && (
+        <div className="border-border mt-6 border-t pt-5">
+          <p className="text-muted kicker mb-2">Go deeper</p>
+          <ul className="space-y-1 text-sm">
+            {docs.map((d) => (
+              <li key={d.url}>
+                <a
+                  href={d.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-muted hover:text-accent group flex items-start gap-1.5 rounded-md py-1 leading-snug transition-colors"
+                >
+                  <span>{d.title}</span>
+                  <ExternalLinkIcon className="mt-0.5 size-3.5 shrink-0 opacity-60 transition-transform duration-150 group-hover:translate-x-px group-hover:-translate-y-px" />
+                  <span className="sr-only"> (opens in a new tab)</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </aside>
   );
 }
@@ -131,15 +185,16 @@ export function LessonTocSheet({ headings }: { headings: Heading[] }) {
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
         aria-expanded={open}
+        data-shortcut="toc"
         tabIndex={visible ? 0 : -1}
-        className={`toc-fab focus-visible:outline-accent fixed right-4 bottom-5 z-30 inline-flex max-w-[calc(100vw-2rem)] cursor-pointer items-center gap-2 rounded-full py-2.5 pr-4 pl-3.5 text-sm font-semibold transition duration-300 focus-visible:outline-2 focus-visible:outline-offset-2 active:scale-95 ${
+        className={`toc-fab fixed right-4 bottom-5 z-30 inline-flex min-h-11 max-w-[calc(100vw-2rem)] cursor-pointer items-center gap-2 rounded-full py-2 pr-4 pl-3.5 text-sm font-semibold active:scale-95 ${
           visible
             ? "translate-y-0 opacity-100"
             : "pointer-events-none translate-y-4 opacity-0"
         }`}
       >
-        <ListIcon className="size-4 shrink-0" />
-        <span className="truncate">{current ? current.text : "Contents"}</span>
+        <ListIcon className="text-accent size-4 shrink-0" />
+        <span className="truncate">{current ? current.text : "On this page"}</span>
         <ChevronDownIcon className="size-4 shrink-0 rotate-180 opacity-70" />
       </button>
 
@@ -156,7 +211,7 @@ export function LessonTocSheet({ headings }: { headings: Heading[] }) {
           />
           <div
             ref={panel}
-            className="sheet-panel border-border bg-background absolute inset-x-0 bottom-0 flex max-h-[78vh] flex-col rounded-t-3xl border-t shadow-2xl"
+            className="sheet-panel border-border bg-background absolute inset-x-0 bottom-0 flex max-h-[78vh] flex-col rounded-t-3xl border-t shadow-[var(--elev-lg)]"
           >
             <div className="mx-auto mt-2.5 h-1 w-10 shrink-0 rounded-full bg-[var(--border)]" />
             <div className="flex items-center justify-between px-5 pt-3 pb-2">
@@ -168,9 +223,10 @@ export function LessonTocSheet({ headings }: { headings: Heading[] }) {
                 ref={closeBtn}
                 type="button"
                 onClick={() => setOpen(false)}
-                className="border-border text-muted hover:text-foreground focus-visible:outline-accent cursor-pointer rounded-lg border px-3 py-1.5 text-xs font-medium focus-visible:outline-2"
+                aria-label="Close contents"
+                className="text-muted hover:bg-surface-hover hover:text-foreground grid size-11 cursor-pointer place-items-center rounded-lg"
               >
-                Close
+                <CloseIcon className="size-5" />
               </button>
             </div>
             <div className="overflow-y-auto px-3 pt-1 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
