@@ -12,11 +12,15 @@ import {
   useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
+import { useRecent } from "@/lib/recent";
+import { BookOpenIcon, ResumeIcon, SearchIcon } from "./course/icons";
+import { Kbd } from "./ui/Kbd";
 
 interface SearchEntry {
   title: string;
   summary: string;
   module: string;
+  track: string;
   href: string;
   headings: string[];
   text: string;
@@ -64,12 +68,10 @@ function snippet(entry: SearchEntry, query: string) {
   return `${start > 0 ? "…" : ""}${entry.text.slice(start, end)}${end < entry.text.length ? "…" : ""}`;
 }
 
-function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="border-border bg-surface text-muted rounded border px-1.5 py-0.5 font-mono text-[10px] leading-none">
-      {children}
-    </kbd>
-  );
+/** The first section heading that contains a query word ("in § Hoisting"). */
+function matchedHeading(entry: SearchEntry, query: string) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return entry.headings.find((h) => words.some((w) => h.toLowerCase().includes(w)));
 }
 
 export function Search() {
@@ -82,6 +84,7 @@ export function Search() {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const recent = useRecent();
   const isMac = useSyncExternalStore(
     subscribe,
     () => /Mac|iPhone|iPad/.test(navigator.platform),
@@ -104,8 +107,13 @@ export function Search() {
         close();
       }
     };
+    const onOpen = () => setOpen(true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("fs:open-search", onOpen);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("fs:open-search", onOpen);
+    };
   }, [open, close]);
 
   useEffect(() => {
@@ -146,8 +154,11 @@ export function Search() {
   );
 
   const trimmed = query.trim();
-  const results =
+  const ranked =
     fuse && trimmed ? fuse.search(trimmed, { limit: 8 }).map((r) => r.item) : [];
+  // Group by module, keeping modules in order of their best match.
+  const moduleOrder = [...new Set(ranked.map((r) => r.module))];
+  const results = moduleOrder.flatMap((m) => ranked.filter((r) => r.module === m));
   const modules = entries ? [...new Set(entries.map((e) => e.module))] : [];
   const current = Math.min(active, Math.max(results.length - 1, 0));
 
@@ -184,25 +195,12 @@ export function Search() {
       role="dialog"
       aria-modal="true"
       aria-label="Search lessons"
-      className="palette-backdrop fixed inset-0 z-[60] flex items-start justify-center bg-black/55 p-3 pt-[8vh] backdrop-blur-sm sm:p-4 sm:pt-[12vh]"
+      className="palette-backdrop fixed inset-0 z-60 flex items-start justify-center bg-black/55 p-3 pt-[8vh] backdrop-blur-sm sm:p-4 sm:pt-[12vh]"
       onMouseDown={(e) => e.target === e.currentTarget && close()}
     >
-      <div className="palette-panel border-border bg-background ring-accent/10 flex max-h-[75vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border shadow-2xl ring-4">
+      <div className="palette-panel border-border bg-raised flex max-h-[75vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border shadow-[var(--elev-lg)]">
         <div className="border-border flex items-center gap-3 border-b px-4">
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            aria-hidden
-            className="text-accent shrink-0"
-          >
-            <circle cx="11" cy="11" r="7" />
-            <path d="m20 20-3.5-3.5" />
-          </svg>
+          <SearchIcon className="text-accent size-[18px] shrink-0" />
           <input
             ref={inputRef}
             value={query}
@@ -219,7 +217,7 @@ export function Search() {
             autoComplete="off"
             spellCheck={false}
             placeholder="Search lessons and topics…"
-            className="placeholder:text-muted/70 h-14 w-full bg-transparent text-base outline-none"
+            className="placeholder:text-subtle h-14 w-full bg-transparent text-base outline-none focus-visible:outline-none"
           />
           {query ? (
             <button
@@ -255,17 +253,43 @@ export function Search() {
 
           {entries && !trimmed && (
             <div className="space-y-5 p-3">
+              {recent.length > 0 && (
+                <section>
+                  <h3 className="text-muted kicker mb-2">Continue where you left off</h3>
+                  <ul className="space-y-0.5">
+                    {recent.slice(0, 4).map((r, i) => (
+                      <li
+                        key={r.href}
+                        className="palette-item"
+                        style={{ "--i": i } as React.CSSProperties}
+                      >
+                        <Link
+                          href={r.href}
+                          onClick={close}
+                          className="hover:bg-surface-hover group flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors"
+                        >
+                          <ResumeIcon className="text-subtle group-hover:text-accent size-4 shrink-0" />
+                          <span className="min-w-0 flex-1 truncate font-medium">
+                            {r.title}
+                          </span>
+                          <span className="text-muted shrink-0 text-xs">
+                            {r.moduleTitle}
+                          </span>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
               <section>
-                <h3 className="text-muted mb-2 text-[11px] font-semibold tracking-wider uppercase">
-                  Try searching for
-                </h3>
+                <h3 className="text-muted kicker mb-2">Try searching for</h3>
                 <div className="flex flex-wrap gap-2">
                   {TOPIC_IDEAS.map((t) => (
                     <button
                       key={t}
                       type="button"
                       onClick={() => pick(t)}
-                      className="border-border bg-surface hover:border-accent/60 hover:bg-surface-hover rounded-full border px-3 py-1.5 text-sm transition duration-150 active:scale-95"
+                      className="border-border bg-surface hover:border-accent/60 hover:bg-surface-hover min-h-9 cursor-pointer rounded-full border px-3 py-1.5 text-sm transition duration-150 active:scale-95"
                     >
                       {t}
                     </button>
@@ -273,24 +297,18 @@ export function Search() {
                 </div>
               </section>
               <section>
-                <h3 className="text-muted mb-2 text-[11px] font-semibold tracking-wider uppercase">
-                  Browse by module
-                </h3>
+                <h3 className="text-muted kicker mb-2">Browse by module</h3>
                 <div className="grid gap-1.5 sm:grid-cols-2">
                   {modules.map((m) => (
                     <button
                       key={m}
                       type="button"
                       onClick={() => pick(m)}
-                      className="hover:bg-surface-hover group flex items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors"
+                      data-track={entries.find((e) => e.module === m)?.track}
+                      className="hover:bg-surface-hover group flex min-h-10 cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition-colors"
                     >
-                      <span>{m}</span>
-                      <span
-                        aria-hidden
-                        className="text-accent opacity-0 transition duration-150 group-hover:translate-x-0.5 group-hover:opacity-100"
-                      >
-                        →
-                      </span>
+                      <span className="track-dot" aria-hidden />
+                      <span className="flex-1">{m}</span>
                     </button>
                   ))}
                 </div>
@@ -309,70 +327,75 @@ export function Search() {
 
           {results.length > 0 && (
             <ul id="search-results" role="listbox" aria-label="Lessons" ref={listRef}>
-              {results.map((item, i) => (
-                <li
-                  key={item.href}
-                  id={`search-opt-${i}`}
-                  role="option"
-                  aria-selected={i === current}
-                  data-index={i}
-                  onMouseMove={() => i !== current && setActive(i)}
-                >
-                  <Link
-                    href={item.href}
-                    onClick={close}
-                    tabIndex={-1}
-                    className={`flex items-start gap-3 rounded-lg px-3 py-2.5 transition-colors ${
-                      i === current ? "bg-accent/10" : ""
-                    }`}
+              {results.map((item, i) => {
+                const heading = matchedHeading(item, trimmed);
+                const groupStart = i === 0 || results[i - 1].module !== item.module;
+                return (
+                  <li
+                    key={item.href}
+                    id={`search-opt-${i}`}
+                    role="option"
+                    aria-selected={i === current}
+                    data-index={i}
+                    data-track={item.track}
+                    className="palette-item"
+                    style={{ "--i": i } as React.CSSProperties}
+                    onMouseMove={() => i !== current && setActive(i)}
                   >
-                    <span
-                      aria-hidden
-                      className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors ${
-                        i === current
-                          ? "bg-accent text-white dark:text-zinc-950"
-                          : "bg-surface-hover text-muted"
+                    {groupStart && (
+                      <p
+                        aria-hidden
+                        className="text-muted kicker flex items-center gap-2 px-3 pt-3 pb-1.5"
+                      >
+                        <span className="track-dot" />
+                        {item.module}
+                      </p>
+                    )}
+                    <Link
+                      href={item.href}
+                      onClick={close}
+                      tabIndex={-1}
+                      className={`flex items-start gap-3 rounded-lg px-3 py-2.5 transition-colors ${
+                        i === current ? "bg-accent/10" : ""
                       }`}
                     >
-                      <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
+                      <span
+                        aria-hidden
+                        className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors ${
+                          i === current
+                            ? "bg-accent text-accent-fg"
+                            : "bg-surface-2 text-muted"
+                        }`}
                       >
-                        <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5zM4 21.5V5.5M8 7h8M8 11h6" />
-                      </svg>
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-2">
-                        <span className="truncate text-sm font-medium">
+                        <BookOpenIcon className="size-4" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium">
                           <Highlight text={item.title} query={trimmed} />
                         </span>
-                        <span className="border-border text-muted shrink-0 rounded-full border px-2 py-px text-[10px]">
-                          {item.module}
+                        {heading && (
+                          <span className="text-accent mt-0.5 block truncate text-xs font-medium">
+                            in § <Highlight text={heading} query={trimmed} />
+                          </span>
+                        )}
+                        <span className="text-muted mt-0.5 line-clamp-2 block text-xs">
+                          <Highlight text={snippet(item, trimmed)} query={trimmed} />
                         </span>
                       </span>
-                      <span className="text-muted mt-0.5 line-clamp-2 block text-xs">
-                        <Highlight text={snippet(item, trimmed)} query={trimmed} />
+                      <span
+                        aria-hidden
+                        className={`text-accent self-center text-sm transition ${
+                          i === current
+                            ? "translate-x-0 opacity-100"
+                            : "-translate-x-1 opacity-0"
+                        }`}
+                      >
+                        ↵
                       </span>
-                    </span>
-                    <span
-                      aria-hidden
-                      className={`text-accent self-center text-sm transition ${
-                        i === current
-                          ? "translate-x-0 opacity-100"
-                          : "-translate-x-1 opacity-0"
-                      }`}
-                    >
-                      ↵
-                    </span>
-                  </Link>
-                </li>
-              ))}
+                    </Link>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
@@ -380,13 +403,13 @@ export function Search() {
         <div className="border-border bg-surface text-muted flex items-center gap-4 border-t px-4 py-2.5 text-xs">
           <span className="hidden items-center gap-1.5 sm:inline-flex">
             <Kbd>↑</Kbd>
-            <Kbd>↓</Kbd> navigate
+            <Kbd>↓</Kbd> to move
           </span>
           <span className="hidden items-center gap-1.5 sm:inline-flex">
-            <Kbd>↵</Kbd> open
+            <Kbd>↵</Kbd> to open
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <Kbd>Esc</Kbd> close
+            <Kbd>Esc</Kbd> to close
           </span>
           {results.length > 0 && (
             <span className="ml-auto" aria-live="polite">
@@ -406,26 +429,16 @@ export function Search() {
         onClick={() => setOpen(true)}
         aria-label="Search lessons"
         aria-haspopup="dialog"
-        className="border-border bg-surface/60 text-muted hover:border-accent/50 hover:bg-surface-hover hover:text-foreground focus-visible:outline-accent group inline-flex h-10 w-10 items-center justify-center gap-2 rounded-lg border text-sm transition duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 active:scale-95 sm:w-60 sm:justify-start sm:px-3"
+        aria-keyshortcuts={isMac ? "Meta+K" : "Control+K"}
+        className="border-border bg-raised text-muted hover:border-border-strong hover:bg-surface-hover hover:text-foreground group inline-flex size-10 shrink-0 cursor-pointer items-center justify-center gap-2 rounded-lg border text-sm transition duration-150 active:scale-95 md:w-56 md:justify-start md:px-3 pointer-coarse:size-11"
       >
-        <svg
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          aria-hidden
-          className="shrink-0 transition-transform duration-200 group-hover:scale-110"
-        >
-          <circle cx="11" cy="11" r="7" />
-          <path d="m20 20-3.5-3.5" />
-        </svg>
-        <span className="hidden sm:inline">Search lessons…</span>
-        <span className="ml-auto hidden items-center gap-1 sm:inline-flex">
-          <Kbd>{isMac ? "⌘" : "Ctrl"}</Kbd>
-          <Kbd>K</Kbd>
+        <SearchIcon className="size-4 shrink-0" />
+        <span className="hidden md:inline">Search lessons…</span>
+        <span aria-hidden className="ml-auto hidden md:inline-flex">
+          <Kbd>
+            {isMac ? <span className="text-xs">⌘</span> : "Ctrl"}
+            <span>K</span>
+          </Kbd>
         </span>
       </button>
 

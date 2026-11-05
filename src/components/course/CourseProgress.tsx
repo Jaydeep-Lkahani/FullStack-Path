@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { ProgressRing, useLessonProgress } from "@/components/home/ProgressRing";
-import { lessonKey, useCompleted } from "@/lib/progress";
+import { ProgressRing } from "@/components/home/ProgressRing";
+import { useResume } from "@/lib/resume";
+import { buttonClass } from "@/components/ui/button";
 import { ArrowRightIcon, PlayIcon, RotateCcwIcon } from "./icons";
 
 export interface CourseLessonRef {
@@ -12,57 +13,52 @@ export interface CourseLessonRef {
   title: string;
 }
 
-/** Progress ring, a status line and a Start / Continue / Review button for a course. */
+/** Module header progress: 72px ring, status line and Start / Continue / Review. */
 export function CourseProgress({ lessons }: { lessons: CourseLessonRef[] }) {
-  const completed = useCompleted();
-  const { done, total, pct } = useLessonProgress(lessons);
-  const next = lessons.find((l) => !completed.has(lessonKey(l.module, l.slug)));
-  const first = lessons[0];
-  const target = next ?? first;
-
-  const finished = total > 0 && done === total;
-  const started = done > 0;
-  const status = finished
-    ? "Course complete. Nice work!"
+  const { target, doneCount, allDone } = useResume(lessons);
+  const total = lessons.length;
+  const started = doneCount > 0;
+  const status = allDone
+    ? "Module complete. Nice work!"
     : started
-      ? `${total - done} left to go`
+      ? `${total - doneCount} left to go`
       : "Not started yet";
 
   return (
-    <div className="border-border flex flex-col gap-4 border-t pt-5 sm:flex-row sm:items-center">
+    <div className="border-border flex flex-col gap-5 border-t pt-6 sm:flex-row sm:items-center">
       <div className="flex min-w-0 flex-1 items-center gap-4">
-        <ProgressRing lessons={lessons} size={64} stroke={6} label="Course progress" />
+        <ProgressRing lessons={lessons} size={72} stroke={6} label="Module progress" />
         <div className="min-w-0">
           <p className="font-semibold tabular-nums">
-            {done} of {total} lessons complete
+            {doneCount} of {total} complete
           </p>
           <p
-            className={`text-sm ${finished ? "text-success font-medium" : "text-muted"}`}
+            className={`text-sm ${allDone ? "text-success font-medium" : "text-muted"}`}
             aria-live="polite"
           >
             {status}
           </p>
-          <div className="sr-only">{pct}% complete</div>
         </div>
       </div>
       {target && (
         <Link
           href={target.href}
-          className="group shine bg-accent text-background focus-visible:outline-accent inline-flex min-h-11 items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-sm font-semibold shadow-sm transition-[transform,box-shadow] duration-200 hover:-translate-y-0.5 hover:shadow-lg focus-visible:outline-2 focus-visible:outline-offset-2 active:translate-y-0 sm:max-w-xs"
+          transitionTypes={["nav-forward"]}
+          className={buttonClass("primary", "md", "group max-w-full sm:max-w-sm")}
         >
-          {finished ? (
+          {allDone ? (
             <RotateCcwIcon className="size-4 shrink-0" />
           ) : (
             <PlayIcon className="size-4 shrink-0" />
           )}
           <span className="truncate">
-            {finished
+            {allDone
               ? "Review from the start"
               : started
-                ? "Continue learning"
-                : "Start learning"}
+                ? `Continue: ${target.title}`
+                : "Start module"}
           </span>
-          <ArrowRightIcon className="size-4 shrink-0 transition-transform duration-200 group-hover:translate-x-0.5" />
+          <ArrowRightIcon className="size-4 shrink-0 transition-transform duration-150 group-hover:translate-x-[3px]" />
         </Link>
       )}
     </div>

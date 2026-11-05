@@ -1,0 +1,31 @@
+[
+ {
+  "mode": "redesign",
+  "depth": "full",
+  "scope": "site",
+  "shape": "Workbench",
+  "theme": "specimen",
+  "axes": "light/high-contrast-serif/cool",
+  "hero": "Settled",
+  "nav": "search-led bar",
+  "footer": "colophon block",
+  "imagery": "screenshots 8 (light and dark), product live in hero",
+  "photos": [],
+  "entry": "none",
+  "fingerprint": "settled-code/switcher-captures/rows-spec/index-ledger/ink-band",
+  "sections": [
+   "hero: loop-trap runner",
+   "switcher: lesson parts",
+   "rows: spec sheet",
+   "index: roadmap ledger",
+   "band: next lesson"
+  ],
+  "signature": "the lesson loop-trap code run in place",
+  "waived": [
+   "39b",
+   "77"
+  ],
+  "prompt": "free self-study programming course, quiet bookish code-first",
+  "date": "2026-11-05"
+ }
+]

@@ -99,6 +99,24 @@ export default function PrivacyPage() {
           </tr>
           <tr>
             <td>
+              <code>fs-learn-last-v1</code>
+            </td>
+            <td>The last few lessons you opened, so the Site can offer “Resume”</td>
+          </tr>
+          <tr>
+            <td>
+              <code>fs-learn-checklist-v1</code>
+            </td>
+            <td>Which “Ready to move on?” checklist items you ticked</td>
+          </tr>
+          <tr>
+            <td>
+              <code>fs-learn-sidebar-v1</code>
+            </td>
+            <td>Which sidebar sections you collapsed</td>
+          </tr>
+          <tr>
+            <td>
               <code>theme</code>
             </td>
             <td>Light, dark or system theme</td>
@@ -108,8 +126,8 @@ export default function PrivacyPage() {
               <code>fs-learn-consent-v1</code>
             </td>
             <td>
-              That you accepted these policies, which version, and when, so we do not ask
-              again
+              That you saw and accepted these policies, which version, and when, so we do
+              not show the notice again
             </td>
           </tr>
         </tbody>

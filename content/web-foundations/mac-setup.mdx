@@ -1,0 +1,400 @@
+---
+title: Set Up Your Mac
+summary: "Install and check everything this course needs on a Mac: the Command Line Tools, Homebrew, Node with nvm, Git with SSH, and VS Code."
+order: 2
+takeaways:
+  - The Xcode Command Line Tools give you Git and the compilers that some npm packages need, and you never need the full Xcode for web work.
+  - Homebrew installs developer tools with one command, and on Apple Silicon it lives in /opt/homebrew, which your ~/.zprofile must put on the PATH.
+  - The PATH is an ordered list of folders, the first match wins, and which -a shows every copy of a command in that order.
+  - Install Node with nvm, pin the course version with nvm alias default 24, and put a .nvmrc file in each project.
+  - On a Mac, save your SSH key in the Keychain and ignore .DS_Store files globally so they never reach a commit.
+  - When a port is busy, lsof -i shows who holds it, and macOS itself uses ports 5000 and 7000 for AirPlay Receiver.
+videos:
+  - title: "Homebrew on macOS: How to Install & Use (Full Guide 2026)"
+    channel: "Easy Tech Steps"
+    duration: "7:43"
+    url: https://www.youtube.com/watch?v=ODVaw70G0ko
+  - title: "How to Install and Use NVM (Node Version Manager) on Mac & Linux"
+    channel: "Coding With Adam"
+    duration: "12:04"
+    url: https://www.youtube.com/watch?v=GNJzGcLlFtY
+  - title: "Set up a Mac for Power Users and Developers"
+    channel: "Syntax"
+    duration: "60:33"
+    url: https://www.youtube.com/watch?v=GK7zLYAXdDs
+docs:
+  - title: "Homebrew — Installation"
+    url: https://docs.brew.sh/Installation
+  - title: "nvm — README"
+    url: https://github.com/nvm-sh/nvm#readme
+  - title: "GitHub — Generating a new SSH key and adding it to the ssh-agent"
+    url: https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent
+  - title: "VS Code — Visual Studio Code on macOS"
+    url: https://code.visualstudio.com/docs/setup/mac
+---
+
+Every later lesson assumes you can open a terminal and type `node`, `npm`, `git` and `brew`. When one of them is missing, or when two copies of Node fight each other, you get errors that look like code bugs but are really setup problems. Spending an hour here saves you many confused evenings later. Teams also expect you to set up a new laptop by yourself on your first day.
+
+This lesson is written for a Mac with Apple Silicon (M1 to M4) on macOS 26, with Homebrew 7, nvm 0.40 and Node 24. The outputs below come from a real MacBook Air M2, so yours will show your own username and versions. That Mac already had Homebrew and nvm, so their two installer commands follow the official instructions (read in November 2026) and were not re-run. On an older Intel Mac everything works the same, but Homebrew lives in `/usr/local` instead of `/opt/homebrew`. You'll paste commands without understanding all of them yet; the next lesson, `terminal-git-npm`, explains the terminal properly.
+
+## Open the terminal and check your Mac
+
+Press `Cmd+Space`, type **Terminal** and press Return. The window runs **zsh**, the default shell on macOS. One command tells you which chip you have:
+
+```bash
+uname -m
+```
+
+```text
+arm64
+```
+
+`arm64` means Apple Silicon. `x86_64` means an Intel Mac, **or** a Terminal running through Rosetta, Apple's tool that runs Intel programs on Apple Silicon.
+
+**The common mistake:** an Apple Silicon Mac that prints `x86_64`. Homebrew then installs Intel versions into `/usr/local`, and things break in odd ways later. Fix it in Finder: Applications → Utilities → right-click Terminal → **Get Info** → untick **Open using Rosetta**, then open a new window.
+
+## The Xcode Command Line Tools
+
+Apple doesn't ship developer tools by default. The **Command Line Tools** are a package of about 1.3 GB with `git`, `make` and the C compilers that some npm packages use when they install. You don't need the full Xcode app (over 10 GB), which is for iPhone and Mac apps.
+
+```bash
+xcode-select --install
+```
+
+A dialog asks to install the tools; click **Install** and wait a few minutes. Then check:
+
+```bash
+xcode-select -p
+git --version
+```
+
+```text
+/Library/Developer/CommandLineTools
+git version 2.54.0 (Apple Git-157)
+```
+
+If the tools are already there, `xcode-select --install` says `Command line tools are already installed` and does nothing.
+
+**The common mistake:** after a big macOS update, `git` stops with `xcrun: error: invalid active developer path`. The update removed the tools. Run `xcode-select --install` again.
+
+## Homebrew: one command for every tool
+
+**Homebrew** is a package manager for your Mac: like npm, but for programs instead of JavaScript libraries. Later lessons use it to install PostgreSQL, Redis, Bruno and more. Install it with the command from [brew.sh](https://brew.sh):
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+It asks for your Mac password (nothing appears while you type; that is normal) and installs into `/opt/homebrew`. It ends with a **Next steps** section. On zsh it prints these lines, which you must run:
+
+```bash
+echo >> ~/.zprofile
+echo 'eval "$(/opt/homebrew/bin/brew shellenv zsh)"' >> ~/.zprofile
+eval "$(/opt/homebrew/bin/brew shellenv zsh)"
+```
+
+The second line adds Homebrew to `~/.zprofile`, so every new terminal can find `brew`. The third line does the same for the window you have open now. Check:
+
+```bash
+brew --version
+which brew
+```
+
+```text
+Homebrew 7.0.10
+/opt/homebrew/bin/brew
+```
+
+**The common mistake:** skipping Next steps. Homebrew is installed, but the terminal says `zsh: command not found: brew`. Run the three lines above and open a new window.
+
+### The commands you'll use
+
+Homebrew has two kinds of packages. A **formula** is a command-line tool (`git`, `redis`, `jq`). A **cask** is a regular Mac app with an icon (`visual-studio-code`, `bruno`).
+
+```bash
+brew install jq                         # a formula
+brew install --cask visual-studio-code  # a cask (an app in /Applications)
+brew list                               # what you installed (brew uninstall removes one)
+brew update && brew upgrade             # refresh the package list, then upgrade everything
+brew services start redis               # run a server in the background (brew services list shows them)
+brew doctor                             # look for common problems
+```
+
+<Callout type="warning" title="Never use sudo with brew">
+Homebrew refuses to run as root, and `sudo` with Homebrew or with `npm install -g` makes files your own user can't change later. If a command says "permission denied", fix the cause instead of adding `sudo`.
+</Callout>
+
+## Your shell files and the PATH
+
+When you type `node`, zsh searches a list of folders called the **PATH**, in order, and runs the **first** `node` it finds. Print the list one folder per line:
+
+```bash
+echo $PATH | tr ':' '\n'
+```
+
+```text
+/Users/jaydeep/.nvm/versions/node/v24.21.0/bin
+/opt/homebrew/bin
+/opt/homebrew/sbin
+/usr/local/bin
+/usr/bin
+/bin
+```
+
+Two hidden files in your home folder build that list each time a terminal opens:
+
+| File | When zsh reads it | Who writes to it |
+| --- | --- | --- |
+| `~/.zprofile` | Once, when a login shell starts (every new Terminal window on macOS) | Homebrew's `shellenv` line |
+| `~/.zshrc` | Every interactive shell, after `.zprofile` | nvm, aliases, your own settings |
+
+Open one with `open -e ~/.zshrc` (TextEdit) or `code ~/.zshrc` once VS Code is installed. **The common mistake:** editing `~/.zshrc` and expecting the window you have open to change. Shell files are read when a shell starts. Open a new window, or reload the file with `source ~/.zshrc`.
+
+## Node.js with nvm
+
+Different projects need different Node versions: this course needs Node 24, an old project at work may need 18. **nvm** (Node Version Manager) installs as many versions as you like into `~/.nvm` and switches between them. You don't need `sudo` for it, and it is the setup most teams use.
+
+The installer adds itself to `~/.zshrc`, but a new Mac has no `~/.zshrc`, so create the file first:
+
+```bash
+touch ~/.zshrc
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+```
+
+Open a new terminal window, then check. nvm is a shell function, not a program, so `command -v nvm` prints its name instead of a path:
+
+```bash
+command -v nvm
+nvm --version
+```
+
+```text
+nvm
+0.40.8
+```
+
+Now install Node 24 and make it the default for new windows. Any version that starts with `v24` is right:
+
+```bash
+nvm install 24
+nvm alias default 24
+node -v
+npm -v
+```
+
+```text
+v24.21.0
+11.19.0
+```
+
+<Callout type="note" title="Why not --lts?">
+`nvm install --lts` installs the newest long-term-support version. Since late October 2026 that is Node 26. The lessons were written and run on Node 24 (also still supported), so install 24 to match them exactly.
+</Callout>
+
+### A .nvmrc file per project
+
+A `.nvmrc` file in a project folder holds the Node version the project needs. `nvm use` reads it:
+
+```bash
+echo 24 > .nvmrc
+nvm use
+```
+
+```text
+Found '/Users/jaydeep/code/my-app/.nvmrc' with version <24>
+Now using node v24.21.0 (npm v11.19.0)
+```
+
+If the version is not installed yet, nvm says `N/A: version "v24" is not yet installed`, and `nvm install` (with no version) fixes it.
+
+Global packages (`npm install -g`) go into the active version's folder in `~/.nvm`, so they need no `sudo`. You have to install them again after you switch to a new Node version.
+
+### The common mistake: Node installed three times
+
+The Mac this lesson was written on had Node from nvm, from Homebrew (`brew install node`) **and** from the installer on nodejs.org. `which -a` lists every copy, in PATH order:
+
+```bash
+which -a node
+```
+
+```text
+/Users/jaydeep/.nvm/versions/node/v24.21.0/bin/node
+/opt/homebrew/bin/node
+/usr/local/bin/node
+```
+
+The first line wins, so `node -v` says `v24.21.0`. But the other two are v24.8.0 and v18.13.0, and any tool that builds its own PATH (an editor, a script with a shorter PATH) may pick one of them. Keep nvm's copy first. Remove the Homebrew one with `brew uninstall node`, and only use nvm from now on.
+
+## Git, GitHub and SSH on a Mac
+
+Git came with the Command Line Tools. Tell it who you are once; the next lesson shows how to use it:
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+git config --global init.defaultBranch main
+```
+
+Finder leaves a hidden `.DS_Store` file in every folder you open, and you never want one in a commit. Ignore it in every repository at once with a **global** ignore file:
+
+```bash
+echo .DS_Store >> ~/.gitignore_global
+git config --global core.excludesFile ~/.gitignore_global
+```
+
+### An SSH key saved in the Keychain
+
+GitHub uses an **SSH key** to prove who you are without a password. On a Mac, the macOS **Keychain** can remember the key's passphrase, so you type it only once:
+
+```bash
+ssh-keygen -t ed25519 -C "you@example.com"   # press Return for the default file, then pick a passphrase
+touch ~/.ssh/config
+open -e ~/.ssh/config
+```
+
+Paste this into `~/.ssh/config` and save:
+
+```text
+Host github.com
+  AddKeysToAgent yes
+  UseKeychain yes
+  IdentityFile ~/.ssh/id_ed25519
+```
+
+Then add the key to the agent and the Keychain, and copy the public key to your clipboard with `pbcopy`, a Mac command:
+
+```bash
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519
+pbcopy < ~/.ssh/id_ed25519.pub
+```
+
+On github.com go to Settings → SSH and GPG keys → New SSH key, paste, and save. Then test with `ssh -T git@github.com`; it greets you by your username.
+
+**The common mistake:** leaving out the `UseKeychain yes` line, so every `git push` asks for the passphrase again. The **GitHub CLI** is an easier alternative that sets everything up for you: `brew install gh`, then `gh auth login`.
+
+## Your editor, and Mac habits for later lessons
+
+Install **VS Code** with Homebrew. The cask also puts the `code` command on your PATH:
+
+```bash
+brew install --cask visual-studio-code
+code .            # open the current folder in VS Code
+git config --global core.editor "code --wait"
+```
+
+If you downloaded VS Code from its website instead, drag it into Applications, open it, press `Cmd+Shift+P` and run **Shell Command: Install 'code' command in PATH**.
+
+Later lessons install a few more tools. Each lesson has the full steps; this is the Mac overview:
+
+| Tool | Mac install | Lesson |
+| --- | --- | --- |
+| React Developer Tools | Browser extension | `react/setup-vite` |
+| Bruno (API client) | `brew install --cask bruno` | `node-express/openapi-and-bruno` |
+| jq (JSON in the terminal) | `brew install jq` | `node-express/pagination-and-versioning` |
+| Redis | `brew install redis` | `node-express/stretch-redis-queues` |
+| PostgreSQL | Postgres.app or `brew install postgresql@18` | `databases/postgres-setup` |
+
+<Callout type="tip" title="Control, not Command">
+In the terminal, `Ctrl+C` (the **Control** key) stops a running server. `Cmd+C` only copies text. `Cmd+K` clears the screen, and `Cmd+T` opens a new tab for a second command while the server keeps running.
+</Callout>
+
+### When a port is already taken
+
+A server that can't start says `Error: listen EADDRINUSE: address already in use :::3000`. Some other program holds the port. `lsof` shows which one:
+
+```bash
+lsof -nP -iTCP:3000 -sTCP:LISTEN
+```
+
+```text
+COMMAND   PID    USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+node     7774 jaydeep   13u  IPv6 0x3a0b3ea13aa4d91f      0t0  TCP *:3000 (LISTEN)
+```
+
+Usually it is your own server still running in another tab: stop it with `Ctrl+C` there, or `kill 7774` with the PID from the output. macOS itself listens on **ports 5000 and 7000** for AirPlay Receiver (`lsof` shows it as `ControlCe`). That is why tutorials that use port 5000 fail on a Mac. Pick another port, or turn AirPlay Receiver off in System Settings → General → AirDrop & Handoff.
+
+<Exercise title="Check your setup">
+Save this script as `check-setup.sh` in your home folder and run it with `zsh check-setup.sh`. Install everything that shows `✗`, then run it again until every line shows `✓`.
+
+```bash
+#!/bin/zsh
+# check-setup.sh: prints a line per tool, and how to fix what is missing
+check() {
+  local name=$1 fix=$2
+  if command -v "$name" > /dev/null; then
+    echo "✓ $name  $("$name" --version 2>&1 | head -n 1)"
+  else
+    echo "✗ $name  missing: $fix"
+  fi
+}
+
+[[ $(uname -m) == arm64 ]] && echo "✓ Apple Silicon (arm64)" || echo "! $(uname -m): Intel Mac or Rosetta"
+check brew "see the Homebrew section"
+check git "xcode-select --install"
+check node "nvm install 24"
+check npm "comes with node"
+check gh "brew install gh"
+check code "brew install --cask visual-studio-code"
+
+[[ $(command -v node) == *"/.nvm/"* ]] && echo "✓ node comes from nvm" || echo "! node does not come from nvm"
+```
+
+<Solution>
+On a finished setup it prints:
+
+```text
+✓ Apple Silicon (arm64)
+✓ brew  Homebrew 7.0.10
+✓ git  git version 2.54.0 (Apple Git-157)
+✓ node  v24.21.0
+✓ npm  11.19.0
+✓ gh  gh version 2.101.0 (2026-09-15)
+✓ code  1.144.1
+✓ node comes from nvm
+```
+
+Version numbers will differ. If the last line says `! node does not come from nvm`, run `which -a node` and look for the copy that sits before nvm's.
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the output">
+Your PATH starts with `/opt/homebrew/bin:/Users/you/.nvm/versions/node/v24.21.0/bin`, and Homebrew's Node is v26.13.0. What does `node -v` print? What does `nvm current` print? How do you fix it?
+
+<Solution>
+`node -v` prints `v26.13.0`, because `/opt/homebrew/bin` comes first in the PATH and the first match wins. `nvm current` still prints `v24.21.0`: nvm only knows which version **it** selected, not which `node` the shell will find. Fix it with `brew uninstall node`, so nvm's copy is the only one, or load nvm after Homebrew's `shellenv` line so nvm's folder ends up first.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+On an M2 MacBook, `~/.zprofile` contains only this line, copied from an older guide. Every new terminal says `zsh: command not found: brew`, although Homebrew was installed. Why, and what is the fix?
+
+```bash
+eval "$(/usr/local/bin/brew shellenv)"
+```
+
+<Solution>
+The guide was written for an Intel Mac, where Homebrew lives in `/usr/local`. On Apple Silicon it lives in `/opt/homebrew`, so `/usr/local/bin/brew` doesn't exist and the line does nothing. Replace it, then open a new window:
+
+```bash
+eval "$(/opt/homebrew/bin/brew shellenv zsh)"
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Two projects, two Node versions">
+Make two folders, `old-app` and `new-app`. `old-app` must run on Node 22 and `new-app` on Node 24. Set it up so that `cd old-app && nvm use && node -v` prints a `v22` version, and the same in `new-app` prints `v24`.
+
+<Solution>
+```bash
+nvm install 22
+mkdir old-app new-app
+echo 22 > old-app/.nvmrc
+echo 24 > new-app/.nvmrc
+
+cd old-app && nvm use && node -v    # v22.23.4 (or newer)
+cd ../new-app && nvm use && node -v # v24.21.0 (or newer)
+```
+
+Commit the `.nvmrc` file with each project, so teammates and CI use the same version. New windows still start on 24, because of `nvm alias default 24`.
+</Solution>
+</Exercise>

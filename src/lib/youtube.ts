@@ -23,3 +23,19 @@ export function youtubeStart(url: string): number {
     return 0;
   }
 }
+
+function seconds(duration: string) {
+  return duration
+    .split(":")
+    .map(Number)
+    .reduce((total, part) => (Number.isFinite(part) ? total * 60 + part : total), 0);
+}
+
+/** "16 min" / "1 h 5 min": total running time of a list of videos ("mm:ss" / "h:mm:ss"). */
+export function totalDuration(videos: { duration: string }[]) {
+  const mins = Math.max(
+    1,
+    Math.round(videos.reduce((n, v) => n + seconds(v.duration), 0) / 60),
+  );
+  return mins >= 60 ? `${Math.floor(mins / 60)} h ${mins % 60} min` : `${mins} min`;
+}

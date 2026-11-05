@@ -129,7 +129,7 @@ Nothing forces the YAML file to match the code. If you add a field to the route 
 
 curl is great for one request. For ten requests that depend on each other (create a todo, then read it, then delete it) you want a tool that remembers them. **Bruno** is a free, open-source API client for that job, and it is this course's choice for manual testing. Compared with Postman, its main difference is that a Bruno collection is **a folder of plain text files**. You commit it to your repository, review changes to it in pull requests, and nobody needs an account. (The Bruno walkthrough video in this lesson shows the app's screens; the steps below show what ends up on disk.)
 
-Install the desktop app from usebruno.com, choose **Create collection**, and open the folder. Bruno 4 saves new collections in its **OpenCollection YAML** format, one `.yml` file per request. Older collections use `.bru` files with a `bruno.json`, which Bruno still opens, so you will meet both. This is the collection for the todo API, stored in a `bruno/` folder next to `src/`:
+Install the desktop app (on a Mac, `brew install --cask bruno`; elsewhere, download it from usebruno.com), choose **Create collection**, and open the folder. Bruno 4 saves new collections in its **OpenCollection YAML** format, one `.yml` file per request. Older collections use `.bru` files with a `bruno.json`, which Bruno still opens, so you will meet both. This is the collection for the todo API, stored in a `bruno/` folder next to `src/`:
 
 ```text
 bruno/

@@ -44,10 +44,10 @@ export default function TermsPage() {
         Site.
       </p>
       <p>
-        Before you can open the lessons, the Site asks you to confirm this by ticking a
-        box and clicking “Accept and continue”. Doing so is your electronic acceptance of
-        these Terms, and the Site records the date and the version you accepted in your
-        browser. If these Terms change, you will be asked to accept them again.
+        On your first visit, a notice at the bottom of the page links to these Terms and
+        the other policies. Clicking “OK”, or continuing to use the Site, is your
+        electronic acceptance of these Terms, and the Site records the date and the
+        version in your browser. If these Terms change, the notice appears again.
       </p>
       <p>
         These Terms are an electronic record under the Information Technology Act, 2000

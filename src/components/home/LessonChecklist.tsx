@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { lessonKey, useCompleted } from "@/lib/progress";
+import { CheckIcon } from "@/components/course/icons";
 
 type Item = { module: string; slug: string; href: string; title: string; label: string };
 
@@ -16,26 +17,13 @@ export function LessonChecklist({ lessons }: { lessons: Item[] }) {
           <li key={l.slug}>
             <Link
               href={l.href}
-              className="text-muted hover:text-foreground hover:bg-surface-hover group/l flex items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors"
+              className="text-muted hover:text-foreground hover:bg-surface-hover group/l flex min-h-9 items-center gap-2.5 px-2 py-1.5 transition-colors"
             >
               <span
                 aria-hidden
-                className={`grid h-4 w-4 shrink-0 place-items-center rounded-full border transition-colors ${done ? "border-success bg-success text-white dark:text-zinc-950" : "border-border group-hover/l:border-accent"}`}
+                className={`grid h-4 w-4 shrink-0 place-items-center border transition-colors ${done ? "border-success bg-success text-background" : "border-border-strong group-hover/l:border-foreground"}`}
               >
-                {done && (
-                  <svg
-                    width="10"
-                    height="10"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="m5 12 5 5 9-10" />
-                  </svg>
-                )}
+                {done && <CheckIcon className="size-2.5" strokeWidth={4} />}
               </span>
               <span className="truncate">{l.label}</span>
               <span className="sr-only">{done ? "(completed)" : ""}</span>

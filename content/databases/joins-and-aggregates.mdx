@@ -1,0 +1,415 @@
+---
+title: Joins and Aggregates
+summary: "Combine rows from several tables with INNER and LEFT JOIN, sum them up per group with COUNT, SUM, GROUP BY and HAVING, and answer questions inside questions with subqueries."
+order: 4
+takeaways:
+  - A JOIN pairs rows from two tables wherever its ON condition is true, and an INNER JOIN drops every row that has no partner.
+  - A LEFT JOIN keeps every row of the left table and fills the missing side with NULL, so filters on the right table belong in ON, not WHERE.
+  - COUNT(*) counts rows while COUNT(column) skips NULLs, which is why a LEFT JOIN report counts with COUNT(right_table.id).
+  - GROUP BY makes one result row per group, every other selected column must be grouped or aggregated, and HAVING filters the groups after WHERE has filtered the rows.
+  - A subquery answers a question inside the query, and NOT EXISTS is safer than NOT IN because a single NULL makes NOT IN match nothing.
+  - The pg driver returns COUNT and SUM results as strings, so cast them with ::int or convert them before doing maths in JavaScript.
+videos:
+  - title: "SQL Joins Explained  |¦| Joins in SQL |¦| SQL Tutorial"
+    channel: "Socratica"
+    duration: "10:26"
+    url: https://www.youtube.com/watch?v=9yeOJ0ZMUYw
+  - title: "SQL Joins Basics (Visually Explained) | INNER, LEFT, RIGHT, FULL | #SQL Course 8"
+    channel: "Data with Baraa"
+    duration: "40:18"
+    url: https://www.youtube.com/watch?v=aY7z4HcHm5M
+  - title: "SQL Aggregate Functions | COUNT, SUM, AVG, MAX, MIN  | #SQL Course 21"
+    channel: "Data with Baraa"
+    duration: "6:38"
+    url: https://www.youtube.com/watch?v=AsuPVZ_EjEw
+docs:
+  - title: "PostgreSQL — Joins between tables (tutorial)"
+    url: https://www.postgresql.org/docs/current/tutorial-join.html
+  - title: "PostgreSQL — Aggregate functions (tutorial)"
+    url: https://www.postgresql.org/docs/current/tutorial-agg.html
+  - title: "PostgreSQL — Table expressions: joins, GROUP BY, HAVING"
+    url: https://www.postgresql.org/docs/current/queries-table-expressions.html
+  - title: "PostgreSQL — Aggregate functions reference"
+    url: https://www.postgresql.org/docs/current/functions-aggregate.html
+  - title: "PostgreSQL — Subquery expressions (EXISTS, IN)"
+    url: https://www.postgresql.org/docs/current/functions-subquery.html
+  - title: "PostgreSQL — WITH queries"
+    url: https://www.postgresql.org/docs/current/queries-with.html
+  - title: "node-postgres — Data types"
+    url: https://node-postgres.com/features/types
+---
+
+So far every query has read one table. Real data is spread over several: a shop keeps customers in one table, products in another and orders in a third, and each order only stores the **ids** of its customer and product. To show "Asha bought a Mechanical Keyboard" you have to put rows from different tables back together. That is a **join**. To answer "how much has each customer spent?" you then squash many rows into one number per customer. Those are **aggregates** and `GROUP BY`.
+
+Together they are most of what "write a query that…" interview questions test, and most of what a dashboard or report route does. Prisma, later in this module, writes joins for you when you load relations, but you still need to read them in logs and to spot when it sends too many queries (the N+1 problem in the indexes lesson). This lesson builds on `databases/sql-sorting-and-changes`; written for PostgreSQL 18, with every output from a real `psql` session.
+
+## A second and third table
+
+Save this file **next to** `shop.sql` from `sql-basics`. It creates customers and orders, and it re-runs `shop.sql` first with `\ir` (include, relative to this file), so it resets all three tables at once:
+
+```sql
+-- orders.sql: keep it next to shop.sql and run it with \i orders.sql
+DROP TABLE IF EXISTS orders, customers;
+\ir shop.sql
+
+CREATE TABLE customers (
+  id   integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name text NOT NULL,
+  city text NOT NULL
+);
+
+CREATE TABLE orders (
+  id          integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  customer_id integer REFERENCES customers (id),   -- NULL = guest checkout
+  product_id  integer NOT NULL REFERENCES products (id),
+  quantity    integer NOT NULL CHECK (quantity > 0),
+  ordered_at  timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO customers (name, city) VALUES
+  ('Asha', 'Pune'), ('Ben', 'London'), ('Chen', 'Singapore'), ('Dana', 'Pune');
+
+INSERT INTO orders (customer_id, product_id, quantity, ordered_at) VALUES
+  (1, 1,  1, '2026-08-02'),   -- Asha: Mechanical Keyboard
+  (1, 2,  3, '2026-08-02'),   -- Asha: USB-C Cable
+  (2, 4, 10, '2026-08-15'),   -- Ben: Notebook A5
+  (2, 7,  1, '2026-09-01'),   -- Ben: Fountain Pen
+  (3, 2,  2, '2026-09-10'),   -- Chen: USB-C Cable
+  (1, 8,  1, '2026-09-21'),   -- Asha: Webcam
+  (3, 4,  5, '2026-10-03'),   -- Chen: Notebook A5
+  (2, 9,  2, '2026-10-20'),   -- Ben: Coaster Set
+  (NULL, 9, 1, '2026-10-25'); -- a guest: Coaster Set
+```
+
+Run `\i orders.sql` from `psql -d shop`. `REFERENCES products (id)` is a **foreign key**: the database refuses an order whose `product_id` doesn't exist. The schema design lesson covers it properly; for now notice its side effect. Running `\i shop.sql` on its own now fails with `cannot drop table products because other objects depend on it`, so reset with `\i orders.sql` from here on.
+
+To keep this lesson small, each order holds one product. Dana has no orders, the last order has no customer, and three products were never ordered. Those gaps are on purpose: they are where joins go wrong.
+
+## INNER JOIN: rows that match
+
+`JOIN … ON` pairs each row of the first table with every row of the second where the `ON` condition is true. Prefix a column with its table name when both tables have it:
+
+```text
+shop=# SELECT orders.id, customers.name, orders.quantity
+shop-# FROM orders JOIN customers ON customers.id = orders.customer_id;
+ id | name | quantity
+----+------+----------
+  1 | Asha |        1
+  2 | Asha |        3
+  3 | Ben  |       10
+  ...
+  8 | Ben  |        2
+(8 rows)
+```
+
+Nine orders went in and **eight** came out. The guest order has `customer_id` NULL, `NULL = anything` is never true, so it has no partner and an inner join drops it. Dana has no partner either and doesn't appear. `JOIN` is short for `INNER JOIN`.
+
+Chain joins to reach a third table, and give tables short **aliases** so the query stays readable:
+
+```text
+shop=# SELECT o.id, c.name AS customer, p.name AS product, o.quantity, o.quantity * p.price AS total
+shop-# FROM orders o
+shop-# JOIN customers c ON c.id = o.customer_id
+shop-# JOIN products p ON p.id = o.product_id
+shop-# ORDER BY o.id;
+ id | customer |       product       | quantity | total
+----+----------+---------------------+----------+-------
+  1 | Asha     | Mechanical Keyboard |        1 | 89.99
+  2 | Asha     | USB-C Cable         |        3 | 28.50
+  3 | Ben      | Notebook A5         |       10 | 42.50
+  4 | Ben      | Fountain Pen        |        1 | 32.00
+  5 | Chen     | USB-C Cable         |        2 | 19.00
+  6 | Asha     | Webcam              |        1 | 59.00
+  7 | Chen     | Notebook A5         |        5 | 21.25
+  8 | Ben      | Coaster Set         |        2 | 16.00
+(8 rows)
+```
+
+Leave out the prefix on a name both tables have, and Postgres refuses to guess: `SELECT id, name FROM orders JOIN customers ON …` fails with `column reference "id" is ambiguous`.
+
+**The common mistake** is joining on the wrong columns. `ON c.id = o.id` (order id instead of `o.customer_id`) runs fine and returns 4 plausible rows: order 1 "belongs" to Asha, 2 to Ben, 3 to Chen, 4 to Dana. No error, just wrong data. Always join a foreign key to the id it points at. With no condition at all (`FROM orders, customers`), every order pairs with every customer: 9 × 4 = 36 rows, called a **cross join**.
+
+## LEFT JOIN: keep rows without a match
+
+A `LEFT JOIN` keeps **every** row of the left (first) table. Where there is no partner, the right table's columns are NULL:
+
+```text
+shop=# SELECT c.name, o.id AS order_id FROM customers c
+shop-# LEFT JOIN orders o ON o.customer_id = c.id ORDER BY c.name, o.id;
+ name | order_id
+------+----------
+ Asha |        1
+ Asha |        2
+ Asha |        6
+ Ben  |        3
+ ...
+ Chen |        7
+ Dana |
+(9 rows)
+```
+
+That NULL gives you a classic query, "customers who never ordered": `... LEFT JOIN orders o ON o.customer_id = c.id WHERE o.id IS NULL` returns only Dana. `RIGHT JOIN` is the same thing with the tables swapped (people rarely use it), and `FULL JOIN` keeps unmatched rows from both sides.
+
+<Callout type="warning" title="A WHERE on the right table undoes the LEFT JOIN">
+"Every customer, with their October orders": putting `WHERE o.ordered_at >= '2026-10-01'` after the `LEFT JOIN` returns only Ben and Chen. Asha and Dana got NULL dates, and `NULL >= '2026-10-01'` is unknown, so `WHERE` drops them. Move the condition into the join, `LEFT JOIN orders o ON o.customer_id = c.id AND o.ordered_at >= '2026-10-01'`, and all four customers come back, with NULLs for Asha and Dana.
+</Callout>
+
+## Aggregates: many rows, one number
+
+An **aggregate function** reads many rows and returns one value:
+
+```text
+shop=# SELECT count(*) AS products, count(description) AS with_description,
+shop-#        sum(stock) AS units, min(price), max(price), avg(price) FROM products;
+ products | with_description | units | min  |  max  |         avg
+----------+------------------+-------+------+-------+---------------------
+        9 |                5 |   517 | 4.25 | 89.99 | 34.0811111111111111
+```
+
+- `count(*)` counts rows. `count(description)` counts **non-NULL values**, so it says 5. `count(DISTINCT customer_id)` on `orders` gives 3: duplicates and the NULL are skipped.
+- `avg` keeps every decimal; wrap it as `round(avg(price), 2)` to get `34.08`.
+- With no rows to read, `count` returns 0 but `sum`, `avg`, `min` and `max` return **NULL**. `SELECT sum(stock) FROM products WHERE category = 'toys'` gives an empty cell. `coalesce(sum(stock), 0)` replaces the NULL with 0 (`coalesce` returns its first non-NULL argument).
+
+## GROUP BY and HAVING
+
+`GROUP BY` splits the rows into groups with the same value, and runs the aggregates once per group:
+
+```text
+shop=# SELECT category, count(*) AS products, sum(stock) AS units, round(avg(price), 2) AS avg_price
+shop-# FROM products GROUP BY category ORDER BY category;
+  category   | products | units | avg_price
+-------------+----------+-------+-----------
+ electronics |        4 |   155 |     45.87
+ home        |        3 |    47 |     29.00
+ stationery  |        2 |   315 |     18.13
+```
+
+**The common mistake** is selecting a column that is neither grouped nor aggregated. There are four electronics names and one result row, so which name should it show? Postgres refuses: `SELECT category, name, count(*) FROM products GROUP BY category` fails with `column "products.name" must appear in the GROUP BY clause or be used in an aggregate function`.
+
+To filter **groups**, use `HAVING`. `WHERE` can't do it, because it runs before the groups exist (`WHERE count(*) >= 3` fails with `aggregate functions are not allowed in WHERE`):
+
+```text
+shop=# SELECT category, count(*) FROM products
+shop-# WHERE stock > 0 GROUP BY category HAVING count(*) >= 3;
+  category   | count
+-------------+-------
+ electronics |     3
+```
+
+`WHERE` first removed the out-of-stock rows (Desk Lamp, Wireless Mouse), then `HAVING` kept the groups with at least 3 rows left. Without the `WHERE`, home would qualify too. The order Postgres works in explains every error above, and why the `AS` name from `SELECT` works in `ORDER BY` but not in `WHERE`:
+
+```text
+FROM / JOIN  →  WHERE  →  GROUP BY  →  HAVING  →  SELECT  →  ORDER BY  →  LIMIT
+```
+
+## Joins and groups together
+
+Most reports join first, then group. "Orders and money spent per customer":
+
+```text
+shop=# SELECT c.name, count(o.id) AS orders, coalesce(sum(o.quantity * p.price), 0) AS spent
+shop-# FROM customers c
+shop-# LEFT JOIN orders o ON o.customer_id = c.id
+shop-# LEFT JOIN products p ON p.id = o.product_id
+shop-# GROUP BY c.id
+shop-# ORDER BY spent DESC;
+ name | orders | spent
+------+--------+--------
+ Asha |      3 | 177.49
+ Ben  |      3 |  90.50
+ Chen |      2 |  40.25
+ Dana |      0 |      0
+```
+
+Three details. `GROUP BY c.id` rather than `c.name`, because two customers can share a name; grouping by the **primary key** also lets you select the table's other columns. The `LEFT JOIN`s keep Dana, and `coalesce` turns her NULL sum into 0. And it counts `o.id`, not `*`: Dana's group has one row (her row with NULLs), so `count(*)` would say she has **1** order. `count(o.id)` skips the NULL and says 0.
+
+To group by month, group by a computed value: `SELECT date_trunc('month', ordered_at)::date AS month, count(*) FROM orders GROUP BY month ORDER BY month` gives 3 orders each in August, September and October. (Unlike `WHERE`, `GROUP BY` may use an `AS` name.)
+
+## Subqueries: a query inside a query
+
+A **subquery** is a `SELECT` in brackets, used where a value or a list would go. "Products that cost more than average" needs the average first:
+
+```text
+shop=# SELECT name, price FROM products WHERE price > (SELECT avg(price) FROM products);
+        name         | price
+---------------------+-------
+ Mechanical Keyboard | 89.99
+ Webcam              | 59.00
+ Monitor Stand       | 45.00
+```
+
+Used with `=` or `>`, a subquery must return one value: comparing with `(SELECT price FROM products WHERE category = 'home')` fails with `more than one row returned by a subquery used as an expression`. For a list, use `IN`: `WHERE id IN (SELECT product_id FROM orders)` returns the six products someone has bought.
+
+A **correlated** subquery refers to the outer row, so it runs once per row. "The most expensive product in each category":
+
+```sql
+SELECT name, category, price FROM products p
+WHERE price = (SELECT max(price) FROM products WHERE category = p.category);
+-- Mechanical Keyboard electronics 89.99, Monitor Stand home 45.00, Fountain Pen stationery 32.00
+```
+
+When a subquery gets long, name it with `WITH` (a **CTE**, common table expression) and use it like a table, even twice:
+
+```sql
+WITH spending AS (
+  SELECT o.customer_id, sum(o.quantity * p.price) AS spent
+  FROM orders o JOIN products p ON p.id = o.product_id
+  WHERE o.customer_id IS NOT NULL
+  GROUP BY o.customer_id
+)
+SELECT c.name, s.spent FROM spending s JOIN customers c ON c.id = s.customer_id
+WHERE s.spent > (SELECT avg(spent) FROM spending);   -- Asha 177.49 (the average is 102.75)
+```
+
+<Callout type="warning" title="NOT IN and a single NULL">
+`SELECT name FROM customers WHERE id NOT IN (SELECT customer_id FROM orders)` returns **0 rows**, not Dana. The guest order put a NULL in the list, and "4 is not in (1, 2, 3, NULL)" is unknown, because the NULL might be 4. Use `NOT EXISTS`, which only asks whether a matching row exists: `WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)` returns Dana.
+</Callout>
+
+## From SQL to your API
+
+In `pg`, a report is one query with placeholders, as in the last lesson. Watch the types that come back:
+
+```js
+// report.mjs (in the folder from sql-sorting-and-changes, where pg is installed)
+import pg from "pg";
+const pool = new pg.Pool({ connectionString: "postgresql://localhost:5432/shop" });
+
+const { rows } = await pool.query(
+  `SELECT c.id, c.name, count(o.id) AS orders, sum(o.quantity * p.price) AS spent
+   FROM customers c
+   JOIN orders o ON o.customer_id = c.id
+   JOIN products p ON p.id = o.product_id
+   GROUP BY c.id
+   ORDER BY spent DESC
+   LIMIT $1`,
+  [2],
+);
+console.log(rows);
+console.log(rows[0].orders + 1);
+await pool.end();
+```
+
+```text
+[
+  { id: 1, name: 'Asha', orders: '3', spent: '177.49' },
+  { id: 2, name: 'Ben', orders: '3', spent: '90.50' }
+]
+31
+```
+
+`count` returns a `bigint`, which can be bigger than a JavaScript `number` holds exactly, so `pg` hands it over as a string, and `'3' + 1` is `'31'`. Cast it in SQL when the count is small, `count(o.id)::int AS orders`, and the same script prints `orders: 3` and `4`. Leave money as a string (the `numeric` reason from `sql-basics`) and convert it where you display it.
+
+<Exercise title="Predict the output">
+On a fresh `\i orders.sql`, what do these two queries print?
+
+```sql
+SELECT c.city, count(*) AS rows, count(o.id) AS orders
+FROM customers c LEFT JOIN orders o ON o.customer_id = c.id
+GROUP BY c.city ORDER BY c.city;
+
+SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id;
+```
+
+<Solution>
+```text
+   city    | rows | orders
+-----------+------+--------
+ London    |    3 |      3
+ Pune      |    4 |      3
+ Singapore |    2 |      2
+```
+
+Pune has Asha (3 orders) and Dana (none). The `LEFT JOIN` gives Dana one row of NULLs, so `count(*)` says 4 rows, while `count(o.id)` skips the NULL and says 3 orders.
+
+The second query prints `8`, not 9: the inner join drops the guest order, whose `customer_id` is NULL.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+This should show the units sold per category, only for categories with at least 5 units, biggest first. Postgres reports one error at a time. There are three bugs, and the last one gives no error.
+
+```sql
+SELECT p.category, p.name, sum(o.quantity) AS units
+FROM orders o JOIN products p ON p.id = o.id
+WHERE sum(o.quantity) >= 5
+GROUP BY p.category
+ORDER BY units DESC;
+```
+
+<Solution>
+1. `aggregate functions are not allowed in WHERE`: a condition on a group goes in `HAVING`, after `GROUP BY`.
+2. `column "p.name" must appear in the GROUP BY clause…`: a category has several names. Remove `p.name`.
+3. Now it runs and prints home 13, electronics 7, stationery 6. Wrong: the join matches product ids with **order** ids. Join on `o.product_id`.
+
+```sql
+SELECT p.category, sum(o.quantity) AS units
+FROM orders o JOIN products p ON p.id = o.product_id
+GROUP BY p.category
+HAVING sum(o.quantity) >= 5
+ORDER BY units DESC;
+-- stationery 16, electronics 7
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Best sellers">
+Write the query behind a "Best sellers" box: the 3 products with the most units sold, with their revenue. Break ties in units by revenue, highest first.
+
+<Solution>
+```sql
+SELECT p.name, sum(o.quantity) AS units, sum(o.quantity * p.price) AS revenue
+FROM orders o JOIN products p ON p.id = o.product_id
+GROUP BY p.id
+ORDER BY units DESC, revenue DESC
+LIMIT 3;
+-- Notebook A5  15  63.75
+-- USB-C Cable   5  47.50
+-- Coaster Set   3  24.00
+```
+
+The inner join is right here: products nobody bought can't be best sellers. The guest's Coaster Set counts, because nothing joins to `customers`.
+</Solution>
+</Exercise>
+
+<Exercise title="Products nobody bought">
+List the name and stock of every product that was never ordered, in two ways: with `NOT EXISTS`, and with a `LEFT JOIN`. Then explain why `NOT IN (SELECT product_id FROM orders)` happens to work here but `NOT IN (SELECT customer_id FROM orders)` did not.
+
+<Solution>
+```sql
+SELECT p.name, p.stock FROM products p
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.product_id = p.id)
+ORDER BY p.name;
+
+SELECT p.name, p.stock FROM products p
+LEFT JOIN orders o ON o.product_id = p.id
+WHERE o.id IS NULL
+ORDER BY p.name;
+-- both: Desk Lamp 0, Monitor Stand 7, Wireless Mouse 0
+```
+
+`orders.product_id` is `NOT NULL`, so its list never holds a NULL and `NOT IN` gives the right answer. `customer_id` may be NULL, and one NULL in the list makes every `NOT IN` unknown. `NOT EXISTS` works in both cases, so make it the habit.
+</Solution>
+</Exercise>
+
+<Exercise title="Each customer's biggest order">
+For every customer with orders, show their single most expensive order: customer name, product and order total. Use a CTE for the order totals and a correlated subquery to find each customer's maximum.
+
+<Solution>
+```sql
+WITH order_totals AS (
+  SELECT o.id, o.customer_id, p.name AS product, o.quantity * p.price AS total
+  FROM orders o JOIN products p ON p.id = o.product_id
+)
+SELECT c.name, t.product, t.total
+FROM order_totals t
+JOIN customers c ON c.id = t.customer_id
+WHERE t.total = (SELECT max(total) FROM order_totals WHERE customer_id = t.customer_id)
+ORDER BY c.name;
+--  Asha | Mechanical Keyboard | 89.99
+--  Ben  | Notebook A5         | 42.50
+--  Chen | Notebook A5         | 21.25
+```
+
+A customer with two orders of the same top total would get two rows; add a tie-break if you need exactly one. The guest order drops out at the join to `customers`, and Dana has no orders to compare.
+</Solution>
+</Exercise>

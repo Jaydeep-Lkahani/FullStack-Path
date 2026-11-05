@@ -57,7 +57,7 @@ console.log(typeof process, typeof globalThis.fetch); // object function
 There is no `window` and no `document`, because there is no page. `globalThis` is the global object in both worlds, and Node also exposes it as `global`. Node does have `fetch`, `URL`, `setTimeout`, `AbortController` and `structuredClone`, so many browser APIs work the same way.
 
 <Callout type="note" title="Check your version">
-Run `node --version`. This module needs Node 22.12 or newer. Any LTS line is a safe choice, and your `package.json` can say so with `"engines": { "node": ">=22.12" }`.
+Run `node --version`. This module needs Node 22.12 or newer. If yours is older or missing, run `nvm install 24` and `nvm alias default 24` (on a Mac, `web-foundations/mac-setup` installs nvm). Any LTS line is a safe choice, and your `package.json` can say so with `"engines": { "node": ">=22.12" }`.
 </Callout>
 
 ### A tiny web server

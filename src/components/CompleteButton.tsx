@@ -2,46 +2,116 @@
 
 import { useState } from "react";
 import { lessonKey, setLessonComplete, useCompleted } from "@/lib/progress";
-import { CheckIcon } from "./course/icons";
+import { CheckIcon, NotStartedIcon, UndoIcon } from "./course/icons";
+import { buttonClass } from "./ui/button";
+import { toast } from "./ui/toast";
 
-const PIECES = Array.from({ length: 18 }, (_, i) => i);
-const COLORS = ["var(--accent)", "#a855f7", "#38bdf8", "#f59e0b", "#22c55e"];
+const PIECES = Array.from({ length: 12 }, (_, i) => i);
+const COLORS = ["var(--accent)", "#7c3aed", "#0284c7", "var(--success)"];
 
-export function CompleteButton({ module, slug }: { module: string; slug: string }) {
+function DrawnCheck() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden className="check-draw size-4">
+      <path
+        d="M5 12.5 10 17.5 19 7"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Marks a lesson complete (UI-UX.md §8.6, §10). `full` is the end-of-lesson button with
+ * confetti and a separate Undo; `compact` is the small toggle in the lesson header.
+ */
+export function CompleteButton({
+  module,
+  slug,
+  moduleLessons = [],
+  variant = "full",
+}: {
+  module: string;
+  slug: string;
+  /** Keys ("module/slug") of every lecture in this module, for the progress toast. */
+  moduleLessons?: string[];
+  variant?: "full" | "compact";
+}) {
   const key = lessonKey(module, slug);
-  const done = useCompleted().has(key);
+  const completed = useCompleted();
+  const done = completed.has(key);
   const [burst, setBurst] = useState(0);
 
-  function toggle() {
-    setLessonComplete(key, !done);
-    if (!done) {
+  function set(next: boolean) {
+    setLessonComplete(key, next);
+    if (!next) return;
+    if (variant === "full") {
       setBurst((n) => n + 1);
-      setTimeout(() => setBurst(0), 1100);
+      setTimeout(() => setBurst(0), 800);
+    }
+    const total = moduleLessons.length;
+    if (total > 0) {
+      const count = moduleLessons.filter((k) => k === key || completed.has(k)).length;
+      toast(`Saved · ${count} of ${total} in this module`, "success");
+    } else {
+      toast("Saved", "success");
     }
   }
 
-  return (
-    <div className="relative inline-flex">
-      <button
-        type="button"
-        onClick={toggle}
-        aria-pressed={done}
-        className={`group focus-visible:outline-accent relative inline-flex cursor-pointer items-center gap-2.5 rounded-xl px-5 py-3 text-sm font-semibold transition duration-300 focus-visible:outline-2 focus-visible:outline-offset-2 active:scale-[0.97] ${
-          done
-            ? "border-success/50 bg-success/10 text-success border"
-            : "shine bg-linear-to-r from-indigo-600 via-violet-600 to-sky-600 text-white shadow-lg shadow-indigo-500/25 hover:-translate-y-0.5 hover:shadow-xl hover:shadow-indigo-500/35"
-        }`}
-      >
-        <span
-          aria-hidden
-          className={`flex size-5 items-center justify-center rounded-full ${
-            done ? "bg-success text-background check-pop" : "bg-white/20"
-          }`}
+  if (variant === "compact") {
+    return (
+      <span className="tip" data-tip={done ? "Click to undo" : "Mark this lesson done"}>
+        <button
+          type="button"
+          onClick={() => set(!done)}
+          aria-pressed={done}
+          className={buttonClass(done ? "success" : "secondary", "sm")}
         >
-          <CheckIcon className="size-3.5" />
-        </span>
-        {done ? "Completed — click to undo" : "Mark as complete"}
-      </button>
+          {done ? <DrawnCheck /> : <NotStartedIcon className="size-4" />}
+          {done ? "Completed" : "Mark done"}
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <div className="relative inline-flex items-center gap-2">
+      {done ? (
+        <>
+          <span
+            className={buttonClass("success", "lg", "pointer-events-none")}
+            role="status"
+          >
+            <span className="bg-success text-background check-pop grid size-5 place-items-center rounded-full">
+              <CheckIcon className="size-3.5" />
+            </span>
+            Completed
+          </span>
+          <button
+            type="button"
+            onClick={() => set(false)}
+            data-shortcut="complete"
+            className={buttonClass("ghost", "md")}
+          >
+            <UndoIcon className="size-4" />
+            Undo
+          </button>
+        </>
+      ) : (
+        <button
+          type="button"
+          onClick={() => set(true)}
+          data-shortcut="complete"
+          className={buttonClass("gradient", "lg", "group")}
+        >
+          <span className="bg-background/25 grid size-5 place-items-center rounded-full">
+            <CheckIcon className="size-3.5" />
+          </span>
+          Mark as complete
+        </button>
+      )}
       {burst > 0 && (
         <span aria-hidden key={burst} className="confetti">
           {PIECES.map((i) => (
@@ -50,9 +120,8 @@ export function CompleteButton({ module, slug }: { module: string; slug: string 
               style={
                 {
                   "--a": `${(360 / PIECES.length) * i}deg`,
-                  "--r": `${60 + (i % 3) * 22}px`,
+                  "--r": `${56 + (i % 3) * 20}px`,
                   "--c": COLORS[i % COLORS.length],
-                  "--s": `${0.5 + (i % 4) * 0.12}s`,
                 } as React.CSSProperties
               }
             />

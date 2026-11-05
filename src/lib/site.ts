@@ -7,7 +7,7 @@ export const SITE_DESCRIPTION =
   "Go from fundamentals to job-ready in React, Node.js and Next.js with curated videos, practice and interview prep.";
 
 /** Date shown on the privacy, terms and cookie pages. Update it whenever any of them change. */
-export const LEGAL_LAST_UPDATED = "25 October 2026";
+export const LEGAL_LAST_UPDATED = "4 November 2026";
 
 export const LEGAL_PAGES = [
   { href: "/privacy", label: "Privacy Policy" },
