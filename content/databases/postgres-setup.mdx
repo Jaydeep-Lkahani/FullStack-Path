@@ -1,0 +1,433 @@
+---
+title: Setting Up PostgreSQL
+summary: "Explain what a relational database is, run PostgreSQL 18 on your Mac or for free on Neon, and connect to it with psql, a connection string and a GUI."
+order: 1
+takeaways:
+  - A relational database keeps data in tables with typed columns and enforces rules such as NOT NULL and UNIQUE, so bad data is refused instead of saved.
+  - PostgreSQL is a server that listens on port 5432, and psql, a GUI and your Node app are all clients that connect to it.
+  - One server holds many databases, and each database holds tables, while roles are the users that log in and own things.
+  - A connection string such as postgresql://user:password@host:5432/dbname holds everything a client needs, so it lives in .env and never in Git.
+  - Give every app its own role and its own database owned by that role, instead of connecting as the superuser.
+  - Most connection errors say exactly what is wrong, such as no server running, a missing database or a wrong password, so read the message before changing anything.
+videos:
+  - title: "PostgreSQL in 100 Seconds"
+    channel: "Fireship"
+    duration: "2:37"
+    url: https://www.youtube.com/watch?v=n2Fluyr3lbc
+  - title: "Getting Started with Neon"
+    channel: "Neon Postgres"
+    duration: "13:04"
+    url: https://www.youtube.com/watch?v=XtMiMnX0hDg
+docs:
+  - title: "PostgreSQL — Getting Started tutorial"
+    url: https://www.postgresql.org/docs/current/tutorial-start.html
+  - title: "PostgreSQL — psql reference"
+    url: https://www.postgresql.org/docs/current/app-psql.html
+  - title: "PostgreSQL — Connection URIs"
+    url: https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING-URIS
+  - title: "PostgreSQL — The pg_hba.conf file"
+    url: https://www.postgresql.org/docs/current/auth-pg-hba-conf.html
+  - title: "Postgres.app documentation"
+    url: https://postgresapp.com/documentation/
+  - title: "Neon — Connect from any app"
+    url: https://neon.com/docs/connect/connect-from-any-app
+---
+
+So far every API in this course kept its data in an array or a JSON file, and lost it or fought over it the moment two requests wrote at once. Real apps keep their data in a database, and for most Node and Next.js jobs that database is PostgreSQL. Interviewers expect you to know what a table, a primary key and a connection string are, and every later lesson in this module (SQL, schema design, Prisma, the blog backend) assumes you have a server running and can open a prompt on it.
+
+This lesson is written for PostgreSQL 18 (18.6 at the time of writing; 19 is due in late November 2026 and changes nothing here). It covers what a relational database is, three ways to run one, and how to connect with `psql`, a connection string and a GUI. Every command and output below comes from a real session with the Homebrew PostgreSQL 18 on macOS. The Postgres.app, Neon and GUI steps follow their official docs but were not clicked through here.
+
+## What a relational database is
+
+A **relational database** stores data in **tables**. A table has named **columns**, each with a **type**, and any number of **rows**:
+
+```text
+users
++----+------+------------------+
+| id | name | email            |
++----+------+------------------+
+|  1 | Asha | asha@example.com |
+|  2 | Ben  | ben@example.com  |
++----+------+------------------+
+```
+
+It looks like a spreadsheet, but there are three big differences:
+
+- **Every column has a type and rules.** `email` can be declared `NOT NULL` (always filled in) and `UNIQUE` (no two rows share it). The database refuses a row that breaks a rule, whatever code sent it.
+- **Tables point at each other.** A `posts` table can have a `user_id` column that holds a `users.id`. That link is the "relational" part, and lesson 5 is all about it.
+- **You ask questions in SQL.** "Every post by Asha, newest first" is one `SELECT` statement, and the database works out how to answer it fast.
+
+You built a small JSON store in `node-express/files-and-paths`. A database fixes what that store could not do: two requests writing at the same moment don't overwrite each other, a crash halfway through a write doesn't leave a broken file, and finding one row among a million doesn't mean reading all of them.
+
+**PostgreSQL** (often just "Postgres") is a free, open-source relational database. MySQL and SQLite are the other common ones; the SQL you learn here works in them with small changes.
+
+## A server, its clients, and what lives inside
+
+Postgres is a **server**: a program that runs in the background and listens for connections, by default on **port 5432**. Everything else is a **client** that connects to it, just like a browser connects to a web server:
+
+```text
+psql (terminal) ──┐
+GUI app ──────────┼──►  PostgreSQL server :5432
+your Node API ────┘       └── databases ── tables ── rows
+```
+
+Inside one server:
+
+- **Databases.** One server holds many databases, for example `blog` and `shop`. A connection is always to one database, and a query can't read another database's tables.
+- **Schemas and tables.** Inside a database, tables live in a **schema**, by default one called `public`. You can ignore schemas for now; `public.users` and `users` mean the same table.
+- **Roles.** A **role** is a user that can log in and own things. A **superuser** role can do anything. Installs on your Mac create a superuser named after your macOS user.
+
+The common mistake is mixing up the server and a database: "is Postgres running?" is about the server, and "does the `blog` database exist?" is a separate question with a separate error message.
+
+## Install it: pick one of three ways
+
+| Option          | Runs where             | Good for                                          |
+| --------------- | ---------------------- | ------------------------------------------------- |
+| Postgres.app    | Your Mac, as an app    | The easiest local start; a menu-bar icon          |
+| Homebrew        | Your Mac, as a service | People who already use `brew` for everything      |
+| Neon (free)     | The cloud              | No install at all; it is also where you deploy later |
+
+Pick **one** local option (Postgres.app or Homebrew, not both, because both want port 5432). Neon works alongside either. On Windows, use the installer linked from [postgresql.org/download](https://www.postgresql.org/download/); on Ubuntu, `sudo apt install postgresql`.
+
+### Option A: Postgres.app
+
+1. Download "Postgres.app with PostgreSQL 18" from [postgresapp.com/downloads.html](https://postgresapp.com/downloads.html).
+2. Move it to **Applications** (some features break if you skip this), then double-click it.
+3. Click **Initialize**. You now have a server on port 5432 and a database named after your macOS user.
+4. Put its command-line tools on your `PATH`, then open a **new** terminal:
+
+```bash
+sudo mkdir -p /etc/paths.d &&
+echo /Applications/Postgres.app/Contents/Versions/latest/bin | sudo tee /etc/paths.d/postgresapp
+```
+
+The first time any app connects without a password, Postgres.app shows a dialog asking whether to allow it. Click **OK** for your terminal and your GUI. If you click "Don't Allow", connections fail with `Postgres.app rejected "trust" authentication`; change it under Postgres → Settings.
+
+### Option B: Homebrew
+
+If `brew` is not installed yet, `web-foundations/mac-setup` shows how.
+
+```bash
+brew install postgresql@18
+```
+
+The formula is **keg-only**: Homebrew installs it but does not put `psql` on your `PATH`. Add it yourself (on an Intel Mac the path starts with `/usr/local` instead of `/opt/homebrew`), then check:
+
+```bash
+echo 'export PATH="/opt/homebrew/opt/postgresql@18/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+psql --version          # psql (PostgreSQL) 18.6 (Homebrew)
+```
+
+Installing already created the data folder (`/opt/homebrew/var/postgresql@18`). Start the server as a background service that also starts at login, and check it answers:
+
+```bash
+brew services start postgresql@18
+pg_isready              # /tmp:5432 - accepting connections
+createdb                # creates a database named after your macOS user
+```
+
+`createdb` with no name matters: `psql` with no arguments connects to a database **named after you**, and without it your first `psql` fails with `FATAL: database "yourname" does not exist`.
+
+<Callout type="warning" title="Already have an older Postgres?">
+Run `brew services list`. If an older version such as `postgresql@16` is already started, it holds port 5432 and the new one can't start. Stop it first with `brew services stop postgresql@16`. If `psql --version` still shows the old version, your `PATH` line is missing or you didn't open a new terminal.
+</Callout>
+
+### Option C: Neon (free, in the cloud)
+
+Neon runs Postgres for you. The Free plan needs no credit card and is not a trial; it gives you 1 GB of storage per project, and the database sleeps after 5 minutes without queries and wakes on the next one (the first query then takes a moment longer).
+
+1. Sign up at [neon.com](https://neon.com/signup) and click **New Project**. Pick a name, a region near you and Postgres version 18.
+2. Neon creates a database `neondb` and a role `neondb_owner`.
+3. Click **Connect** and copy the connection string. It looks like this:
+
+```text
+postgresql://neondb_owner:AbC123dEf@ep-cool-darkness-a1b2c3d4-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+```
+
+Neon also needs `psql` on your machine. If you didn't do option A or B, `brew install libpq` gives you just the client tools (keg-only too, so add `/opt/homebrew/opt/libpq/bin` to your `PATH`). The `-pooler` part of the host is Neon's connection pooler; it is right for apps, and lesson 7 explains when Prisma's migrations need the direct host without it.
+
+## Your first psql session
+
+`psql` is the official terminal client. With a local server, plain `psql` is enough; `psql -d postgres` connects to the `postgres` database that always exists. For Neon, pass the whole connection string in quotes: `psql "postgresql://..."`.
+
+```text
+$ psql
+psql (18.6 (Homebrew))
+Type "help" for help.
+
+jaydeep=#
+```
+
+The prompt is the database name, then `=#` if you are a superuser or `=>` if you are not. Commands starting with a backslash are **meta-commands**: psql handles them itself, they need no semicolon, and they are how you look around.
+
+| Command        | What it does                                   |
+| -------------- | ---------------------------------------------- |
+| `\l`           | list databases                                 |
+| `\c blog`      | connect to the database `blog`                 |
+| `\dt`          | list tables in this database                   |
+| `\d users`     | show one table's columns, types and indexes    |
+| `\du`          | list roles                                     |
+| `\conninfo`    | who am I, which database, which host and port  |
+| `\x`           | turn expanded (one column per line) display on or off |
+| `\i file.sql`  | run the SQL in a file                          |
+| `\?` and `\h`  | help for meta-commands and for SQL statements  |
+| `\q`           | quit                                           |
+
+Everything else is SQL, and **SQL statements end with a semicolon**. Here is a first table. The next lesson explains each word; for now, read it as "a `users` table whose `id` the database numbers for you, with a required name and a required, unique email":
+
+```text
+jaydeep=# CREATE DATABASE playground;
+CREATE DATABASE
+jaydeep=# \c playground
+You are now connected to database "playground" as user "jaydeep".
+playground=# CREATE TABLE users (
+playground(#   id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+playground(#   name text NOT NULL,
+playground(#   email text NOT NULL UNIQUE
+playground(# );
+CREATE TABLE
+playground=# INSERT INTO users (name, email) VALUES ('Asha', 'asha@example.com'), ('Ben', 'ben@example.com');
+INSERT 0 2
+playground=# SELECT * FROM users;
+ id | name |      email
+----+------+------------------
+  1 | Asha | asha@example.com
+  2 | Ben  | ben@example.com
+(2 rows)
+```
+
+Now watch the rules from the first section refuse bad data:
+
+```text
+playground=# INSERT INTO users (name, email) VALUES ('Ben', 'ben@example.com');
+ERROR:  duplicate key value violates unique constraint "users_email_key"
+DETAIL:  Key (email)=(ben@example.com) already exists.
+playground=# INSERT INTO users (name) VALUES ('No email');
+ERROR:  null value in column "email" of relation "users" violates not-null constraint
+```
+
+And `\d users` shows what the table really is:
+
+```text
+playground=# \d users
+                          Table "public.users"
+ Column |  Type   | Collation | Nullable |           Default
+--------+---------+-----------+----------+------------------------------
+ id     | integer |           | not null | generated always as identity
+ name   | text    |           | not null |
+ email  | text    |           | not null |
+Indexes:
+    "users_pkey" PRIMARY KEY, btree (id)
+    "users_email_key" UNIQUE CONSTRAINT, btree (email)
+```
+
+**The common mistake** is forgetting the semicolon. psql then waits for the rest of the statement and the prompt changes from `=#` to `-#` (or `(#` inside brackets):
+
+```text
+playground=# SELECT name FROM users
+playground-# ;
+```
+
+Nothing is wrong: type `;` and press Enter to run it, or `\r` to throw the half-typed statement away. The second surprise is a result that fills the screen and ends in `(END)`: psql opened it in a pager. Press `q` to get back to the prompt, or run `\pset pager off` to print everything straight to the terminal.
+
+## Connection strings
+
+psql found your local server because it defaults to your username, your machine and port 5432. An app has no such defaults; it gets one **connection string** (also called a connection URL) that holds everything:
+
+```text
+postgresql://blog_app:dev-only-secret@localhost:5432/blog?sslmode=require
+└─scheme──┘ └─role─┘ └──password───┘ └─host──┘ └port┘└db┘ └──options───┘
+```
+
+- **Scheme**: `postgresql://` (`postgres://` also works).
+- **Role and password**: who logs in. A local server with no password needs only `postgresql://localhost/blog`.
+- **Host and port**: `localhost` for your Mac, the Neon host for Neon. The port defaults to 5432.
+- **Database**: which database to open.
+- **Options**: `sslmode=require` encrypts the connection. Cloud databases demand it; your local server doesn't support SSL by default, so leave it off there.
+
+Apps read it from an environment variable, by convention `DATABASE_URL`, kept in `.env` (exactly as in `node-express/node-runtime`). Prisma reads this same variable in lesson 7. To use it from the terminal, load `.env` into your shell first:
+
+```bash
+set -a; source .env; set +a
+psql "$DATABASE_URL"
+```
+
+A password with special characters breaks the URL. With the password `p@ss:word`, psql read everything after the first `@` as the host and failed with `invalid integer value "word@localhost:5433" for connection option "port"`. Characters such as `@ : / ? # %` must be **percent-encoded** (`@` becomes `%40`, `:` becomes `%3A`); in Node, `encodeURIComponent("p@ss:word")` gives `p%40ss%3Aword`.
+
+<Callout type="warning" title="A connection string is a password">
+Anyone with your Neon connection string can read and delete your data. Keep it in `.env`, make sure `.env` is in `.gitignore`, and never paste it into a lesson, an issue or a screenshot. If one leaks, reset the role's password in the Neon console.
+</Callout>
+
+## A role and a database for each app
+
+Connecting your API as your superuser works, but it means one bug or one leaked `.env` can drop every database on the server. The habit is **one role and one database per app**, with the database owned by that role:
+
+```sql
+-- run as your superuser, connected to the postgres database
+CREATE ROLE blog_app WITH LOGIN PASSWORD 'dev-only-secret';
+CREATE DATABASE blog OWNER blog_app;
+```
+
+Then connect as the new role and check who you are:
+
+```text
+$ psql "postgresql://blog_app:dev-only-secret@localhost:5432/blog"
+blog=> \conninfo
+...
+ Database             | blog
+ Client User          | blog_app
+ Host                 | localhost
+```
+
+The prompt ends in `=>` now: `blog_app` is not a superuser. Because it owns `blog`, it can create tables there. **The common mistake** is creating the database without `OWNER`. Since PostgreSQL 15 an ordinary role can't create tables in another role's database, and you get this:
+
+```text
+shop=> CREATE TABLE products (id integer);
+ERROR:  permission denied for schema public
+```
+
+Fix it with `ALTER DATABASE shop OWNER TO shop_app;` run as the superuser.
+
+<Callout type="note" title="Your local server doesn't check passwords">
+Homebrew and Postgres.app set up local connections with **trust** authentication: anyone on your Mac can connect as any role, and the password is ignored. Here, `postgresql://blog_app:WRONG@localhost:5432/blog` connected fine. That is acceptable on a laptop, but don't conclude your password is right because it worked locally; Neon checks it. Exercise 5 shows how to switch localhost to real password checks.
+</Callout>
+
+## Using a GUI
+
+A GUI lets you browse tables and edit rows with the mouse, which helps while you learn. Any of these works: [pgAdmin](https://www.pgadmin.org/download/) (the official one, free), [DBeaver Community](https://dbeaver.io/) (free), [TablePlus](https://tableplus.com/) or [Postico](https://eggerapps.at/postico2/) (Mac, free tiers with limits). Lesson 7 adds Prisma Studio, which runs in the browser.
+
+Every GUI asks for the same fields as the connection string. Many accept the whole string pasted in.
+
+| GUI field | Local (Homebrew / Postgres.app) | Neon                               |
+| --------- | ------------------------------- | ---------------------------------- |
+| Host      | `localhost`                     | the `ep-...neon.tech` host         |
+| Port      | `5432`                          | `5432`                             |
+| User      | your macOS username or `blog_app` | `neondb_owner`                   |
+| Password  | empty (trust) or the role's     | from the Connect dialog            |
+| Database  | `postgres` or `blog`            | `neondb`                           |
+| SSL       | off / prefer                    | **require**                        |
+
+Leaving SSL off is the usual reason a GUI can't reach Neon. With Postgres.app, remember to allow the GUI in the permission dialog the first time.
+
+## When it doesn't connect
+
+Every error below came from a real session. Read the last line of the message; it names the problem.
+
+| Error contains                                         | Meaning and fix                                                    |
+| ------------------------------------------------------ | ------------------------------------------------------------------ |
+| `socket "/tmp/.s.PGSQL.5432" failed: No such file`     | No local server running. `brew services start postgresql@18` or open Postgres.app |
+| `Connection refused` ... `accepting TCP/IP connections`| Same, when connecting to `localhost`; or a wrong port               |
+| `database "jaydeep" does not exist`                    | The server is fine; that database isn't. Run `createdb` or `psql -d postgres` |
+| `role "nobody" does not exist`                         | Typo in the user, or the role was never created                     |
+| `password authentication failed for user "blog_app"`   | Wrong password (only servers that check passwords say this)         |
+| `invalid integer value ... for connection option "port"` | A special character in the password; percent-encode it           |
+| `cannot drop the currently open database`              | `\c postgres` first, then `DROP DATABASE`                          |
+
+<Exercise title="Explore your server">
+Using psql only: list the databases, create a database `scratch`, connect to it, create a table `books` with an identity `id` and a required `title`, add two books, show the table's structure, and finally delete the `scratch` database.
+
+<Solution>
+```text
+\l
+CREATE DATABASE scratch;
+\c scratch
+CREATE TABLE books (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title text NOT NULL
+);
+INSERT INTO books (title) VALUES ('Eloquent JavaScript'), ('The Pragmatic Programmer');
+SELECT * FROM books;
+\d books
+\c postgres
+DROP DATABASE scratch;
+```
+
+You must leave `scratch` with `\c postgres` before dropping it, or you get `cannot drop the currently open database`.
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the output">
+You type these lines into psql, connected to `playground` as your superuser. What does each prompt look like, and what happens?
+
+```text
+SELECT name FROM users
+WHERE id = 1
+;
+DROP DATABASE playground;
+```
+
+<Solution>
+The first two lines have no semicolon, so psql keeps collecting and the prompt changes from `playground=#` to `playground-#`. The `;` on the third line runs the whole statement and prints Asha's row. The `DROP DATABASE` fails with `ERROR: cannot drop the currently open database`, because you are connected to it. Connect to `postgres` first.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the connection string">
+This `.env` line makes psql fail with `invalid integer value "word@localhost:5432" for connection option "port"`. The password really is `p@ss:word`. Explain the error and fix the line.
+
+```bash
+DATABASE_URL="postgresql://demo:p@ss:word@localhost:5432/blog"
+```
+
+<Solution>
+The first `@` ends the user and password part, so psql reads `demo:p` as user and password, then `ss` as the host and `word@localhost:5432` as the port. Percent-encode the special characters in the password:
+
+```bash
+DATABASE_URL="postgresql://demo:p%40ss%3Aword@localhost:5432/blog"
+```
+
+`node -e 'console.log(encodeURIComponent("p@ss:word"))'` prints the encoded form for you.
+</Solution>
+</Exercise>
+
+<Exercise title="A database for the blog API">
+Set up what the blog backend at the end of this module will use: a role `blog_app` with a password, a database `blog` it owns, and a `.env` file with `DATABASE_URL`. Prove it works by connecting with `psql "$DATABASE_URL"`, checking `\conninfo`, and creating and listing a table `notes`.
+
+<Solution>
+```bash
+psql -d postgres -c "CREATE ROLE blog_app WITH LOGIN PASSWORD 'dev-only-secret'"
+psql -d postgres -c "CREATE DATABASE blog OWNER blog_app"
+
+echo 'DATABASE_URL="postgresql://blog_app:dev-only-secret@localhost:5432/blog"' > .env
+echo '.env' >> .gitignore
+
+set -a; source .env; set +a
+psql "$DATABASE_URL" -c '\conninfo'
+psql "$DATABASE_URL" -c "CREATE TABLE notes (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, body text NOT NULL)"
+psql "$DATABASE_URL" -c '\dt'
+```
+
+The two `CREATE` statements are separate `-c` flags on purpose: several statements in one `-c` run as one transaction, and `CREATE DATABASE` refuses to run inside a transaction. `\dt` lists `notes` with the owner `blog_app`.
+</Solution>
+</Exercise>
+
+<Exercise title="Make localhost check passwords (Homebrew)">
+Change your Homebrew server so connections to `localhost` need the right password, while plain `psql` (over the local socket) keeps working without one. Prove that a wrong password is now refused.
+
+<Solution>
+```bash
+psql -d postgres -Atc 'SHOW hba_file'
+# /opt/homebrew/var/postgresql@18/pg_hba.conf
+```
+
+In that file, change `trust` to `scram-sha-256` on the two `host` lines for `127.0.0.1/32` and `::1/128`. Leave the `local` line on `trust`, so you can't lock yourself out:
+
+```text
+local   all   all                    trust
+host    all   all   127.0.0.1/32     scram-sha-256
+host    all   all   ::1/128          scram-sha-256
+```
+
+Reload the configuration (no restart needed) and test:
+
+```bash
+psql -d postgres -c 'SELECT pg_reload_conf()'
+psql "postgresql://blog_app:WRONG@localhost:5432/blog" -c 'SELECT 1'
+# FATAL:  password authentication failed for user "blog_app"
+psql "postgresql://blog_app:dev-only-secret@localhost:5432/blog" -c '\conninfo'
+# ... Password Used | true
+```
+
+Postgres.app has the same setting under Server Settings and the app's docs.
+</Solution>
+</Exercise>

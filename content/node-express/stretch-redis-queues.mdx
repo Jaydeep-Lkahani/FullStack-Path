@@ -54,6 +54,8 @@ redis-server                # starts it on port 6379 and stays in this terminal
 
 On Ubuntu, `sudo apt install redis-server` does the same. With Docker (untried here) use `docker run -p 6379:6379 redis:8`. A free hosted Redis gives you a URL like `rediss://default:password@host:6380` instead. In a second terminal, `redis-cli ping` should answer `PONG`.
 
+On a Mac you can also keep Redis running in the background, even after a restart, with `brew services start redis`, and stop it with `brew services stop redis`. If Redis can't start because port 6379 is taken, `lsof -nP -iTCP:6379 -sTCP:LISTEN` shows which program holds it (often a Redis you started earlier).
+
 ### The commands you will use
 
 `redis-cli` is a shell for Redis. This is a real session; the lines starting with `>` are what I typed, and the others are what came back:

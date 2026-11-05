@@ -1,0 +1,360 @@
+---
+title: SQL Basics
+summary: "Create a table with types and rules, add rows with INSERT, and read exactly the rows you want with SELECT and WHERE, including the NULL cases."
+order: 2
+takeaways:
+  - CREATE TABLE gives every column a type and rules such as NOT NULL, DEFAULT and CHECK, and the database refuses any row that breaks them.
+  - Store money in numeric, never in a floating-point type, because floats can't hold most decimals exactly.
+  - Single quotes are for values and double quotes are for column and table names, so "Eraser" in a query means a column called Eraser.
+  - INSERT ... RETURNING hands back the new row, and identity ids are unique but can have gaps.
+  - WHERE keeps the rows whose condition is true, and AND is evaluated before OR, so use brackets when you mix them.
+  - NULL means unknown and is never equal or unequal to anything, so you test it with IS NULL.
+videos:
+  - title: "SQL Explained in 100 Seconds"
+    channel: "Fireship"
+    duration: "2:22"
+    url: https://www.youtube.com/watch?v=zsjvFFKOm3c
+  - title: "PostgreSQL Tutorial for Beginners"
+    channel: "freeCodeCamp.org"
+    duration: "2:53:26"
+    url: https://www.youtube.com/watch?v=SpfIwlAYaKk
+docs:
+  - title: "PostgreSQL — Creating a new table"
+    url: https://www.postgresql.org/docs/current/tutorial-table.html
+  - title: "PostgreSQL — Querying a table"
+    url: https://www.postgresql.org/docs/current/tutorial-select.html
+  - title: "PostgreSQL — Inserting data"
+    url: https://www.postgresql.org/docs/current/dml-insert.html
+  - title: "PostgreSQL — Numeric types"
+    url: https://www.postgresql.org/docs/current/datatype-numeric.html
+  - title: "PostgreSQL — Comparison operators and IS NULL"
+    url: https://www.postgresql.org/docs/current/functions-comparison.html
+  - title: "PostgreSQL — LIKE and ILIKE"
+    url: https://www.postgresql.org/docs/current/functions-matching.html
+---
+
+In the last lesson you typed a `CREATE TABLE` and an `INSERT` without knowing what each word meant. This lesson fills that in. Almost everything an app does with its data is one of four things, often called **CRUD**: create, read, update, delete. In SQL they are `INSERT`, `SELECT`, `UPDATE` and `DELETE`, and they map one-to-one onto the REST routes you built in `node-express/rest-api-build`: `POST`, `GET`, `PATCH` and `DELETE`.
+
+Interviews nearly always include "write a query that…", and even with an ORM you will read SQL in logs and error messages; Prisma writes these same statements for you later in this module. This lesson covers creating a table, adding rows and reading exactly the rows you want. The next one, `databases/sql-sorting-and-changes`, sorts, pages, updates and deletes them. Everything here is written for PostgreSQL 18, and every output comes from a real `psql` session. Your `created_at` values will show your own time zone; the ones below show `+05:30`.
+
+## Set up a practice database
+
+Create a database called `shop`, then save the file below in any folder:
+
+```bash
+createdb shop
+```
+
+```sql
+-- shop.sql: run it with \i shop.sql while connected to the shop database
+DROP TABLE IF EXISTS products;
+
+CREATE TABLE products (
+  id          integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name        text NOT NULL,
+  category    text NOT NULL,
+  price       numeric(10, 2) NOT NULL CHECK (price >= 0),
+  stock       integer NOT NULL DEFAULT 0,
+  description text,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO products (name, category, price, stock, description, created_at) VALUES
+  ('Mechanical Keyboard', 'electronics', 89.99,  12, 'Hot-swappable switches', '2026-01-10'),
+  ('USB-C Cable',         'electronics',  9.50, 140, NULL,                     '2026-02-02'),
+  ('Desk Lamp',           'home',        34.00,   0, 'Warm white LED',         '2026-02-15'),
+  ('Notebook A5',         'stationery',   4.25, 300, NULL,                     '2026-03-01'),
+  ('Monitor Stand',       'home',        45.00,   7, 'Bamboo',                 '2026-03-20'),
+  ('Wireless Mouse',      'electronics', 24.99,   0, NULL,                     '2026-04-05'),
+  ('Fountain Pen',        'stationery',  32.00,  15, 'Medium nib',             '2026-05-12'),
+  ('Webcam',              'electronics', 59.00,   3, NULL,                     '2026-06-30'),
+  ('Coaster Set',         'home',         8.00,  40, 'Cork, set of 4',         '2026-07-18');
+```
+
+From that folder, run `psql -d shop`, then `\i shop.sql` (`\i` reads paths relative to the folder you started `psql` in). On Neon, use `psql "$DATABASE_URL" -f shop.sql`. The first line drops the table, so **running the file again resets everything**; do that whenever an experiment leaves a mess. Check it worked:
+
+```text
+shop=# SELECT * FROM products;
+ id |        name         |  category   | price | stock |      description       |        created_at
+----+---------------------+-------------+-------+-------+------------------------+---------------------------
+  1 | Mechanical Keyboard | electronics | 89.99 |    12 | Hot-swappable switches | 2026-01-10 00:00:00+05:30
+  2 | USB-C Cable         | electronics |  9.50 |   140 |                        | 2026-02-02 00:00:00+05:30
+  3 | Desk Lamp           | home        | 34.00 |     0 | Warm white LED         | 2026-02-15 00:00:00+05:30
+...
+  9 | Coaster Set         | home        |  8.00 |    40 | Cork, set of 4         | 2026-07-18 00:00:00+05:30
+(9 rows)
+```
+
+## CREATE TABLE: columns, types and rules
+
+Each line inside `CREATE TABLE` is a column: a **name**, a **type**, then optional **rules** (called constraints). These are the types you will use most:
+
+| Type             | Holds                                    | Example values              |
+| ---------------- | ---------------------------------------- | --------------------------- |
+| `text`           | a string of any length                   | `'Desk Lamp'`               |
+| `integer`        | a whole number up to about 2.1 billion   | `12`, `-3`                  |
+| `numeric(10, 2)` | an exact decimal: 10 digits, 2 after the point | `89.99`               |
+| `boolean`        | `true` or `false`                        | `true`                      |
+| `timestamptz`    | a moment in time, with time zone         | `'2026-01-10'`, `now()`     |
+
+And the rules in `products`:
+
+- `GENERATED ALWAYS AS IDENTITY` makes the database number the rows 1, 2, 3… for you. `PRIMARY KEY` means the value is unique and never empty, so it identifies exactly one row (the schema design lesson goes deeper).
+- `NOT NULL` means the column must have a value. Without it, a column may be **NULL**: "no value" (the empty `description` cells above).
+- `DEFAULT 0` and `DEFAULT now()` fill the column when an `INSERT` leaves it out.
+- `CHECK (price >= 0)` refuses any row where the condition is false.
+
+**The common mistake** is storing money in a floating-point type (`real` or `double precision`, JavaScript's `number`). Floats can't hold most decimals exactly:
+
+```text
+shop=# SELECT 0.1::float8 + 0.2::float8 AS float_sum, 0.1::numeric + 0.2::numeric AS numeric_sum;
+      float_sum      | numeric_sum
+---------------------+-------------
+ 0.30000000000000004 |         0.3
+```
+
+(`::` converts a value to a type.) Use `numeric` for money. It rounds to the scale you gave it, so `SELECT 1.999::numeric(10, 2)` returns `2.00`.
+
+### Changing a table later
+
+You rarely get a table right the first time. `ALTER TABLE` changes it without losing rows, and `DROP TABLE` deletes it with all its data:
+
+```sql
+ALTER TABLE products ADD COLUMN sku text;        -- existing rows get NULL
+ALTER TABLE products RENAME COLUMN sku TO code;
+ALTER TABLE products DROP COLUMN code;
+DROP TABLE products;                             -- gone, no undo
+```
+
+Two style points. SQL keywords are case-insensitive, and unquoted names are folded to lowercase, so `select NAME from PRODUCTS` works; the convention is uppercase keywords and `snake_case` names. And `--` starts a comment that runs to the end of the line.
+
+## INSERT: adding rows
+
+List the columns, then one set of values per row, in the same order. `RETURNING` hands back columns of the new row, which is how your API learns the `id` it just created:
+
+```text
+shop=# INSERT INTO products (name, category, price) VALUES ('Pencil Set', 'stationery', 6.75)
+shop-# RETURNING id, name, stock, created_at;
+ id |    name    | stock |            created_at
+----+------------+-------+----------------------------------
+ 10 | Pencil Set |     0 | 2026-11-03 23:31:58.520358+05:30
+(1 row)
+
+INSERT 0 1
+```
+
+`stock` and `created_at` came from their defaults, and `id` from the identity. Several rows go in one statement, separated by commas:
+
+```sql
+INSERT INTO products (name, category, price, stock) VALUES
+  ('Sticky Notes', 'stationery', 3.10, 80),
+  ('Mouse Pad',    'electronics', 12.00, 25)
+RETURNING id, name;   -- 11 Sticky Notes, 12 Mouse Pad
+```
+
+Now the rules at work. Each of these is refused, and nothing is saved:
+
+```text
+shop=# INSERT INTO products (name, price) VALUES ('Mystery', 3.00);
+ERROR:  null value in column "category" of relation "products" violates not-null constraint
+shop=# INSERT INTO products (name, category, price) VALUES ('Broken', 'home', -5);
+ERROR:  new row for relation "products" violates check constraint "products_price_check"
+shop=# INSERT INTO products (name, category, price) VALUES ('Ruler', 'stationery');
+ERROR:  INSERT has more target columns than expressions
+```
+
+A detail that surprises people: the next successful insert got `id` 15, not 13. Each failed insert still used up a number. Identity values are unique, but **gaps are normal**, so never use them to count rows or assume `id` 13 exists.
+
+<Callout type="warning" title="Single quotes for values, double quotes for names">
+In SQL, `'Eraser'` is a string and `"Eraser"` is the **name of a column**. So `VALUES ("Eraser", 'stationery', 1.20)` fails with `column "Eraser" does not exist`. JavaScript lets you use either quote; SQL doesn't. To put an apostrophe inside a string, double it: `'Ben''s pen'`.
+</Callout>
+
+## SELECT: reading rows
+
+Run `\i shop.sql` to reset to the nine rows, then read. Name the columns you want after `SELECT`, and the table after `FROM`:
+
+```text
+shop=# SELECT name, price FROM products;
+        name         | price
+---------------------+-------
+ Mechanical Keyboard | 89.99
+ USB-C Cable         |  9.50
+ ...
+(9 rows)
+```
+
+A column list can hold expressions, and `AS` names the result column. `DISTINCT` removes duplicate rows from the result:
+
+```text
+shop=# SELECT name, price * stock AS stock_value FROM products;
+        name         | stock_value
+---------------------+-------------
+ Mechanical Keyboard |     1079.88
+ USB-C Cable         |     1330.00
+ Desk Lamp           |        0.00
+ ...
+shop=# SELECT DISTINCT category FROM products;
+  category
+-------------
+ stationery
+ home
+ electronics
+```
+
+`SELECT *` (every column) is handy in `psql`. In app code, **name the columns**: `*` sends columns you don't need (later, maybe a large one or a password hash), and your code silently changes shape when someone adds a column.
+
+## WHERE: picking rows
+
+`WHERE` keeps only the rows for which a condition is true:
+
+| Operator                     | Means                                  |
+| ---------------------------- | -------------------------------------- |
+| `=`, `<>` (or `!=`)          | equal, not equal (one `=`, not `===`)  |
+| `<`, `>`, `<=`, `>=`         | comparisons; work on numbers, text and dates |
+| `AND`, `OR`, `NOT`           | combine conditions                     |
+| `IN ('a', 'b')`              | equal to any value in the list         |
+| `BETWEEN 20 AND 45`          | from 20 to 45, **both ends included**  |
+| `LIKE '%pen%'`, `ILIKE`      | text pattern; `%` is any run of characters, `_` one character; `ILIKE` ignores case |
+| `IS NULL`, `IS NOT NULL`     | has no value / has a value             |
+
+```text
+shop=# SELECT name, stock FROM products WHERE category = 'electronics' AND stock > 0;
+        name         | stock
+---------------------+-------
+ Mechanical Keyboard |    12
+ USB-C Cable         |   140
+ Webcam              |     3
+shop=# SELECT name FROM products WHERE name ILIKE '%pen%';
+     name
+--------------
+ Fountain Pen
+shop=# SELECT name FROM products WHERE created_at >= '2026-05-01';   -- Fountain Pen, Webcam, Coaster Set
+```
+
+Text comparison is case-sensitive: `WHERE category = 'Electronics'` returns `(0 rows)`, and so does `LIKE '%pen%'`, because the name has a capital P.
+
+**The common mistake** is mixing `AND` and `OR` without brackets. `AND` binds tighter, like `*` before `+` in maths. Asked for "home or stationery products over 30", this query also returns the 8.00 Coaster Set:
+
+```text
+shop=# SELECT name, category, price FROM products
+shop-# WHERE category = 'home' OR category = 'stationery' AND price > 30;
+     name      |  category  | price
+---------------+------------+-------
+ Desk Lamp     | home       | 34.00
+ Monitor Stand | home       | 45.00
+ Fountain Pen  | stationery | 32.00
+ Coaster Set   | home       |  8.00
+(4 rows)
+```
+
+It was read as `home OR (stationery AND price > 30)`. Write `WHERE (category = 'home' OR category = 'stationery') AND price > 30`, or shorter, `WHERE category IN ('home', 'stationery') AND price > 30`. Both return the first three rows only.
+
+### NULL is not a value
+
+NULL means "unknown", and comparing anything with unknown gives unknown, which `WHERE` treats as false. So `= NULL` never matches, not even NULL:
+
+```text
+shop=# SELECT name FROM products WHERE description = NULL;
+ name
+------
+(0 rows)
+
+shop=# SELECT name FROM products WHERE description IS NULL;   -- USB-C Cable, Notebook A5, Wireless Mouse, Webcam
+```
+
+<Callout type="note" title="NULL rows drop out of 'not equal' too">
+`WHERE description <> 'Bamboo'` returns 4 rows, not 8: the four with no description are unknown, so they are left out. If you mean "everything except Bamboo, including empty ones", write `description IS DISTINCT FROM 'Bamboo'` (8 rows), which treats NULL as an ordinary value.
+</Callout>
+
+<Exercise title="A books table">
+Create a table `books` with an identity `id`, a required `title` and `author`, an optional `year`, a `pages` count that must be above 0 when given, and an `is_read` flag that defaults to `false`. Insert four books in one statement, one of them already read, then list the title and year of the unread ones published after 2017. Finally, show that a book with 0 pages is refused.
+
+<Solution>
+```sql
+CREATE TABLE books (
+  id      integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  title   text NOT NULL,
+  author  text NOT NULL,
+  year    integer,
+  pages   integer CHECK (pages > 0),
+  is_read boolean NOT NULL DEFAULT false
+);
+
+INSERT INTO books (title, author, year, pages, is_read) VALUES
+  ('Eloquent JavaScript', 'Marijn Haverbeke', 2024, 456, true),
+  ('The Pragmatic Programmer', 'David Thomas', 2019, 352, false),
+  ('Designing Data-Intensive Applications', 'Martin Kleppmann', 2017, 616, false),
+  ('Refactoring', 'Martin Fowler', 2018, NULL, false);
+
+SELECT title, year FROM books WHERE is_read = false AND year > 2017;
+-- The Pragmatic Programmer 2019, Refactoring 2018
+
+INSERT INTO books (title, author, pages) VALUES ('Empty', 'Nobody', 0);
+-- ERROR:  new row for relation "books" violates check constraint "books_pages_check"
+```
+
+`Refactoring` has no page count, and that is allowed: a `CHECK` only refuses a row when its condition is **false**, and `NULL > 0` is unknown, not false.
+</Solution>
+</Exercise>
+
+<Exercise title="Predict the output">
+Starting from a fresh `\i shop.sql`, which rows does each query return?
+
+```sql
+SELECT name FROM products WHERE description <> 'Medium nib';
+SELECT name FROM products WHERE stock > 0 AND category = 'home' OR category = 'stationery';
+```
+
+<Solution>
+The first returns 4 rows: Mechanical Keyboard, Desk Lamp, Monitor Stand and Coaster Set. The four products with no description are left out, because NULL is never "not equal" to anything.
+
+The second also returns 4 rows: Notebook A5, Monitor Stand, Fountain Pen and Coaster Set. `AND` binds first, so it reads `(stock > 0 AND home) OR stationery`. That is the two home products in stock plus both stationery products; Desk Lamp is skipped because its stock is 0.
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+This should list the name and price of every electronics product under 30 that has no description. Postgres shows one error at a time, so fix them in order. There are three bugs, and two of them give no error at all.
+
+```sql
+SELECT name price FROM products
+WHERE category = "electronics" AND price < 30 AND description = NULL;
+```
+
+<Solution>
+1. `column "electronics" does not exist`: a value needs single quotes.
+2. Now it runs but returns `(0 rows)`: `= NULL` never matches. Use `IS NULL`.
+3. Now it returns two rows, but the only column is headed `price` and holds the names. The missing comma made `name price` mean "`name`, renamed to `price`" (the `AS` is optional).
+
+```sql
+SELECT name, price FROM products
+WHERE category = 'electronics' AND price < 30 AND description IS NULL;
+--  USB-C Cable    |  9.50
+--  Wireless Mouse | 24.99
+```
+</Solution>
+</Exercise>
+
+<Exercise title="Search filters">
+A shop's search page has three filters. Write one query for each, on a fresh `\i shop.sql`:
+
+1. Products whose name contains "set", in any case.
+2. Home or stationery products priced from 5 to 40, both included.
+3. Products added in the first three months of 2026 (January to March).
+
+<Solution>
+```sql
+SELECT name FROM products WHERE name ILIKE '%set%';
+-- Coaster Set
+
+SELECT name, category, price FROM products
+WHERE category IN ('home', 'stationery') AND price BETWEEN 5 AND 40;
+-- Desk Lamp 34.00, Fountain Pen 32.00, Coaster Set 8.00
+
+SELECT name, created_at FROM products
+WHERE created_at >= '2026-01-01' AND created_at < '2026-04-01';
+-- Mechanical Keyboard, USB-C Cable, Desk Lamp, Notebook A5, Monitor Stand
+```
+
+For dates, compare with `>=` the start and `<` the day **after** the end. `BETWEEN '2026-01-01' AND '2026-03-31'` looks right, but `'2026-03-31'` means midnight at the start of that day, so anything added later on 31 March would be missed.
+</Solution>
+</Exercise>

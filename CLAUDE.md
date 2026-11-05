@@ -71,7 +71,7 @@ docs:
 
 - `{`, `}` and `<` in normal prose are read as JSX. Wrap them in backticks.
 - HTML comments `<!-- -->` don't work. Use `{/* comment */}` if you need one.
-- Only `Callout`, `Exercise` and `Solution` exist as components (see `src/components/mdx.tsx`). Don't use others unless your task adds them.
+- Only `Callout`, `Exercise` and `Solution` exist as components (see `src/components/mdx.tsx`). Don't use others unless your task adds them. `Exercise` takes an optional `level="easy|medium|hard"`.
 
 **Module quiz (`<module>/quiz.mdx`, `order: 99`):** a `## Ready to move on?` checklist of 5–8 "I can…" statements, then 8–10 multiple-choice questions in the `quiz` frontmatter field. The exact format is set by the Phase 1.5 quiz task; once that task is done, copy the format from `content/web-foundations/quiz.mdx`.
 
@@ -84,6 +84,17 @@ docs:
 - 1–3 videos per lesson: ideally one short overview (under 15 min) and one in-depth.
 - If you can't find a good verified video, use `videos: []` and add the lesson under `## Needs videos` in `PENDING.md`. An empty list is better than a wrong link.
 
+## Install steps: Mac first
+
+The owner works on a MacBook Air M2 (Apple Silicon, zsh). Whenever a lesson installs, starts or configures a tool:
+
+- Give the macOS command first, written for Apple Silicon (Homebrew lives in `/opt/homebrew`, Intel Macs use `/usr/local`), then one line for Windows and Linux.
+- Prefer `brew install` for command-line tools and `brew install --cask` for apps. For servers, say how to start, stop and check them (`brew services start|stop|list`).
+- Show how to confirm it worked (a `--version` or test command with its real output), and the most likely Mac error with its fix (not on the `PATH`, port taken, keg-only formula).
+- Node comes from nvm at the course version (`nvm install 24`, `nvm alias default 24`). Never tell the learner to `brew install node`, or to use `sudo` with brew or npm.
+- Don't repeat the basics: link to `web-foundations/mac-setup` for the Command Line Tools, Homebrew, nvm, Git/SSH and VS Code.
+- Don't use ports 5000 or 7000 in examples: macOS AirPlay Receiver holds them.
+
 ## Code in lessons must actually run
 
 - Run every non-trivial snippet before publishing. For plain JS/TS: write it in the scratchpad and run it with `node` (Node runs `.ts` files directly).
@@ -95,7 +106,7 @@ docs:
 
 - TypeScript strict, Server Components by default, `"use client"` only where interactivity needs it.
 - The React Compiler is on: don't add `useMemo`/`useCallback`/`memo` for performance.
-- Style with Tailwind using the existing tokens (`accent`, `surface`, `border`, `muted`, `success`, `warning`). Copy patterns from neighbouring components.
+- Follow `UI-UX.md` (design system). Style with Tailwind using the tokens (`accent`, `accent-fg`, `surface`, `surface-2`, `raised`, `border`, `border-strong`, `muted`, `subtle`, `success`, `warning`, `danger`, `info`, `track`), `buttonClass()` from `src/components/ui/button.ts`, and icons from `src/components/course/icons.tsx` (Lucide). No raw hex or Tailwind palette colours in components. Copy patterns from neighbouring components.
 - Lesson progress lives in localStorage via `src/lib/progress.ts` (a `useSyncExternalStore` store). New saved state, such as quiz scores, follows the same pattern in a sibling file under `src/lib/`, with its own versioned key (e.g. `fs-learn-quiz-v1`).
 - Keep `cacheComponents` off (see "Phase 1 notes" in `PENDING.md`).
 - When adding a frontmatter field, update the `Lesson` type in `src/lib/content.ts` **and** the validation in `scripts/check-content.mjs`.

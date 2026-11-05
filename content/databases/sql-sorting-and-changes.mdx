@@ -1,0 +1,274 @@
+---
+title: Sorting, Paging and Changing Data
+summary: "Sort and page query results with ORDER BY, LIMIT and OFFSET, change and remove rows safely with UPDATE, DELETE and BEGIN, and pass user input to SQL through placeholders."
+order: 3
+takeaways:
+  - Rows have no fixed order until you write ORDER BY, and the order can change after any update.
+  - A page of results needs ORDER BY ending in a unique column such as id, then LIMIT and OFFSET.
+  - UPDATE and DELETE change every row that matches WHERE, and without WHERE that means every row in the table.
+  - Run risky statements inside BEGIN, check the result, then ROLLBACK to undo or COMMIT to keep.
+  - RETURNING and the row count tell your API what changed, and a count of 0 usually means a 404.
+  - User input goes into placeholders such as $1 and never into the SQL text, because glued input lets attackers rewrite the query.
+videos:
+  - title: "PostgreSQL Tutorial for Beginners"
+    channel: "freeCodeCamp.org"
+    duration: "2:53:26"
+    url: https://www.youtube.com/watch?v=SpfIwlAYaKk
+  - title: "Running an SQL Injection Attack - Computerphile"
+    channel: "Computerphile"
+    duration: "17:11"
+    url: https://www.youtube.com/watch?v=ciNHn38EyRc
+docs:
+  - title: "PostgreSQL — Sorting rows (ORDER BY)"
+    url: https://www.postgresql.org/docs/current/queries-order.html
+  - title: "PostgreSQL — LIMIT and OFFSET"
+    url: https://www.postgresql.org/docs/current/queries-limit.html
+  - title: "PostgreSQL — Updating data"
+    url: https://www.postgresql.org/docs/current/dml-update.html
+  - title: "PostgreSQL — Deleting data"
+    url: https://www.postgresql.org/docs/current/dml-delete.html
+  - title: "PostgreSQL — Returning data from modified rows"
+    url: https://www.postgresql.org/docs/current/dml-returning.html
+  - title: "PostgreSQL — Transactions tutorial"
+    url: https://www.postgresql.org/docs/current/tutorial-transactions.html
+  - title: "node-postgres — Parameterized queries"
+    url: https://node-postgres.com/features/queries
+  - title: "OWASP — SQL Injection Prevention Cheat Sheet"
+    url: https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html
+---
+
+`databases/sql-basics` covered creating a table, adding rows and picking rows with `WHERE`. A real product list also needs a **sort order** and **pages**, and a real app changes and removes rows. Those are this lesson: `ORDER BY`, `LIMIT`, `OFFSET`, `UPDATE` and `DELETE`, plus the two habits that keep them safe, transactions and placeholders.
+
+Each piece maps onto an API route you have already built: a list `GET` with `?page=` is `ORDER BY` with `LIMIT` and `OFFSET`, `PATCH` is an `UPDATE`, `DELETE` is a `DELETE`. "Paginate this query" and "what is SQL injection?" are both standard interview questions. This lesson uses the `shop` database and `shop.sql` file from `sql-basics`; run `\i shop.sql` to start from the same nine products. Written for PostgreSQL 18, with every output from a real `psql` session.
+
+## Sorting with ORDER BY
+
+Without `ORDER BY`, rows come back in **whatever order is cheapest** for the database. It often looks like insertion order, but you'll see it change after an `UPDATE` below. `ORDER BY` sorts ascending, `DESC` reverses, and further columns break ties:
+
+```text
+shop=# SELECT name, category, price FROM products ORDER BY category, price DESC;
+        name         |  category   | price
+---------------------+-------------+-------
+ Mechanical Keyboard | electronics | 89.99
+ Webcam              | electronics | 59.00
+ Wireless Mouse      | electronics | 24.99
+ USB-C Cable         | electronics |  9.50
+ Monitor Stand       | home        | 45.00
+ Desk Lamp           | home        | 34.00
+ Coaster Set         | home        |  8.00
+ Fountain Pen        | stationery  | 32.00
+ Notebook A5         | stationery  |  4.25
+```
+
+In ascending order, NULLs sort **last** (add `NULLS FIRST` to change that). Rows that tie on every sort column have no fixed order: sorting by `description` twice put the four NULL rows in two different orders across our test sessions.
+
+You can sort by an expression or by a name you gave with `AS`. You can't filter by that name, though, because `WHERE` runs before the `SELECT` list is worked out:
+
+```text
+shop=# SELECT name, price * stock AS stock_value FROM products ORDER BY stock_value DESC LIMIT 3;
+        name         | stock_value
+---------------------+-------------
+ USB-C Cable         |     1330.00
+ Notebook A5         |     1275.00
+ Mechanical Keyboard |     1079.88
+shop=# SELECT name, price * stock AS stock_value FROM products WHERE stock_value > 1000;
+ERROR:  column "stock_value" does not exist
+```
+
+Repeat the expression instead: `WHERE price * stock > 1000`.
+
+## Pages with LIMIT and OFFSET
+
+`LIMIT` caps the number of rows and `OFFSET` skips some first, which gives you pages:
+
+```text
+shop=# SELECT name, price FROM products ORDER BY price LIMIT 3 OFFSET 3;   -- page 2 of 3-per-page
+      name      | price
+----------------+-------
+ Wireless Mouse | 24.99
+ Fountain Pen   | 32.00
+ Desk Lamp      | 34.00
+```
+
+For page `n` of size `s`, use `LIMIT s OFFSET (n - 1) * s`. A page past the end returns `(0 rows)`, not an error. Two rules make paging correct: always `ORDER BY` (otherwise a row can show up on two pages or none), and end the sort with a unique column, as in `ORDER BY price, id`, so ties can't swap between requests. The clauses also have a fixed order: `SELECT … FROM … WHERE … ORDER BY … LIMIT … OFFSET`. Writing `LIMIT` before `ORDER BY` is a `syntax error at or near "ORDER"`.
+
+Deep offsets get slow and shift when rows are added, which is why `node-express/pagination-and-versioning` also teaches cursor paging. In SQL a cursor page is just `WHERE id > 3 ORDER BY id LIMIT 3`.
+
+## UPDATE: changing rows
+
+`UPDATE` sets new values on every row that matches `WHERE`. The right side can use the old value, and `RETURNING` shows the result:
+
+```text
+shop=# UPDATE products SET stock = 25 WHERE id = 3;
+UPDATE 1
+shop=# UPDATE products SET stock = stock + 10, description = '1080p, built-in mic'
+shop-# WHERE id = 8 RETURNING id, name, stock, description;
+ id |  name  | stock |     description
+----+--------+-------+---------------------
+  8 | Webcam |    13 | 1080p, built-in mic
+shop=# UPDATE products SET price = price * 1.10 WHERE category = 'stationery' RETURNING name, price;
+     name     | price
+--------------+-------
+ Notebook A5  |  4.68
+ Fountain Pen | 35.20
+UPDATE 2
+```
+
+`UPDATE 2` is the number of rows changed, and 4.675 was rounded to `4.68` by `numeric(10, 2)`. A `WHERE` that matches nothing is **not an error**: `UPDATE products SET stock = 0 WHERE name = 'webcam'` prints `UPDATE 0` (wrong case). In an API, check that count and answer `404` when it is 0.
+
+Now run `SELECT id, name FROM products;` again. The order is `1, 2, 5, 6, 9, 3, 8, 4, 7`: the updated rows moved to the end, because Postgres writes a new copy of a row when it changes. That is the order you were warned about.
+
+## DELETE, and the missing WHERE
+
+`DELETE` removes the rows that match:
+
+```text
+shop=# DELETE FROM products WHERE stock = 0 RETURNING id, name;
+ id |      name
+----+----------------
+  6 | Wireless Mouse
+DELETE 1
+```
+
+<Callout type="warning" title="No WHERE means every row">
+`UPDATE products SET stock = 0;` prints `UPDATE 9`, and `DELETE FROM products;` empties the table. Psql doesn't ask "are you sure?". When a statement is risky, start a **transaction** with `BEGIN;`, run it, check with a `SELECT`, then `ROLLBACK;` to undo it or `COMMIT;` to keep it. The indexes and transactions lesson explains them properly.
+</Callout>
+
+```text
+shop=# BEGIN;
+shop=*# UPDATE products SET stock = 0;
+UPDATE 8
+shop=*# ROLLBACK;
+shop=# SELECT name, stock FROM products ORDER BY id LIMIT 2;   -- Mechanical Keyboard 12, USB-C Cable 140
+```
+
+The `*` in the prompt tells you a transaction is open. Keep three similar words apart: `DELETE FROM products` removes rows one by one (with `WHERE` and `RETURNING` available), `TRUNCATE products` empties the whole table at once, and `DROP TABLE products` removes the table itself.
+
+## From SQL to your API
+
+Your API will send these statements from Node, with values that come from the request. The one rule that matters from day one: **never glue user input into the SQL text**. Here it is with `pg` 8.23, the plain Node driver for Postgres (in a new folder: `npm init -y`, then `npm install pg`), against our table:
+
+```js
+// inject.mjs
+import pg from "pg";
+const pool = new pg.Pool({ connectionString: "postgresql://localhost:5432/shop" });
+
+const search = "x' OR '1'='1"; // what an attacker types into the search box
+
+// WRONG: the input becomes part of the SQL text
+const glued = `SELECT name FROM products WHERE name = '${search}'`;
+console.log(glued);
+console.log((await pool.query(glued)).rowCount, "rows");
+
+// RIGHT: $1 is a placeholder, the value travels separately
+const safe = await pool.query("SELECT name FROM products WHERE name = $1", [search]);
+console.log(safe.rowCount, "rows");
+
+await pool.end();
+```
+
+```text
+SELECT name FROM products WHERE name = 'x' OR '1'='1'
+9 rows
+0 rows
+```
+
+The quote in the input closed the string and turned the rest into SQL, so the condition became always true. That is **SQL injection**, and with `DELETE` instead of `SELECT` it wipes a table. With `$1` the database receives the value as data, never as code. Prisma, later in this module, builds every query this way for you.
+
+<Exercise title="Predict the output">
+Starting from a fresh `\i shop.sql`, what does each statement print? Then make the third statement impossible to get wrong again.
+
+```sql
+SELECT name FROM products WHERE description <> 'Medium nib' ORDER BY name LIMIT 2;
+UPDATE products SET stock = stock - 5 WHERE stock < 10;
+SELECT name, stock FROM products WHERE stock < 10 ORDER BY stock, id;
+```
+
+<Solution>
+The first `SELECT` prints `Coaster Set` and `Desk Lamp`. The rows with no description are left out (NULL is never "not equal"), which leaves Mechanical Keyboard, Desk Lamp, Monitor Stand and Coaster Set; sorted by name, the first two are Coaster Set and Desk Lamp.
+
+The `UPDATE` prints `UPDATE 4`: Desk Lamp, Monitor Stand, Wireless Mouse and Webcam all had fewer than 10.
+
+The last `SELECT` shows the damage: Desk Lamp `-5`, Wireless Mouse `-5`, Webcam `-2`, Monitor Stand `2`. Nothing stopped stock from going below zero. Add the rule to the table, and the same `UPDATE` is refused as a whole, with no row changed:
+
+```sql
+ALTER TABLE products ADD CHECK (stock >= 0);
+UPDATE products SET stock = stock - 5 WHERE stock < 10;
+-- ERROR:  new row for relation "products" violates check constraint "products_stock_check"
+```
+
+(Run `\i shop.sql` first: `ADD CHECK` refuses to add a rule that existing rows already break.)
+</Solution>
+</Exercise>
+
+<Exercise title="Fix the bug">
+This should return the most expensive product that is in stock. Fix it so it runs and gives the right answer.
+
+```sql
+SELECT name, price FROM products WHERE stock > 0 LIMIT 1 ORDER BY price;
+```
+
+<Solution>
+It fails with `syntax error at or near "ORDER"`, because `ORDER BY` must come before `LIMIT`. Swapping them runs, but returns Notebook A5 at 4.25: ascending order puts the cheapest first. Sort descending:
+
+```sql
+SELECT name, price FROM products WHERE stock > 0 ORDER BY price DESC LIMIT 1;
+-- Mechanical Keyboard | 89.99
+```
+</Solution>
+</Exercise>
+
+<Exercise title="A product list page">
+The shop's product list shows in-stock products only, cheapest first, 2 per page. Write the query for page 3 so that ties in price can never move a product between pages. Then write the `pg` call for any `page`, with the numbers passed as placeholders.
+
+<Solution>
+```sql
+SELECT name, price FROM products
+WHERE stock > 0
+ORDER BY price, id
+LIMIT 2 OFFSET 4;
+-- Monitor Stand 45.00, Webcam 59.00
+```
+
+```js
+// page.mjs
+import pg from "pg";
+const pool = new pg.Pool({ connectionString: "postgresql://localhost:5432/shop" });
+
+async function listProducts(page, pageSize = 2) {
+  const { rows } = await pool.query(
+    "SELECT name, price FROM products WHERE stock > 0 ORDER BY price, id LIMIT $1 OFFSET $2",
+    [pageSize, (page - 1) * pageSize],
+  );
+  return rows;
+}
+
+console.log(await listProducts(3));
+// [ { name: 'Monitor Stand', price: '45.00' }, { name: 'Webcam', price: '59.00' } ]
+await pool.end();
+```
+
+`id` is unique, so `ORDER BY price, id` gives every row one fixed place. Notice `price` arrives as the string `'45.00'`: `pg` returns `numeric` as text on purpose, because a JavaScript `number` would bring back the float problem from `sql-basics`.
+</Solution>
+</Exercise>
+
+<Exercise title="Archive instead of delete">
+Deleting a product breaks old orders that point at it, so many apps **archive** rows instead (often called a soft delete). In one transaction: add a column `archived` (boolean, required, default `false`), archive every product with no stock that was added before May 2026 and print their names, then list the products that are still active by name. Finally, bring the Desk Lamp back.
+
+<Solution>
+```sql
+BEGIN;
+ALTER TABLE products ADD COLUMN archived boolean NOT NULL DEFAULT false;
+UPDATE products SET archived = true
+WHERE stock = 0 AND created_at < '2026-05-01'
+RETURNING name;                       -- Desk Lamp, Wireless Mouse
+SELECT name, stock FROM products WHERE archived = false ORDER BY name;   -- 7 rows
+COMMIT;
+
+UPDATE products SET archived = false WHERE name = 'Desk Lamp' RETURNING name, archived;
+-- Desk Lamp | f
+```
+
+`ADD COLUMN` with a `DEFAULT` fills existing rows with `false`, so `NOT NULL` is satisfied straight away. Even `ALTER TABLE` can be rolled back in Postgres. Every list query in the app now needs `WHERE archived = false`, which is the cost of soft deletes.
+</Solution>
+</Exercise>
